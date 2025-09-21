@@ -4,25 +4,32 @@ defmodule IghEthercat.Master do
 
   alias IghEthercat.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains]
+  defstruct [:master_ref, :slaves, :domains, :update_interval]
 
   @type t :: %__MODULE__{
           master_ref: reference(),
           slaves: [Slave.t()],
-          domains: [Domain.t()]
+          domains: [Domain.t()],
+          update_interval: integer()
         }
-
-  @impl true
-  def callback_mode(), do: [:handle_event_function]
 
   # Client API
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
-    :gen_statem.start_link(__MODULE__, {master_index}, name: __MODULE__)
+    update_interval = Keyword.get(opts, :update_interval, 1_000)
+    :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
-  def scan(master) do
-    :gen_statem.call(master, :scan)
+  def sync_slaves(master) do
+    :gen_statem.call(master, :sync_slaves)
+  end
+
+  def lock_hardware(master) do
+    :gen_statem.call(master, :lock_hardware)
+  end
+
+  def create_domain(master, name) do
+    :gen_statem.call(master, {:create_domain, name})
   end
 
   def get_ref(master) do
@@ -31,31 +38,56 @@ defmodule IghEthercat.Master do
 
   def test do
     {:ok, master} = start_link()
-    scan(master)
+    sync_slaves(master)
+    master
   end
 
+  # Callbacks
   @impl true
-  def init({master_index}) do
+  def callback_mode(), do: [:state_functions, :state_enter]
+
+  @impl true
+  def init({master_index, update_interval}) do
     data = %__MODULE__{
       master_ref: nil,
       domains: [],
-      slaves: []
+      slaves: [],
+      update_interval: update_interval
     }
-
     actions = [{:next_event, :internal, {:connect, master_index}}]
-    {:ok, :stale, data, actions}
+    {:ok, :disconnected, data, actions}
   end
 
-  @impl true
-  def handle_event(:internal, {:connect, master_index}, :stale, data) do
+  # State: disconnected
+  def disconnected(:enter, _old_state, data) do
+    {:next_state, :disconnected, data}
+  end
+
+  def disconnected(:internal, {:connect, master_index}, data) do
     case Nif.request_master(master_index) do
-      ref ->
-        Process.send_after(self(), :update_master_state, 1_000)
-        {:keep_state, %{data | master_ref: ref}}
+      {:ok, ref} ->
+        {:next_state, :stale, %{data | master_ref: ref}}
+      :error ->
+        {:keep_state_and_data, []}
     end
   end
 
-  def handle_event({:call, from}, :scan, :stale, data) do
+  def disconnected({:call, from}, _event_content, data) do
+    actions = [{:reply, from, {:error, :disconnected}}]
+    {:keep_state_and_data, actions}
+  end
+
+  def disconnected(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :disconnected, data)
+  end
+
+  # State: stale
+  def stale(:enter, _old_state, data) do
+    actions = [{:state_timeout, data.update_interval, :update_master_state}]
+    {:next_state, :stale, data, actions}
+  end
+
+  def stale({:call, from}, :get_slaves, data) do
     master_state = Nif.get_master_state(data.master_ref)
 
     slaves =
@@ -69,63 +101,124 @@ defmodule IghEthercat.Master do
             pdo = Nif.master_get_pdo(data.master_ref, slave_position, sync_index, pos)
 
             for entry_pos <- create_range(pdo.n_entries) do
-              pdo_entry =
-                Nif.master_get_pdo_entry(
-                  data.master_ref,
-                  slave_position,
-                  sync_index,
-                  pos,
-                  entry_pos
-                )
+              Nif.master_get_pdo_entry(
+                data.master_ref,
+                slave_position,
+                sync_index,
+                pos,
+                entry_pos
+              )
             end
           end
         end
       end
 
     actions = [{:reply, from, slaves}]
+    {:next_state, :ready, %{data | slaves: slaves}, actions}
+  end
 
+  def stale({:call, from}, :sync_slaves, data) do
+    master_state = Nif.get_master_state(data.master_ref)
+    slaves =
+      Enum.map(create_range(master_state.slaves_responding), fn slave_position ->
+        Slave.start_link(slave_position)
+      end)
+    actions = [{:reply, from, :ok}]
+    {:next_state, :ready, %{data | slaves: slaves}, actions}
+  end
+
+  def stale(:state_timeout, :update_master_state, data) do
+    master_state = Nif.get_master_state(data.master_ref)
+    |> IO.inspect(label: "Stale")
+
+    if master_state.slaves_responding == length(data.slaves) and master_state.slaves_responding > 0 do
+      {:next_state, :ready, data}
+    else
+      actions = [{:state_timeout, data.update_interval, :update_master_state}]
+      {:keep_state_and_data, actions}
+    end
+  end
+
+  def stale(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :stale, data)
+  end
+
+  # State: ready
+  def ready(:enter, _old_state, data) do
+    actions = [{:state_timeout, data.update_interval, :update_master_state}]
+    {:next_state, :ready, data, actions}
+  end
+
+  def ready({:call, from}, :lock_hardware, _data) do
+    actions = [{:reply, from, :already_locked}]
     {:keep_state_and_data, actions}
   end
 
-  def handle_event({:call, from}, :get_ref, _state, data) do
+  def ready({:call, from}, {:create_domain, name}, data) do
+    domain_ref = Nif.master_create_domain(data.master_ref)
+    Domain.start_link(domain_ref, name)
+    {:keep_state_and_data, []} # Note: Consider adding {:reply, from, domain_ref}
+  end
+
+  def ready({:call, from}, :get_ref, data) do
     actions = [{:reply, from, data.master_ref}]
     {:keep_state_and_data, actions}
   end
 
-  def handle_event(:info, :update_master_state, :stale, data) do
-    Process.send_after(self(), :update_master_state, 1_000)
+  def ready(:state_timeout, :update_master_state, data) do
     master_state = Nif.get_master_state(data.master_ref)
+    |> IO.inspect(label: "Ready")
 
     if master_state.slaves_responding == length(data.slaves) do
-      {:next_state, :synced, data}
-    else
-      {:keep_state_and_data, []}
-    end
-  end
-
-  def handle_event(:info, :update_master_state, :synced, data) do
-    Process.send_after(self(), :update_master_state, 1_000)
-    master_state = Nif.get_master_state(data.master_ref)
-
-    if master_state.slaves_responding == length(data.slaves) do
-      {:keep_state_and_data, []}
+      actions = [{:state_timeout, data.update_interval, :update_master_state}]
+      {:keep_state_and_data, actions}
     else
       # TODO kill current slaves
       {:next_state, :stale, %{data | slaves: []}}
     end
   end
 
-  def handle_event(:info, :update_master_state, :operational, data) do
-    Process.send_after(self(), :update_master_state, 1_000)
+  def ready(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :ready, data)
+  end
+
+  # State: operational
+  def operational(:enter, _old_state, data) do
+    {:next_state, :operational, data}
+  end
+
+  def operational(:state_timeout, :update_master_state, data) do
     master_state = Nif.get_master_state(data.master_ref)
 
     if master_state.slaves_responding == length(data.slaves) do
-      {:keep_state_and_data, []}
+      actions = [{:state_timeout, data.update_interval, :update_master_state}]
+      {:keep_state_and_data, actions}
     else
       # TODO kill current slaves
       # TODO deactivate master
-      {:next_state, :stale, %{data | slaves: []}}
+      actions = [{:state_timeout, data.update_interval, :update_master_state}]
+      {:next_state, :stale, %{data | slaves: []}, actions}
     end
+  end
+
+  def operational(:info, {:master_state_changed, master_state}, data) do
+    IO.inspect(master_state, label: "Master State Changed")
+    {:keep_state_and_data, []}
+  end
+
+  def operational({:call, from}, :get_ref, data) do
+    actions = [{:reply, from, data.master_ref}]
+    {:keep_state_and_data, actions}
+  end
+
+  def operational(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :operational, data)
+  end
+
+  # Common catch-all handler
+  defp handle_unexpected(event_type, event_content, state, data) do
+    Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
+    {:keep_state_and_data, []}
   end
 
   defp create_range(0), do: []

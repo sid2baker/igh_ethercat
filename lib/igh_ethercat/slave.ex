@@ -34,7 +34,7 @@ defmodule IghEthercat.Slave do
 
   # Client API
   def start_link(position) do
-    :gen_statem.start_link(__MODULE__, {position})
+    :gen_statem.start_link(__MODULE__, {position}, [])
   end
 
   def test do

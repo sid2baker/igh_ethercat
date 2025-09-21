@@ -35,7 +35,7 @@ defmodule IghEthercat.Nif do
       master_get_pdo: [],
       master_get_pdo_entry: [],
       # maybe use dirty_cup/dirty_io
-      cyclic_task: [:threaded]
+      listen_bus_changes: [:threaded]
     ],
     resources: [
       :MasterResource,
@@ -49,16 +49,9 @@ defmodule IghEthercat.Nif do
   const root = @import("root");
   const ecrt = @cImport(@cInclude("ecrt.h"));
 
-  pub const MasterResource = beam.Resource(*ecrt.ec_master_t, root, .{ .Callbacks = MasterResourceCallbacks });
+  pub const MasterResource = beam.Resource(*ecrt.ec_master_t, root, .{});
   pub const DomainResource = beam.Resource(*ecrt.ec_domain_t, root, .{});
   pub const SlaveConfigResource = beam.Resource(*ecrt.ec_slave_config_t, root, .{});
-
-  pub const MasterResourceCallbacks = struct {
-      pub fn dtor(s: **ecrt.ec_master_t) void {
-          std.debug.print("dtor called: {}\n", .{s.*});
-          ecrt.ecrt_release_master(s.*);
-      }
-  };
 
   const MasterError = error{
       MasterNotFound,
@@ -71,11 +64,21 @@ defmodule IghEthercat.Nif do
   };
 
   // this is needed since zig doesn't support bitfields. See https://github.com/ziglang/zig/issues/1499
-  const ec_master_state_t = packed struct {
+  const packed_ec_master_state_t = packed struct {
       slaves_responding: u32,
       al_states: u4,
       link_up: u1,
       padding: u27, // 27 bits to align to 64 bits (8 bytes)
+  };
+
+  // al_state_* turns true if at least one slave is in the specified state
+  const master_state_t = struct {
+      slaves_responding: u32,
+      al_state_init: u1,
+      al_state_preop: u1,
+      al_state_safeop: u1,
+      al_state_op: u1,
+      link_up: u1
   };
 
   const ec_slave_config_state_t = packed struct {
@@ -89,9 +92,13 @@ defmodule IghEthercat.Nif do
       return ecrt.ecrt_version_magic();
   }
 
-  pub fn request_master(index: u32) !MasterResource {
-      const master = ecrt.ecrt_request_master(index) orelse return MasterError.MasterNotFound;
-      return MasterResource.create(master, .{ .released = false });
+  pub fn request_master(index: u32) !beam.term {
+      if (ecrt.ecrt_request_master(index)) |master| {
+          const resource = try MasterResource.create(master, .{});
+          return beam.make(.{ .ok, resource }, .{});
+      } else {
+          return beam.make_error_atom(.{});
+      }
   }
 
   pub fn master_activate(master: MasterResource) !void {
@@ -108,12 +115,24 @@ defmodule IghEthercat.Nif do
   }
 
   pub fn get_master_state(master: MasterResource) !beam.term {
-      var state: ec_master_state_t = undefined;
-      const result = ecrt.ecrt_master_state(master.unpack(), @ptrCast(&state));
+      const master_state: master_state_t = try do_get_master_state(master.unpack());
+      return beam.make(master_state, .{});
+  }
+
+  fn do_get_master_state(master: *ecrt.ec_master_t) !master_state_t {
+      var packed_state: packed_ec_master_state_t = undefined;
+      const result = ecrt.ecrt_master_state(master, @ptrCast(&packed_state));
       if (result != 0) {
           return MasterError.MasterNotFound;
       }
-      return beam.make(state, .{ .as = .map });
+      return master_state_t{
+          .slaves_responding = packed_state.slaves_responding,
+          .al_state_init = @truncate(packed_state.al_states >> 0),
+          .al_state_preop = @truncate(packed_state.al_states >> 1),
+          .al_state_safeop = @truncate(packed_state.al_states >> 2),
+          .al_state_op = @truncate(packed_state.al_states >> 3),
+          .link_up = packed_state.link_up,
+      };
   }
 
   pub fn master_create_domain(master: MasterResource) !DomainResource {
@@ -250,122 +269,25 @@ defmodule IghEthercat.Nif do
       return beam.make(pdo_entry, .{});
   }
 
-  pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_pids: []beam.pid, domain_resources: []DomainResource, slave_pids: []beam.pid, slave_resources: []SlaveConfigResource) !void {
-      if (domain_pids.len != domain_resources.len or slave_pids.len != slave_resources.len) {
-          return error.MismatchedSliceLengths;
+  pub fn listen_bus_changes(pid: beam.pid, master_resource: MasterResource, interval: u64) !void {
+      // following code triggered when process is killed.
+      defer {
+        beam.send(pid, .killed, .{}) catch {};
       }
 
       const master = master_resource.unpack();
-      var master_state: ec_master_state_t = undefined;
-      var prev_master_state: ec_master_state_t = undefined;
+      var state: master_state_t = try do_get_master_state(master);
+      var last_state: master_state_t = undefined;
 
-      var domains = std.ArrayList(struct {
-          domain: *ecrt.ec_domain_t,
-          state: ecrt.ec_domain_state_t,
-          prev_data: []u8,
-          data: []u8,
-      }).init(beam.allocator);
-      defer domains.deinit();
-
-      for (domain_resources) |domain_resource| {
-          const domain = domain_resource.unpack();
-          const size = ecrt.ecrt_domain_size(domain);
-          const data_ptr = ecrt.ecrt_domain_data(domain);
-          if (data_ptr == null or size == 0) {
-              return MasterError.InvalidDomainData;
+      while(true) {
+          if (!std.meta.eql(last_state, state)) {
+              _ = try beam.send(pid, .{ .master_state_changed, state }, .{});
           }
-          // Memory is handled by ecrt.h
-          const data = data_ptr[0..size];
-          const prev_data: []u8 = beam.allocator.alloc(u8, size) catch return error.OutOfMemory;
-          @memcpy(prev_data, data);
+          last_state = state;
+          state = try do_get_master_state(master);
 
-          try domains.append(.{ .domain = domain, .state = undefined, .prev_data = prev_data, .data = data });
-      }
-
-      var slaves = std.ArrayList(struct {
-          slave: *ecrt.ec_slave_config_t,
-          state: ec_slave_config_state_t,
-      }).init(beam.allocator);
-      defer slaves.deinit();
-
-      for (slave_resources) |slave_resource| {
-          try slaves.append(.{ .slave = slave_resource.unpack(), .state = undefined });
-      }
-
-      defer {
-          beam.send(master_pid, .killed, .{}) catch {};
-      }
-
-      while (true) {
-          _ = ecrt.ecrt_master_receive(master);
-
-          _ = ecrt.ecrt_master_state(master, @ptrCast(&master_state));
-
-          if (master_state.slaves_responding != prev_master_state.slaves_responding) {
-              _ = try beam.send(master_pid, .{ .slaves_responding, master_state.slaves_responding }, .{});
-          }
-          if (master_state.al_states != prev_master_state.al_states) {
-              _ = try beam.send(master_pid, .{ .al_states, master_state.al_states }, .{});
-          }
-          if (master_state.link_up != prev_master_state.link_up) {
-              _ = try beam.send(master_pid, .{ .link_up, master_state.link_up }, .{});
-          }
-          prev_master_state = master_state;
-
-          // Process all domains
-          for (domains.items, 0..) |tuple, i| {
-              const domain_pid = domain_pids[i];
-              const domain = tuple.domain;
-              const prev_state = tuple.state;
-              var state: ecrt.ec_domain_state_t = undefined;
-              const prev_data = tuple.prev_data;
-              const data = tuple.data;
-
-              _ = ecrt.ecrt_domain_process(domain);
-              _ = ecrt.ecrt_domain_state(domain, &state);
-
-              if (state.working_counter != prev_state.working_counter) {
-                  _ = try beam.send(domain_pid, .{ .wc_changed, state.working_counter }, .{});
-              }
-              if (state.wc_state != prev_state.wc_state) {
-                  _ = try beam.send(domain_pid, .{ .state_changed, state.wc_state }, .{});
-              }
-
-              if (!std.mem.eql(u8, data, prev_data)) {
-                  _ = try beam.send(domain_pid, .{ .data_changed, data }, .{});
-                  @memcpy(prev_data, data);
-              }
-
-              domains.items[i] = .{ .domain = domain, .state = state, .prev_data = prev_data, .data = data };
-
-              _ = ecrt.ecrt_domain_queue(domain);
-          }
-
-          // Process all slaves
-          for (slaves.items, 0..) |tuple, i| {
-              const slave_pid = slave_pids[i];
-              const slave = tuple.slave;
-              const prev_state = tuple.state;
-              var state: ec_slave_config_state_t = undefined;
-
-              _ = ecrt.ecrt_slave_config_state(slave, @ptrCast(&state));
-
-              if (state.al_state != prev_state.al_state) {
-                  _ = try beam.send(slave_pid, .{ .state_changed, state.al_state }, .{});
-              }
-              if (state.online != prev_state.online) {
-                  _ = try beam.send(slave_pid, .{ .online_changed, state.online }, .{});
-              }
-              if (state.operational != prev_state.operational) {
-                  _ = try beam.send(slave_pid, .{ .operational_changed, state.operational }, .{});
-              }
-
-              slaves.items[i] = .{ .slave = slave, .state = state };
-          }
-
-          _ = ecrt.ecrt_master_send(master);
+          std.time.sleep(interval * std.time.ns_per_ms);
           try beam.yield();
-          std.time.sleep(1_000_000_000);
       }
   }
   """
