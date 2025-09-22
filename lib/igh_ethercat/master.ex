@@ -20,16 +20,16 @@ defmodule IghEthercat.Master do
     :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
+  def connect(master) do
+    :gen_statem.call(master, :connect)
+  end
+
   def request_nif(master, {request_fn, request_args}) do
     :gen_statem.call(master, {:request_nif, request_fn, request_args})
   end
 
   def sync_slaves(master) do
     :gen_statem.call(master, :sync_slaves)
-  end
-
-  def lock_hardware(master) do
-    :gen_statem.call(master, :lock_hardware)
   end
 
   def create_domain(master, name) do
@@ -46,45 +46,49 @@ defmodule IghEthercat.Master do
 
   @impl true
   def init({master_index, update_interval}) do
-    data = %__MODULE__{
-      master_ref: nil,
-      domains: [],
-      slaves: [],
-      update_interval: update_interval
-    }
-
-    actions = [{:next_event, :internal, {:connect, master_index}}]
-    {:ok, :disconnected, data, actions}
-  end
-
-  # State: disconnected
-  def disconnected(:enter, _old_state, data) do
-    {:next_state, :disconnected, data}
-  end
-
-  def disconnected(:internal, {:connect, master_index}, data) do
     case Nif.request_master(master_index) do
       {:ok, ref} ->
-        {:next_state, :stale, %{data | master_ref: ref}}
+        data = %__MODULE__{
+          master_ref: ref,
+          domains: [],
+          slaves: [],
+          update_interval: update_interval
+        }
+
+        {:ok, :offline, data}
 
       :error ->
-        {:keep_state_and_data, []}
+        {:error, :failed_to_create_master}
     end
   end
 
-  def disconnected({:call, from}, _event_content, data) do
-    actions = [{:reply, from, {:error, :disconnected}}]
+  # State: offline
+  def offline(:enter, _old_state, data) do
+    :keep_state_and_data
+  end
+
+  def offline({:call, from}, :connect, data) do
+    master_state = Nif.get_master_state(data.master_ref)
+    if master_state.link_up == 1 do
+      {:next_state, :stale, data, [{:reply, from, :ok}]}
+    else
+      {:keep_state_and_data, [{:reply, from, {:error, :link_down}}]}
+    end
+  end
+
+  def offline({:call, from}, _event_content, data) do
+    actions = [{:reply, from, {:error, :offline}}]
     {:keep_state_and_data, actions}
   end
 
-  def disconnected(event_type, event_content, data) do
-    handle_unexpected(event_type, event_content, :disconnected, data)
+  def offline(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :offline, data)
   end
 
   # State: stale
   def stale(:enter, _old_state, data) do
     actions = [{:state_timeout, data.update_interval, :update_master_state}]
-    {:next_state, :stale, data, actions}
+    {:keep_state_and_data, actions}
   end
 
   def stale({:call, from}, :get_slaves, data) do
@@ -114,7 +118,7 @@ defmodule IghEthercat.Master do
       end
 
     actions = [{:reply, from, slaves}]
-    {:next_state, :ready, %{data | slaves: slaves}, actions}
+    {:next_state, :synced, %{data | slaves: slaves}, actions}
   end
 
   def stale({:call, from}, :sync_slaves, data) do
@@ -127,7 +131,7 @@ defmodule IghEthercat.Master do
       end)
 
     actions = [{:reply, from, {:ok, slaves}}]
-    {:next_state, :ready, %{data | slaves: slaves}, actions}
+    {:next_state, :synced, %{data | slaves: slaves}, actions}
   end
 
   def stale(:state_timeout, :update_master_state, data) do
@@ -137,7 +141,7 @@ defmodule IghEthercat.Master do
 
     if master_state.slaves_responding == length(data.slaves) and
          master_state.slaves_responding > 0 do
-      {:next_state, :ready, data}
+      {:next_state, :synced, data}
     else
       actions = [{:state_timeout, data.update_interval, :update_master_state}]
       {:keep_state_and_data, actions}
@@ -148,36 +152,31 @@ defmodule IghEthercat.Master do
     handle_unexpected(event_type, event_content, :stale, data)
   end
 
-  # State: ready
-  def ready(:enter, _old_state, data) do
+  # State: :synced
+  def synced(:enter, _old_state, data) do
     actions = [{:state_timeout, data.update_interval, :update_master_state}]
-    {:next_state, :ready, data, actions}
+    {:keep_state_and_data, actions}
   end
 
-  def ready({:call, from}, {:request_nif, request_fn, request_args}, data) do
+  def synced({:call, from}, {:request_nif, request_fn, request_args}, data) do
     result = apply(Nif, request_fn, [data.master_ref | request_args])
     actions = [{:reply, from, result}]
     {:keep_state_and_data, actions}
   end
 
-  def ready({:call, from}, :lock_hardware, _data) do
-    actions = [{:reply, from, :already_locked}]
-    {:keep_state_and_data, actions}
-  end
-
-  def ready({:call, from}, {:create_domain, name}, data) do
+  def synced({:call, from}, {:create_domain, name}, data) do
     domain_ref = Nif.master_create_domain(data.master_ref)
     Domain.start_link(domain_ref, name)
     # Note: Consider adding {:reply, from, domain_ref}
     {:keep_state_and_data, []}
   end
 
-  def ready({:call, from}, :get_ref, data) do
+  def synced({:call, from}, :get_ref, data) do
     actions = [{:reply, from, data.master_ref}]
     {:keep_state_and_data, actions}
   end
 
-  def ready(:state_timeout, :update_master_state, data) do
+  def synced(:state_timeout, :update_master_state, data) do
     master_state =
       Nif.get_master_state(data.master_ref)
       |> IO.inspect(label: "Ready")
@@ -191,13 +190,13 @@ defmodule IghEthercat.Master do
     end
   end
 
-  def ready(event_type, event_content, data) do
-    handle_unexpected(event_type, event_content, :ready, data)
+  def synced(event_type, event_content, data) do
+    handle_unexpected(event_type, event_content, :synced, data)
   end
 
   # State: operational
   def operational(:enter, _old_state, data) do
-    {:next_state, :operational, data}
+    :keep_state_and_data
   end
 
   def operational(:state_timeout, :update_master_state, data) do
