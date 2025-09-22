@@ -20,6 +20,10 @@ defmodule IghEthercat.Master do
     :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
+  def request_nif(master, {request_fn, request_args}) do
+    :gen_statem.call(master, {:request_nif, request_fn, request_args})
+  end
+
   def sync_slaves(master) do
     :gen_statem.call(master, :sync_slaves)
   end
@@ -36,12 +40,6 @@ defmodule IghEthercat.Master do
     :gen_statem.call(master, :get_ref)
   end
 
-  def test do
-    {:ok, master} = start_link()
-    sync_slaves(master)
-    master
-  end
-
   # Callbacks
   @impl true
   def callback_mode(), do: [:state_functions, :state_enter]
@@ -54,6 +52,7 @@ defmodule IghEthercat.Master do
       slaves: [],
       update_interval: update_interval
     }
+
     actions = [{:next_event, :internal, {:connect, master_index}}]
     {:ok, :disconnected, data, actions}
   end
@@ -67,6 +66,7 @@ defmodule IghEthercat.Master do
     case Nif.request_master(master_index) do
       {:ok, ref} ->
         {:next_state, :stale, %{data | master_ref: ref}}
+
       :error ->
         {:keep_state_and_data, []}
     end
@@ -119,19 +119,24 @@ defmodule IghEthercat.Master do
 
   def stale({:call, from}, :sync_slaves, data) do
     master_state = Nif.get_master_state(data.master_ref)
+
     slaves =
       Enum.map(create_range(master_state.slaves_responding), fn slave_position ->
-        Slave.start_link(slave_position)
+        {:ok, slave} = Slave.create(self(), slave_position)
+        slave
       end)
-    actions = [{:reply, from, :ok}]
+
+    actions = [{:reply, from, {:ok, slaves}}]
     {:next_state, :ready, %{data | slaves: slaves}, actions}
   end
 
   def stale(:state_timeout, :update_master_state, data) do
-    master_state = Nif.get_master_state(data.master_ref)
-    |> IO.inspect(label: "Stale")
+    master_state =
+      Nif.get_master_state(data.master_ref)
+      |> IO.inspect(label: "Stale")
 
-    if master_state.slaves_responding == length(data.slaves) and master_state.slaves_responding > 0 do
+    if master_state.slaves_responding == length(data.slaves) and
+         master_state.slaves_responding > 0 do
       {:next_state, :ready, data}
     else
       actions = [{:state_timeout, data.update_interval, :update_master_state}]
@@ -149,6 +154,12 @@ defmodule IghEthercat.Master do
     {:next_state, :ready, data, actions}
   end
 
+  def ready({:call, from}, {:request_nif, request_fn, request_args}, data) do
+    result = apply(Nif, request_fn, [data.master_ref | request_args])
+    actions = [{:reply, from, result}]
+    {:keep_state_and_data, actions}
+  end
+
   def ready({:call, from}, :lock_hardware, _data) do
     actions = [{:reply, from, :already_locked}]
     {:keep_state_and_data, actions}
@@ -157,7 +168,8 @@ defmodule IghEthercat.Master do
   def ready({:call, from}, {:create_domain, name}, data) do
     domain_ref = Nif.master_create_domain(data.master_ref)
     Domain.start_link(domain_ref, name)
-    {:keep_state_and_data, []} # Note: Consider adding {:reply, from, domain_ref}
+    # Note: Consider adding {:reply, from, domain_ref}
+    {:keep_state_and_data, []}
   end
 
   def ready({:call, from}, :get_ref, data) do
@@ -166,8 +178,9 @@ defmodule IghEthercat.Master do
   end
 
   def ready(:state_timeout, :update_master_state, data) do
-    master_state = Nif.get_master_state(data.master_ref)
-    |> IO.inspect(label: "Ready")
+    master_state =
+      Nif.get_master_state(data.master_ref)
+      |> IO.inspect(label: "Ready")
 
     if master_state.slaves_responding == length(data.slaves) do
       actions = [{:state_timeout, data.update_interval, :update_master_state}]

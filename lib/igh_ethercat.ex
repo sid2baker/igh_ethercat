@@ -1,18 +1,10 @@
 defmodule IghEthercat do
-  @moduledoc """
-  Documentation for `IghEthercat`.
-  """
+  alias IghEthercat.{Master, Slave}
 
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> IghEthercat.hello()
-      :world
-
-  """
-  def hello do
-    :world
+  def test do
+    {:ok, master} = Master.start_link()
+    {:ok, [slave1, slave2]} = Master.sync_slaves(master)
+    IO.inspect(Slave.get_pdos(slave2, 0))
+    master
   end
 end
