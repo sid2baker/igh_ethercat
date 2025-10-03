@@ -4,12 +4,13 @@ defmodule IghEthercat.Master do
 
   alias IghEthercat.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains, :update_interval]
+  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval]
 
   @type t :: %__MODULE__{
           master_ref: reference(),
           slaves: [Slave.t()],
           domains: [Domain.t()],
+          task_pid: pid(),
           update_interval: integer() # in ms
         }
 
@@ -56,6 +57,7 @@ defmodule IghEthercat.Master do
           master_ref: ref,
           domains: [],
           slaves: [],
+          task_pid: nil,
           update_interval: update_interval
         }
 
@@ -210,32 +212,17 @@ defmodule IghEthercat.Master do
   # State: operational
   def operational(:enter, _old_state, data) do
     Nif.master_activate(data.master_ref)
-    actions = [{:state_timeout, 1000, :cyclic_task}]
-    {:keep_state_and_data, actions}
-  end
+    parent_pid = self()
 
-  def operational(:state_timeout, :update_master_state, data) do
-    master_state = Nif.get_master_state(data.master_ref)
+    domain_configs = Enum.map(data.domains, fn domain ->
+      %{resource: domain, interval: 1}
+    end)
 
-    if master_state.slaves_responding == length(data.slaves) do
-      actions = [{:state_timeout, data.update_interval, :update_master_state}]
-      {:keep_state_and_data, actions}
-    else
-      # TODO kill current slaves
-      # TODO deactivate master
-      actions = [{:state_timeout, data.update_interval, :update_master_state}]
-      {:next_state, :stale, %{data | slaves: []}, actions}
-    end
-  end
-
-  def operational(:state_timeout, :cyclic_task, data) do
-    Nif.master_receive(data.master_ref)
-    Nif.domain_process(hd(data.domains))
-    Nif.domain_queue(hd(data.domains))
-    Nif.master_send(data.master_ref)
-    IO.inspect("TIMEOUT")
-    actions = [{:state_timeout, 1000, :cyclic_task}]
-    {:keep_state_and_data, actions}
+    task_pid =
+      spawn_link(fn ->
+        Nif.cyclic_task(parent_pid, data.master_ref, domain_configs, 1000)
+      end)
+    {:keep_state, %{data | task_pid: task_pid}, []}
   end
 
   def operational(:info, {:master_state_changed, master_state}, data) do

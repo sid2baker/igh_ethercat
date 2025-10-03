@@ -35,7 +35,8 @@ defmodule IghEthercat.Nif do
       master_get_pdo: [],
       master_get_pdo_entry: [],
       # maybe use dirty_cup/dirty_io
-      listen_bus_changes: [:threaded]
+      listen_bus_changes: [:threaded],
+      cyclic_task: [:threaded]
     ],
     resources: [
       :MasterResource,
@@ -86,6 +87,11 @@ defmodule IghEthercat.Nif do
       operational: u1,
       al_state: u4,
       padding: u2, // 2 bits to align to 8 bits (1 byte)
+  };
+
+  const domain_config_t = struct {
+      resource: DomainResource,
+      interval: u32, // multiplier for the interval
   };
 
   pub fn version_magic() !u32 {
@@ -287,6 +293,90 @@ defmodule IghEthercat.Nif do
           state = try do_get_master_state(master);
 
           std.time.sleep(interval * std.time.ns_per_ms);
+          try beam.yield();
+      }
+  }
+
+  pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_configs: []domain_config_t, interval: u32) !void {
+      const master = master_resource.unpack();
+      var master_state: master_state_t = undefined;
+      var prev_master_state: master_state_t = undefined;
+
+      var domains = std.ArrayList(struct {
+          domain: *ecrt.ec_domain_t,
+          state: ecrt.ec_domain_state_t,
+          prev_data: []u8,
+          data: []u8,
+          interval: u32,
+      }).init(beam.allocator);
+      defer domains.deinit();
+
+      for (domain_configs) |domain_config| {
+          const domain = domain_config.resource.unpack();
+          const size = ecrt.ecrt_domain_size(domain);
+          const data_ptr = ecrt.ecrt_domain_data(domain);
+          if (data_ptr == null or size == 0) {
+              return MasterError.InvalidDomainData;
+          }
+          // Memory is handled by ecrt.h
+          const data = data_ptr[0..size];
+          const prev_data: []u8 = beam.allocator.alloc(u8, size) catch return error.OutOfMemory;
+          @memcpy(prev_data, data);
+
+          try domains.append(.{ .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .interval = domain_config.interval });
+      }
+
+      defer {
+          beam.send(master_pid, .killed, .{}) catch {};
+      }
+
+      var counter: u32 = 0;
+
+      while (true) {
+          _ = ecrt.ecrt_master_receive(master);
+
+          master_state = try do_get_master_state(master);
+          if (!std.meta.eql(prev_master_state, master_state)) {
+              _ = try beam.send(master_pid, .{ .master_state_changed, master_state }, .{});
+          }
+
+          prev_master_state = master_state;
+
+          // Process all domains
+          for (domains.items, 0..) |tuple, i| {
+              const domain = tuple.domain;
+              const prev_state = tuple.state;
+              var state: ecrt.ec_domain_state_t = undefined;
+              const prev_data = tuple.prev_data;
+              const data = tuple.data;
+              const interval_multiplier = tuple.interval;
+
+              _ = ecrt.ecrt_domain_process(domain);
+              _ = ecrt.ecrt_domain_state(domain, &state);
+
+              // TODO add domain name when sending to master
+              if (state.working_counter != prev_state.working_counter) {
+                  _ = try beam.send(master_pid, .{ .wc_changed, state.working_counter }, .{});
+              }
+              if (state.wc_state != prev_state.wc_state) {
+                  _ = try beam.send(master_pid, .{ .state_changed, state.wc_state }, .{});
+              }
+
+              if (!std.mem.eql(u8, data, prev_data)) {
+                  _ = try beam.send(master_pid, .{ .data_changed, data }, .{});
+                  @memcpy(prev_data, data);
+              }
+
+              domains.items[i] = .{ .domain = domain, .state = state, .prev_data = prev_data, .data = data, .interval = interval_multiplier};
+              if (counter % interval_multiplier == 0) {
+                  _ = ecrt.ecrt_domain_queue(domain);
+              }
+          }
+
+          _ = ecrt.ecrt_master_send(master);
+
+          counter +%= 1; // Wraps to 0
+          std.time.sleep(interval * 1_000_000);
           try beam.yield();
       }
   }
