@@ -4,15 +4,16 @@ defmodule IghEthercat.Slave do
 
   alias IghEthercat.Master
 
-  defstruct [:master, :alias, :position, :vendor_id, :product_code, :sync_managers]
+  defstruct [:driver, :master, :alias, :position, :vendor_id, :product_code, :slave_config]
 
   @type t :: %__MODULE__{
+          driver: atom() | nil,
           master: Master.t(),
-          alias: non_neg_integer() | nil,
+          alias: non_neg_integer(),
           position: non_neg_integer(),
-          vendor_id: non_neg_integer() | nil,
-          product_code: non_neg_integer() | nil,
-          sync_managers: %{non_neg_integer() => sync_manager()}
+          vendor_id: non_neg_integer(),
+          product_code: non_neg_integer(),
+          slave_config: reference() | nil
         }
 
   @type sync_manager :: %{
@@ -31,10 +32,18 @@ defmodule IghEthercat.Slave do
   @type entry_size :: non_neg_integer()
 
   # Client API
-  def create(master, position) do
-    {:ok, pid} = GenServer.start(__MODULE__, {master, position})
+  def create(master, position, vendor_id, product_code) do
+    {:ok, pid} = GenServer.start(__MODULE__, {master, position, vendor_id, product_code})
     Process.monitor(pid)
     {:ok, pid}
+  end
+
+  def set_driver(slave, driver) do
+    GenServer.call(slave, {:set_driver, driver})
+  end
+
+  def subscribe_all(slave, domain) do
+    GenServer.call(slave, {:subscribe_all, domain})
   end
 
   def test do
@@ -46,20 +55,36 @@ defmodule IghEthercat.Slave do
   end
 
   @impl true
-  def init({master, position}) do
+  def init({master, position, vendor_id, product_code}) do
     state = %__MODULE__{
+      driver: nil,
       master: master,
       alias: 0,
       position: position,
-      vendor_id: nil,
-      product_code: nil,
-      sync_managers: %{}
+      vendor_id: vendor_id,
+      product_code: product_code,
+      slave_config: nil
     }
 
     {:ok, state}
   end
 
   @impl true
+  def handle_call({:set_driver, driver}, _from, state) do
+    sc = Master.request_nif(state.master, {:master_slave_config, [state.alias, state.position, state.vendor_id, state.product_code]})
+    {:reply, :ok, %{state | driver: driver, slave_config: sc}}
+  end
+
+  def handle_call({:register_all, domain}, _from, state) do
+    state.driver.register_all(state.master, domain, state.slave_config)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:subscribe_all, domain}, from, state) do
+    state.driver.subscribe_all(state.master, domain, state.slave_config)
+    {:reply, :ok, state}
+  end
+
   def handle_call({:get_pdos, sync_index}, _from, state) do
     sync_manager =
       Master.request_nif(state.master, {:master_get_sync_manager, [state.position, sync_index]})

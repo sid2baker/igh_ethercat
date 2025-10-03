@@ -10,7 +10,7 @@ defmodule IghEthercat.Master do
           master_ref: reference(),
           slaves: [Slave.t()],
           domains: [Domain.t()],
-          update_interval: integer()
+          update_interval: integer() # in ms
         }
 
   # Client API
@@ -32,8 +32,12 @@ defmodule IghEthercat.Master do
     :gen_statem.call(master, :sync_slaves)
   end
 
-  def create_domain(master, name) do
-    :gen_statem.call(master, {:create_domain, name})
+  def create_domain(master) do
+    :gen_statem.call(master, :create_domain)
+  end
+
+  def activate(master) do
+    :gen_statem.cast(master, :activate)
   end
 
   def get_ref(master) do
@@ -69,6 +73,7 @@ defmodule IghEthercat.Master do
 
   def offline({:call, from}, :connect, data) do
     master_state = Nif.get_master_state(data.master_ref)
+
     if master_state.link_up == 1 do
       {:next_state, :stale, data, [{:reply, from, :ok}]}
     else
@@ -126,7 +131,11 @@ defmodule IghEthercat.Master do
 
     slaves =
       Enum.map(create_range(master_state.slaves_responding), fn slave_position ->
-        {:ok, slave} = Slave.create(self(), slave_position)
+        {:ok, slave_info} = Nif.master_get_slave(data.master_ref, slave_position)
+
+        {:ok, slave} =
+          Slave.create(self(), slave_position, slave_info.vendor_id, slave_info.product_code)
+
         slave
       end)
 
@@ -158,17 +167,21 @@ defmodule IghEthercat.Master do
     {:keep_state_and_data, actions}
   end
 
+  def synced(:cast, :activate, data) do
+    # TODO check if all slaves are configured
+    {:next_state, :operational, data}
+  end
+
   def synced({:call, from}, {:request_nif, request_fn, request_args}, data) do
     result = apply(Nif, request_fn, [data.master_ref | request_args])
     actions = [{:reply, from, result}]
     {:keep_state_and_data, actions}
   end
 
-  def synced({:call, from}, {:create_domain, name}, data) do
+  def synced({:call, from}, :create_domain, data) do
     domain_ref = Nif.master_create_domain(data.master_ref)
-    Domain.start_link(domain_ref, name)
-    # Note: Consider adding {:reply, from, domain_ref}
-    {:keep_state_and_data, []}
+    actions = [{:reply, from, domain_ref}]
+    {:keep_state, %{data | domains: [domain_ref]}, actions}
   end
 
   def synced({:call, from}, :get_ref, data) do
@@ -196,7 +209,9 @@ defmodule IghEthercat.Master do
 
   # State: operational
   def operational(:enter, _old_state, data) do
-    :keep_state_and_data
+    Nif.master_activate(data.master_ref)
+    actions = [{:state_timeout, 1000, :cyclic_task}]
+    {:keep_state_and_data, actions}
   end
 
   def operational(:state_timeout, :update_master_state, data) do
@@ -211,6 +226,16 @@ defmodule IghEthercat.Master do
       actions = [{:state_timeout, data.update_interval, :update_master_state}]
       {:next_state, :stale, %{data | slaves: []}, actions}
     end
+  end
+
+  def operational(:state_timeout, :cyclic_task, data) do
+    Nif.master_receive(data.master_ref)
+    Nif.domain_process(hd(data.domains))
+    Nif.domain_queue(hd(data.domains))
+    Nif.master_send(data.master_ref)
+    IO.inspect("TIMEOUT")
+    actions = [{:state_timeout, 1000, :cyclic_task}]
+    {:keep_state_and_data, actions}
   end
 
   def operational(:info, {:master_state_changed, master_state}, data) do
