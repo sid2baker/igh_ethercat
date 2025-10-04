@@ -21,16 +21,17 @@ defmodule IghEthercat.Nif do
       master_get_slave: [],
       domain_process: [],
       domain_queue: [],
-      domain_data: [],
       get_domain_value_bool: [],
-      set_domain_value: [],
+      set_domain_value_bool: [],
       domain_state: [],
+      get_domain_size: [],
       slave_config_sync_manager: [],
       slave_config_pdo_assign_add: [],
       slave_config_pdo_assign_clear: [],
       slave_config_pdo_mapping_add: [],
       slave_config_pdo_mapping_clear: [],
       slave_config_reg_pdo_entry: [],
+      slave_config_reg_pdo_entry_pos: [],
       master_get_sync_manager: [],
       master_get_pdo: [],
       master_get_pdo_entry: [],
@@ -185,20 +186,6 @@ defmodule IghEthercat.Nif do
       _ = ecrt.ecrt_domain_queue(domain.unpack());
   }
 
-  // since ecrt_domain_data just returns domain->process_data
-  // this should be managed inside zig.
-  // So there should be these functions
-  // get_domain_value(domain, offset, bit_position?)
-  // which returns the current value
-  // set_domain_value(domain, offset, bit_position?, value)
-  // which sets the value
-  // and subscribe_domain_value(domain, offset, bit_position?)
-  // which subscribes to changes of the value
-  pub fn domain_data(domain: DomainResource) ![*c]u8 {
-      const result = ecrt.ecrt_domain_data(domain.unpack());
-      return result;
-  }
-
   pub fn get_domain_value_bool(domain: DomainResource, offset: usize) !bool {
       const data = ecrt.ecrt_domain_data(domain.unpack()) orelse return error.NullPointer;
       const domain_size = ecrt.ecrt_domain_size(domain.unpack());
@@ -209,10 +196,16 @@ defmodule IghEthercat.Nif do
   }
 
   // TODO handle bit precise offset
-  pub fn set_domain_value(domain: DomainResource, offset: u32, value: []u8) !void {
-      const target: [*]u8 = ecrt.ecrt_domain_data(domain.unpack());
-      for (value, 0..) |byte, i| {
-          target[i + offset] = byte;
+  pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool) !void {
+      const data = ecrt.ecrt_domain_data(domain.unpack()) orelse return error.NullPointer;
+      const domain_size = ecrt.ecrt_domain_size(domain.unpack());
+      if (offset >= domain_size * 8) return error.OutOfBounds;
+      const byte_index = offset / 8;
+      const bit_index = @as(u3, @intCast(offset % 8));
+      if (value) {
+          data[byte_index] |= (@as(u8, 1) << bit_index);
+      } else {
+          data[byte_index] &= ~(@as(u8, 1) << bit_index);
       }
   }
 
@@ -220,6 +213,11 @@ defmodule IghEthercat.Nif do
       var state: ecrt.ec_domain_state_t = undefined;
       _ = ecrt.ecrt_domain_state(domain.unpack(), &state);
       return beam.make(state, .{});
+  }
+
+  pub fn get_domain_size(domain: DomainResource) !usize {
+      const domain_size = ecrt.ecrt_domain_size(domain.unpack());
+      return domain_size;
   }
 
   pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: ecrt.ec_direction_t, watchdog_mode: ecrt.ec_watchdog_mode_t) !void {
@@ -246,6 +244,20 @@ defmodule IghEthercat.Nif do
   pub fn slave_config_reg_pdo_entry(slave_config: SlaveConfigResource, entry_index: u16, entry_subindex: u8, domain: DomainResource) !usize {
       var bit_position: c_uint = 0;
       const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(slave_config.unpack(), entry_index, entry_subindex, domain.unpack(), &bit_position);
+      const domain_test = get_domain_size(domain);
+      std.debug.print("Domain: {any}\n", .{domain_test});
+      std.debug.print("Offset: {d}, Bit Position: {d}\n", .{ result, bit_position });
+      if (result >= 0) {
+          return @as(usize, @intCast(result)) * 8 + bit_position;
+      } else {
+          return MasterError.PdoRegError;
+      }
+  }
+
+  // Returns the offset in bits
+  pub fn slave_config_reg_pdo_entry_pos(slave_config: SlaveConfigResource, sync_index: u8, pdo_pos: c_uint, entry_pos: c_uint, domain: DomainResource) !usize {
+      var bit_position: c_uint = 0;
+      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry_pos(slave_config.unpack(), sync_index, pdo_pos, entry_pos, domain.unpack(), &bit_position);
       if (result >= 0) {
           return @as(usize, @intCast(result)) * 8 + bit_position;
       } else {
@@ -312,6 +324,7 @@ defmodule IghEthercat.Nif do
           const pid = domain_config.pid;
           const domain = domain_config.resource.unpack();
           const size = ecrt.ecrt_domain_size(domain);
+          std.debug.print("Domain size: {}\n", .{size});
           const data_ptr = ecrt.ecrt_domain_data(domain);
           if (data_ptr == null or size == 0) {
               return MasterError.InvalidDomainData;
@@ -362,6 +375,7 @@ defmodule IghEthercat.Nif do
                   _ = try beam.send(pid, .{ .state_changed, state.wc_state }, .{});
               }
 
+              //std.debug.print("TEST {any}\n", .{prev_data});
               data_diffs.clearRetainingCapacity();
               for (data, prev_data, 0..) |byte_a, byte_b, byte_i| {
                   const diff = byte_a ^ byte_b; // XOR to find differing bits
@@ -376,8 +390,8 @@ defmodule IghEthercat.Nif do
               }
 
               if (data_diffs.items.len > 0) {
-                  _ = try beam.send(pid, .{ .data_changed, data, data_diffs.items }, .{});
                   @memcpy(prev_data, data);
+                  _ = try beam.send(pid, .{ .data_changed, data, data_diffs.items }, .{});
               }
 
               domains.items[i] = .{ .pid = pid, .domain = domain, .state = state, .prev_data = prev_data, .data = data, .interval = interval_multiplier};

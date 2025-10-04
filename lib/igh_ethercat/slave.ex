@@ -52,6 +52,10 @@ defmodule IghEthercat.Slave do
     GenServer.call(slave, {:get_value, variable})
   end
 
+  def watch_value(slave, pid, variable) do
+    GenServer.call(slave, {:watch_value, pid, variable})
+  end
+
   def get_slave_config(slave) do
     GenServer.call(slave, {:get_slave_config})
   end
@@ -105,6 +109,17 @@ defmodule IghEthercat.Slave do
     {:reply, :ok, %{state | configured_inputs: inputs, configured_outputs: outputs}}
   end
 
+  def handle_call({:set_value, variable}, _from, state) do
+    {domain, type, offset} = state.configured_outputs[variable]
+    domain_ref = Domain.get_ref(domain)
+
+    result =
+      case type do
+        :bool ->
+          nil
+      end
+  end
+
   def handle_call({:get_value, variable}, _from, state) do
     {domain, type, offset} = state.configured_inputs[variable]
     domain_ref = Domain.get_ref(domain)
@@ -116,6 +131,17 @@ defmodule IghEthercat.Slave do
       end
 
     {:reply, result, state}
+  end
+
+  def handle_call({:watch_value, pid, variable}, _from, state) do
+    {domain, type, offset} = state.configured_inputs[variable]
+
+    case type do
+      :bool -> Domain.subscribe(domain, pid, variable, offset, 1)
+      _ -> IO.debug("Not implemented yet")
+    end
+
+    {:reply, :ok, state}
   end
 
   def handle_call({:get_pdos, sync_index}, _from, state) do

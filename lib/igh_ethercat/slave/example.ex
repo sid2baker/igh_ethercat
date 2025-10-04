@@ -17,7 +17,15 @@ defmodule IghEthercat.Slave.Example do
     {0x1A04, {0x6040, 0x01, 1}},
     {0x1A05, {0x6050, 0x01, 1}},
     {0x1A06, {0x6060, 0x01, 1}},
-    {0x1A07, {0x6070, 0x01, 1}}
+    {0x1A07, {0x6070, 0x01, 1}},
+    {0x1A08, {0x6080, 0x01, 1}},
+    {0x1A09, {0x6090, 0x01, 1}},
+    {0x1A0A, {0x60A0, 0x01, 1}},
+    {0x1A0B, {0x60B0, 0x01, 1}},
+    {0x1A0C, {0x60C0, 0x01, 1}},
+    {0x1A0D, {0x60D0, 0x01, 1}},
+    {0x1A0E, {0x60E0, 0x01, 1}},
+    {0x1A0F, {0x60F0, 0x01, 1}}
   ]
 
   @impl true
@@ -31,13 +39,14 @@ defmodule IghEthercat.Slave.Example do
     Nif.slave_config_sync_manager(sc, sync_index, direction, watchdog)
     Nif.slave_config_pdo_assign_clear(sc, sync_index)
 
+    for {pdo_index, {entry_index, entry_subindex, entry_size}} <- @pdos do
+      Nif.slave_config_pdo_assign_add(sc, sync_index, pdo_index)
+      Nif.slave_config_pdo_mapping_clear(sc, pdo_index)
+      Nif.slave_config_pdo_mapping_add(sc, pdo_index, entry_index, entry_subindex, entry_size)
+    end
+
     inputs =
       for {pdo_index, {entry_index, entry_subindex, entry_size}} <- @pdos do
-        Nif.slave_config_pdo_assign_add(sc, sync_index, pdo_index)
-        Nif.slave_config_pdo_mapping_clear(sc, pdo_index)
-
-        Nif.slave_config_pdo_mapping_add(sc, pdo_index, entry_index, entry_subindex, entry_size)
-
         offset = Nif.slave_config_reg_pdo_entry(sc, entry_index, entry_subindex, domain_ref)
         {domain, :bool, offset}
       end
@@ -57,7 +66,6 @@ defmodule IghEthercat.Slave.Example do
 
   @impl true
   def watch_value(slave, variable, pid) do
-    # IghEthercat.Domain.subscribe(domain, self(), offset, entry_size)
     GenServer.call(slave, {:watch_value, variable, pid})
   end
 end
