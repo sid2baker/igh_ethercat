@@ -4,7 +4,7 @@ defmodule IghEthercat.Slave do
 
   alias IghEthercat.Master
 
-  defstruct [:driver, :master, :alias, :position, :vendor_id, :product_code, :slave_config]
+  defstruct [:driver, :master, :alias, :position, :vendor_id, :product_code, :slave_config, :configured_inputs, :configured_outputs]
 
   @type t :: %__MODULE__{
           driver: atom() | nil,
@@ -13,23 +13,15 @@ defmodule IghEthercat.Slave do
           position: non_neg_integer(),
           vendor_id: non_neg_integer(),
           product_code: non_neg_integer(),
-          slave_config: reference() | nil
+          slave_config: reference() | nil,
+          configured_inputs: %{name() => {domain(), type(), offset()}},
+          configured_outputs: %{name() => {domain(), type(), offset()}}
         }
 
-  @type sync_manager :: %{
-          direction: direction(),
-          watchdog_mode: watchdog_mode(),
-          pdos: %{non_neg_integer() => [pdo_entry()]}
-        }
-
-  @type direction :: :invalid | :input | :output | :count
-  @type watchdog_mode :: :default | :enable | :disable
-
-  @type pdo_entry :: {entry_index(), entry_subindex(), entry_size()}
-
-  @type entry_index :: non_neg_integer()
-  @type entry_subindex :: non_neg_integer()
-  @type entry_size :: non_neg_integer()
+  @type name :: atom()
+  @type domain :: atom()
+  @type type :: atom()
+  @type offset :: non_neg_integer()
 
   # Client API
   def create(master, position, vendor_id, product_code) do
@@ -40,6 +32,14 @@ defmodule IghEthercat.Slave do
 
   def set_driver(slave, driver) do
     GenServer.call(slave, {:set_driver, driver})
+  end
+
+  def configure(slave, config) do
+    GenServer.call(slave, {:configure, config})
+  end
+
+  def get_slave_config(slave) do
+    GenServer.call(slave, {:get_slave_config})
   end
 
   def subscribe_all(slave, domain \\ :default_domain) do
@@ -63,7 +63,9 @@ defmodule IghEthercat.Slave do
       position: position,
       vendor_id: vendor_id,
       product_code: product_code,
-      slave_config: nil
+      slave_config: nil,
+      configured_inputs: %{},
+      configured_outputs: %{}
     }
 
     {:ok, state}
@@ -75,14 +77,24 @@ defmodule IghEthercat.Slave do
     {:reply, :ok, %{state | driver: driver, slave_config: sc}}
   end
 
-  def handle_call({:register_all, domain}, _from, state) do
-    state.driver.register_all(state.master, domain, state.slave_config)
-    {:reply, :ok, state}
+  def handle_call({:get_slave_config}, _from, state) do
+    {:reply, state.slave_config, state}
   end
 
-  def handle_call({:subscribe_all, domain}, from, state) do
-    state.driver.subscribe_all(state.master, domain, state.slave_config)
-    {:reply, :ok, state}
+  def handle_call({:configure, config}, _from, state) do
+    %{inputs: inputs, outputs: outputs} = state.driver.configure(state.slave_config, config)
+    {:reply, :ok, %{state | configured_inputs: inputs, configured_outputs: outputs}}
+  end
+
+  def handle_call({:get_value, variable}, _from, state) do
+    {domain, type, offset} = state.configured_inputs[variable]
+    domain_ref = Domain.get_ref(domain)
+    result =
+    case type do
+      :bool -> Nif.get_domain_value_bool(domain_ref, offset)
+      _ -> IO.debug("Not implemented yet")
+    end
+    {:reply, result, state}
   end
 
   def handle_call({:get_pdos, sync_index}, _from, state) do

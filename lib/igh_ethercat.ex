@@ -7,7 +7,7 @@ defmodule IghEthercat do
     {:ok, [slave1, slave2]} = Master.sync_slaves(master)
     Slave.set_driver(slave2, IghEthercat.Slave.Example)
 
-    Slave.subscribe_all(slave2)
+    Slave.configure(slave2, domain: :default_domain)
 
     Master.activate(master)
     master

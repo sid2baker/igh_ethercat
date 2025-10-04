@@ -155,11 +155,13 @@ pub fn domain_data(domain: DomainResource) ![*c]u8 {
     return result;
 }
 
-// TODO add bit_position
-pub fn get_domain_value(domain: DomainResource, offset: u32) u8 {
-    const data = ecrt.ecrt_domain_data(domain.unpack());
-    std.debug.print("Byte 0: {}, Byte 1: {}\n", .{ data[0], data[1] });
-    return data[offset];
+pub fn get_domain_value_bool(domain: DomainResource, offset: usize) !bool {
+    const data = ecrt.ecrt_domain_data(domain.unpack()) orelse return error.NullPointer;
+    const domain_size = ecrt.ecrt_domain_size(domain.unpack());
+    if (offset >= domain_size * 8) return error.OutOfBounds;
+    const byte_index = offset / 8;
+    const bit_index = @as(u3, @intof)fset % 8;
+    return (data[byte_index] >> bit_index) & 1 != 0;
 }
 
 // TODO handle bit precise offset
@@ -168,11 +170,6 @@ pub fn set_domain_value(domain: DomainResource, offset: u32, value: []u8) !void 
     for (value, 0..) |byte, i| {
         target[i + offset] = byte;
     }
-}
-
-pub fn subscribe_domain_value(domain: DomainResource, offset: u32) !void {
-    const data = ecrt.ecrt_domain_data(domain.unpack());
-    _ = ecrt.ecrt_domain_subscribe(domain.unpack(), offset, data[offset]);
 }
 
 pub fn domain_state(domain: DomainResource) !beam.term {

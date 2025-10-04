@@ -3,7 +3,7 @@ defmodule IghEthercat.Slave.Driver do
   Behaviour for EtherCAT slave drivers.
 
   This module defines the interface that all slave drivers must implement
-  to handle registration and subscription operations.
+  to handle configuration and value operations.
 
   ## Usage
 
@@ -11,27 +11,46 @@ defmodule IghEthercat.Slave.Driver do
         use IghEthercat.Slave.Driver
 
         @impl true
-        def register_all(slave) do
+        def configure(config) do
           # Implementation here
         end
 
         @impl true
-        def subscribe_all(slave) do
+        def set_value(variable, value) do
+          # Implementation here
+        end
+
+        @impl true
+        def get_value(variable) do
+          # Implementation here
+        end
+
+        @impl true
+        def watch_value(variable, pid) do
           # Implementation here
         end
       end
   """
 
   @doc """
-  Register all PDOs for the given slave.
+  Configure the driver with the given options.
   """
-  @callback register_all(master :: pid(), slave_config :: reference()) :: :ok | {:error, term()}
+  @callback configure(config :: keyword()) :: :ok | {:error, term()}
 
   @doc """
-  Subscribe to all PDO updates for the given slave.
+  Set the value of a variable.
   """
-  @callback subscribe_all(master :: pid(), domain :: reference(), slave_config :: reference()) ::
-              :ok | {:error, term()}
+  @callback set_value(variable :: term(), value :: term()) :: :ok | {:error, term()}
+
+  @doc """
+  Get the value of a variable.
+  """
+  @callback get_value(variable :: term()) :: {:ok, term()} | {:error, term()}
+
+  @doc """
+  Watch a variable for changes and notify the given process.
+  """
+  @callback watch_value(variable :: term(), pid :: pid()) :: :ok | {:error, term()}
 
   defmacro __using__(_opts) do
     quote do
@@ -39,3 +58,5 @@ defmodule IghEthercat.Slave.Driver do
     end
   end
 end
+
+
