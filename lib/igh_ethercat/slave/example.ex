@@ -26,6 +26,8 @@ defmodule IghEthercat.Slave.Example do
     direction = 2
     watchdog = 0
 
+    domain_ref = IghEthercat.Domain.get_ref(domain)
+
     Nif.slave_config_sync_manager(sc, sync_index, direction, watchdog)
     Nif.slave_config_pdo_assign_clear(sc, sync_index)
 
@@ -35,7 +37,9 @@ defmodule IghEthercat.Slave.Example do
 
       Nif.slave_config_pdo_mapping_add(sc, pdo_index, entry_index, entry_subindex, entry_size)
 
-      Nif.slave_config_reg_pdo_entry(sc, entry_index, entry_subindex, domain)
+      offset = Nif.slave_config_reg_pdo_entry(sc, entry_index, entry_subindex, domain_ref)
+      IO.inspect(offset, label: "Offset")
+      IghEthercat.Domain.subscribe(domain, self(), offset, entry_size)
     end
   end
 end

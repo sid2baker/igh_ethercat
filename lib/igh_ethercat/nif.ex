@@ -90,6 +90,7 @@ defmodule IghEthercat.Nif do
   };
 
   const domain_config_t = struct {
+      pid: beam.pid,
       resource: DomainResource,
       interval: u32, // multiplier for the interval
   };
@@ -244,14 +245,12 @@ defmodule IghEthercat.Nif do
       _ = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
   }
 
-  pub fn slave_config_reg_pdo_entry(slave_config: SlaveConfigResource, entry_index: u16, entry_subindex: u8, domain: DomainResource) !u32 {
+  // Returns the offset in bits
+  pub fn slave_config_reg_pdo_entry(slave_config: SlaveConfigResource, entry_index: u16, entry_subindex: u8, domain: DomainResource) !usize {
       var bit_position: c_uint = 0;
       const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(slave_config.unpack(), entry_index, entry_subindex, domain.unpack(), &bit_position);
-      if (bit_position != 0) {
-          std.debug.print("Bit Position: {}\n", .{bit_position});
-      }
       if (result >= 0) {
-          return @as(u32, @intCast(result));
+          return @as(usize, @intCast(result)) * 8 + bit_position;
       } else {
           return MasterError.PdoRegError;
       }
@@ -297,12 +296,13 @@ defmodule IghEthercat.Nif do
       }
   }
 
-  pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_configs: []domain_config_t, interval: u32) !void {
+  pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_configs: []domain_config_t, interval: u64) !void {
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;
       var prev_master_state: master_state_t = undefined;
 
       var domains = std.ArrayList(struct {
+          pid: beam.pid,
           domain: *ecrt.ec_domain_t,
           state: ecrt.ec_domain_state_t,
           prev_data: []u8,
@@ -312,6 +312,7 @@ defmodule IghEthercat.Nif do
       defer domains.deinit();
 
       for (domain_configs) |domain_config| {
+          const pid = domain_config.pid;
           const domain = domain_config.resource.unpack();
           const size = ecrt.ecrt_domain_size(domain);
           const data_ptr = ecrt.ecrt_domain_data(domain);
@@ -323,7 +324,7 @@ defmodule IghEthercat.Nif do
           const prev_data: []u8 = beam.allocator.alloc(u8, size) catch return error.OutOfMemory;
           @memcpy(prev_data, data);
 
-          try domains.append(.{ .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .interval = domain_config.interval });
+          try domains.append(.{ .pid = pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .interval = domain_config.interval });
       }
 
       defer {
@@ -331,6 +332,8 @@ defmodule IghEthercat.Nif do
       }
 
       var counter: u32 = 0;
+      var data_diffs = std.ArrayList(usize).init(beam.allocator);
+      defer data_diffs.deinit();
 
       while (true) {
           _ = ecrt.ecrt_master_receive(master);
@@ -344,6 +347,7 @@ defmodule IghEthercat.Nif do
 
           // Process all domains
           for (domains.items, 0..) |tuple, i| {
+              const pid = tuple.pid;
               const domain = tuple.domain;
               const prev_state = tuple.state;
               var state: ecrt.ec_domain_state_t = undefined;
@@ -354,20 +358,32 @@ defmodule IghEthercat.Nif do
               _ = ecrt.ecrt_domain_process(domain);
               _ = ecrt.ecrt_domain_state(domain, &state);
 
-              // TODO add domain name when sending to master
               if (state.working_counter != prev_state.working_counter) {
-                  _ = try beam.send(master_pid, .{ .wc_changed, state.working_counter }, .{});
+                  _ = try beam.send(pid, .{ .wc_changed, state.working_counter }, .{});
               }
               if (state.wc_state != prev_state.wc_state) {
-                  _ = try beam.send(master_pid, .{ .state_changed, state.wc_state }, .{});
+                  _ = try beam.send(pid, .{ .state_changed, state.wc_state }, .{});
               }
 
-              if (!std.mem.eql(u8, data, prev_data)) {
-                  _ = try beam.send(master_pid, .{ .data_changed, data }, .{});
+              data_diffs.clearRetainingCapacity();
+              for (data, prev_data, 0..) |byte_a, byte_b, byte_i| {
+                  const diff = byte_a ^ byte_b; // XOR to find differing bits
+                  if (diff != 0) {
+                      var bit_mask = diff;
+                      while (bit_mask != 0) {
+                          const bit_pos = @ctz(bit_mask); // Find position of least significant set bit
+                          try data_diffs.append(byte_i * 8 + bit_pos);
+                          bit_mask &= bit_mask - 1; // Clear the least significant set bit
+                      }
+                  }
+              }
+
+              if (data_diffs.items.len > 0) {
+                  _ = try beam.send(pid, .{ .data_changed, data, data_diffs.items }, .{});
                   @memcpy(prev_data, data);
               }
 
-              domains.items[i] = .{ .domain = domain, .state = state, .prev_data = prev_data, .data = data, .interval = interval_multiplier};
+              domains.items[i] = .{ .pid = pid, .domain = domain, .state = state, .prev_data = prev_data, .data = data, .interval = interval_multiplier};
               if (counter % interval_multiplier == 0) {
                   _ = ecrt.ecrt_domain_queue(domain);
               }
@@ -376,7 +392,7 @@ defmodule IghEthercat.Nif do
           _ = ecrt.ecrt_master_send(master);
 
           counter +%= 1; // Wraps to 0
-          std.time.sleep(interval * 1_000_000);
+          std.time.sleep(interval * std.time.ns_per_us);
           try beam.yield();
       }
   }

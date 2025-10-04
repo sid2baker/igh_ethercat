@@ -42,7 +42,7 @@ defmodule IghEthercat.Slave do
     GenServer.call(slave, {:set_driver, driver})
   end
 
-  def subscribe_all(slave, domain) do
+  def subscribe_all(slave, domain \\ :default_domain) do
     GenServer.call(slave, {:subscribe_all, domain})
   end
 
