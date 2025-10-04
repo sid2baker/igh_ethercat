@@ -4,13 +4,15 @@ defmodule IghEthercat.Domain do
   defstruct [:resource, :interval, :subscribers]
 
   @type t :: %__MODULE__{
-    resource: String.t(),
-    interval: integer(),
-    subscribers: %{offset() => {size(), [pid()]}}
-  }
+          resource: String.t(),
+          interval: integer(),
+          subscribers: %{offset() => {size(), [pid()]}}
+        }
 
-  @type offset :: non_neg_integer() # in bits
-  @type size :: non_neg_integer() # in bits
+  # in bits
+  @type offset :: non_neg_integer()
+  # in bits
+  @type size :: non_neg_integer()
 
   def start_link(name, resource, interval) do
     GenServer.start_link(__MODULE__, {resource, interval}, name: name)
@@ -45,9 +47,10 @@ defmodule IghEthercat.Domain do
     {:reply, :ok, %{state | subscribers: subscribers}}
   end
 
-  def handle_info({:data_changed, data, offsets}, state)  do
+  def handle_info({:data_changed, data, offsets}, state) do
     IO.inspect(data, label: "Data Changed")
     IO.inspect(offsets, label: "Offsets")
+
     for offset <- offsets do
       with {size, pids} <- state.subscribers[offset] do
         # not working yet
@@ -55,6 +58,7 @@ defmodule IghEthercat.Domain do
         Enum.each(pids, fn pid -> send(pid, {:data_changed, data}) end)
       end
     end
+
     {:noreply, state}
   end
 

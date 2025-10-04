@@ -11,13 +11,14 @@ defmodule IghEthercat.Master do
           slaves: [Slave.t()],
           domains: [Domain.t()],
           task_pid: pid(),
-          update_interval: integer() # in us
+          # in us
+          update_interval: integer()
         }
 
   # Client API
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
-    update_interval = Keyword.get(opts, :update_interval, 500_000)
+    update_interval = Keyword.get(opts, :update_interval, 100_000)
     :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
@@ -55,6 +56,7 @@ defmodule IghEthercat.Master do
       {:ok, ref} ->
         domain_ref = Nif.master_create_domain(ref)
         {:ok, domain} = Domain.start_link(:default_domain, domain_ref, 1)
+
         data = %__MODULE__{
           master_ref: ref,
           domains: [domain],
@@ -184,6 +186,7 @@ defmodule IghEthercat.Master do
 
   def synced({:call, from}, {:create_domain, name, interval}, data) do
     domain_ref = Nif.master_create_domain(data.master_ref)
+
     case Domain.start_link(name, domain_ref, interval) do
       {:ok, domain} ->
         actions = [{:reply, from, domain_ref}]
@@ -223,16 +226,18 @@ defmodule IghEthercat.Master do
     Nif.master_activate(data.master_ref)
     parent_pid = self()
 
-    domain_configs = Enum.map(data.domains, fn domain ->
-      resource = Domain.get_ref(domain)
-      interval = Domain.get_interval(domain)
-      %{pid: domain, resource: resource, interval: interval}
-    end)
+    domain_configs =
+      Enum.map(data.domains, fn domain ->
+        resource = Domain.get_ref(domain)
+        interval = Domain.get_interval(domain)
+        %{pid: domain, resource: resource, interval: interval}
+      end)
 
     task_pid =
       spawn_link(fn ->
         Nif.cyclic_task(parent_pid, data.master_ref, domain_configs, data.update_interval)
       end)
+
     {:keep_state, %{data | task_pid: task_pid}, []}
   end
 

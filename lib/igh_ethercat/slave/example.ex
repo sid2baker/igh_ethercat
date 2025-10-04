@@ -32,20 +32,21 @@ defmodule IghEthercat.Slave.Example do
     Nif.slave_config_pdo_assign_clear(sc, sync_index)
 
     inputs =
-    for {pdo_index, {entry_index, entry_subindex, entry_size}} <- @pdos do
-      Nif.slave_config_pdo_assign_add(sc, sync_index, pdo_index)
-      Nif.slave_config_pdo_mapping_clear(sc, pdo_index)
+      for {pdo_index, {entry_index, entry_subindex, entry_size}} <- @pdos do
+        Nif.slave_config_pdo_assign_add(sc, sync_index, pdo_index)
+        Nif.slave_config_pdo_mapping_clear(sc, pdo_index)
 
-      Nif.slave_config_pdo_mapping_add(sc, pdo_index, entry_index, entry_subindex, entry_size)
+        Nif.slave_config_pdo_mapping_add(sc, pdo_index, entry_index, entry_subindex, entry_size)
 
-      offset = Nif.slave_config_reg_pdo_entry(sc, entry_index, entry_subindex, domain_ref)
-      {domain, :bool, offset}
-    end
-    |> Enum.with_index()
-    |> Enum.map(fn {input, index} ->
-      {:"input#{index+1}", input}
-    end)
-    |> Map.new()
+        offset = Nif.slave_config_reg_pdo_entry(sc, entry_index, entry_subindex, domain_ref)
+        {domain, :bool, offset}
+      end
+      |> Enum.with_index()
+      |> Enum.map(fn {input, index} ->
+        {:"input#{index + 1}", input}
+      end)
+      |> Map.new()
+
     %{inputs: inputs, outputs: %{}}
   end
 
@@ -56,7 +57,7 @@ defmodule IghEthercat.Slave.Example do
 
   @impl true
   def watch_value(slave, variable, pid) do
-    #IghEthercat.Domain.subscribe(domain, self(), offset, entry_size)
+    # IghEthercat.Domain.subscribe(domain, self(), offset, entry_size)
     GenServer.call(slave, {:watch_value, variable, pid})
   end
 end

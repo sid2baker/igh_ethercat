@@ -58,5 +58,3 @@ defmodule IghEthercat.Slave.Driver do
     end
   end
 end
-
-

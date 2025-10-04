@@ -2,9 +2,19 @@ defmodule IghEthercat.Slave do
   use GenServer
   require Logger
 
-  alias IghEthercat.Master
+  alias IghEthercat.{Master, Domain, Nif}
 
-  defstruct [:driver, :master, :alias, :position, :vendor_id, :product_code, :slave_config, :configured_inputs, :configured_outputs]
+  defstruct [
+    :driver,
+    :master,
+    :alias,
+    :position,
+    :vendor_id,
+    :product_code,
+    :slave_config,
+    :configured_inputs,
+    :configured_outputs
+  ]
 
   @type t :: %__MODULE__{
           driver: atom() | nil,
@@ -36,6 +46,10 @@ defmodule IghEthercat.Slave do
 
   def configure(slave, config) do
     GenServer.call(slave, {:configure, config})
+  end
+
+  def get_value(slave, variable) do
+    GenServer.call(slave, {:get_value, variable})
   end
 
   def get_slave_config(slave) do
@@ -73,7 +87,12 @@ defmodule IghEthercat.Slave do
 
   @impl true
   def handle_call({:set_driver, driver}, _from, state) do
-    sc = Master.request_nif(state.master, {:master_slave_config, [state.alias, state.position, state.vendor_id, state.product_code]})
+    sc =
+      Master.request_nif(
+        state.master,
+        {:master_slave_config, [state.alias, state.position, state.vendor_id, state.product_code]}
+      )
+
     {:reply, :ok, %{state | driver: driver, slave_config: sc}}
   end
 
@@ -89,11 +108,13 @@ defmodule IghEthercat.Slave do
   def handle_call({:get_value, variable}, _from, state) do
     {domain, type, offset} = state.configured_inputs[variable]
     domain_ref = Domain.get_ref(domain)
+
     result =
-    case type do
-      :bool -> Nif.get_domain_value_bool(domain_ref, offset)
-      _ -> IO.debug("Not implemented yet")
-    end
+      case type do
+        :bool -> Nif.get_domain_value_bool(domain_ref, offset)
+        _ -> IO.debug("Not implemented yet")
+      end
+
     {:reply, result, state}
   end
 

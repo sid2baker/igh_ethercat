@@ -10,7 +10,7 @@ defmodule IghEthercat do
     Slave.configure(slave2, domain: :default_domain)
 
     Master.activate(master)
-    master
+    slave2
   end
 
   def get(domain, offset) do
