@@ -1,17 +1,17 @@
 defmodule IghEthercat do
-  alias IghEthercat.{Master, Slave}
+  alias IghEthercat.{Master, Domain, Slave}
+  alias IghEthercat.Drivers.DefaultDriver
 
   def test do
     {:ok, master} = Master.start_link()
     :ok = Master.connect(master)
     {:ok, [slave1, slave2]} = Master.sync_slaves(master)
-    Slave.set_driver(slave2, IghEthercat.Slave.Example)
 
-    Slave.configure(slave2, domain: :default_domain)
+    Slave.configure(slave2, [])
+    Slave.list_pdos(slave2) |> IO.inspect(label: "Options")
+    Slave.register_all_pdos(slave2, :default_domain)
 
-    Slave.watch_value(slave2, self(), :input1)
-    Slave.watch_value(slave2, self(), :input9)
-
+    Domain.get_ready(:default_domain)
     Master.activate(master)
     slave2
   end

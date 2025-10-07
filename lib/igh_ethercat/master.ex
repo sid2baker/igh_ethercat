@@ -138,9 +138,18 @@ defmodule IghEthercat.Master do
     slaves =
       Enum.map(create_range(master_state.slaves_responding), fn slave_position ->
         {:ok, slave_info} = Nif.master_get_slave(data.master_ref, slave_position)
+        driver = driver_for_slave(slave_info.vendor_id, slave_info.product_code)
 
-        {:ok, slave} =
-          Slave.create(self(), slave_position, slave_info.vendor_id, slave_info.product_code)
+        slave_config =
+          Nif.master_slave_config(
+            data.master_ref,
+            0,
+            slave_position,
+            slave_info.vendor_id,
+            slave_info.product_code
+          )
+
+        {:ok, slave} = Slave.create(self(), slave_position, driver, slave_config)
 
         slave
       end)
@@ -264,6 +273,12 @@ defmodule IghEthercat.Master do
   defp handle_unexpected(event_type, event_content, state, data) do
     Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
     {:keep_state_and_data, []}
+  end
+
+  defp driver_for_slave(vendor_id, product_code) do
+    case {vendor_id, product_code} do
+      {_, _} -> IghEthercat.Drivers.DefaultDriver
+    end
   end
 
   defp create_range(0), do: []

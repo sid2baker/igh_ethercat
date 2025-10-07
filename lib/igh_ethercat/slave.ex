@@ -6,6 +6,7 @@ defmodule IghEthercat.Slave do
 
   defstruct [
     :driver,
+    :driver_state,
     :master,
     :alias,
     :position,
@@ -18,6 +19,7 @@ defmodule IghEthercat.Slave do
 
   @type t :: %__MODULE__{
           driver: atom() | nil,
+          driver_state: map(),
           master: Master.t(),
           alias: non_neg_integer(),
           position: non_neg_integer(),
@@ -34,8 +36,8 @@ defmodule IghEthercat.Slave do
   @type offset :: non_neg_integer()
 
   # Client API
-  def create(master, position, vendor_id, product_code) do
-    {:ok, pid} = GenServer.start(__MODULE__, {master, position, vendor_id, product_code})
+  def create(master, position, driver, slave_config) do
+    {:ok, pid} = GenServer.start(__MODULE__, {master, position, driver, slave_config})
     Process.monitor(pid)
     {:ok, pid}
   end
@@ -48,12 +50,29 @@ defmodule IghEthercat.Slave do
     GenServer.call(slave, {:configure, config})
   end
 
-  def get_value(slave, variable) do
+  def list_pdos(slave) do
+    GenServer.call(slave, :list_pdos)
+  end
+
+  def register_pdos(slave, names, domain \\ :default_domain) do
+    GenServer.call(slave, {:register_pdos, names, domain})
+  end
+
+  def register_all_pdos(slave, domain \\ :default_domain) do
+    all_pdos = list_pdos(slave)
+    register_pdos(slave, all_pdos, domain)
+  end
+
+  def set_pdo(slave, variable, value) do
+    GenServer.call(slave, {:set_pdo, variable, value})
+  end
+
+  def get_pdo(slave, variable) do
     GenServer.call(slave, {:get_value, variable})
   end
 
-  def watch_value(slave, pid, variable) do
-    GenServer.call(slave, {:watch_value, pid, variable})
+  def watch_pdo(slave, variable, pid \\ self()) do
+    GenServer.call(slave, {:watch_value, variable, pid})
   end
 
   def get_slave_config(slave) do
@@ -73,15 +92,14 @@ defmodule IghEthercat.Slave do
   end
 
   @impl true
-  def init({master, position, vendor_id, product_code}) do
+  def init({master, position, driver, slave_config}) do
     state = %__MODULE__{
-      driver: nil,
+      driver: driver,
+      driver_state: %{},
       master: master,
       alias: 0,
       position: position,
-      vendor_id: vendor_id,
-      product_code: product_code,
-      slave_config: nil,
+      slave_config: slave_config,
       configured_inputs: %{},
       configured_outputs: %{}
     }
@@ -105,11 +123,64 @@ defmodule IghEthercat.Slave do
   end
 
   def handle_call({:configure, config}, _from, state) do
-    %{inputs: inputs, outputs: outputs} = state.driver.configure(state.slave_config, config)
-    {:reply, :ok, %{state | configured_inputs: inputs, configured_outputs: outputs}}
+    {:ok, driver_state} = state.driver.configure(config)
+    {:reply, :ok, %{state | driver_state: driver_state}}
   end
 
-  def handle_call({:set_value, variable}, _from, state) do
+  def handle_call(:list_pdos, _from, state) do
+    {:reply, state.driver.list_pdos(state.driver_state), state}
+  end
+
+  def handle_call({:register_pdos, names, domain}, _from, state) do
+    sync_managers =
+      Enum.reduce(names, %{}, fn name, acc ->
+        {:ok,
+         %{sync_manager: {sync_index, direction, watchdog}, pdo_index: pdo_index, entry: entry}} =
+          state.driver.pdo_info(state.driver_state, name)
+
+        Map.update(
+          acc,
+          sync_index,
+          {direction, watchdog, %{pdo_index => [{name, entry}]}},
+          fn {^direction, ^watchdog, pdos} ->
+            pdos = Map.update(pdos, pdo_index, [{name, entry}], &[{name, entry} | &1])
+            {direction, watchdog, pdos}
+          end
+        )
+      end)
+      |> IO.inspect(label: "SM")
+
+    configured_entries =
+      for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
+        Nif.slave_config_sync_manager(state.slave_config, sync_index, direction, watchdog)
+        Nif.slave_config_pdo_assign_clear(state.slave_config, sync_index)
+
+        for {pdo_index, entries} <- pdos, {name, {entry_index, entry_subindex, entry_size}} <- entries do
+          Nif.slave_config_pdo_assign_add(state.slave_config, sync_index, pdo_index)
+          Nif.slave_config_pdo_mapping_clear(state.slave_config, pdo_index)
+
+          Nif.slave_config_pdo_mapping_add(
+          state.slave_config,
+          pdo_index,
+          entry_index,
+          entry_subindex,
+          entry_size
+          )
+
+          {name, {entry_index, entry_subindex, entry_size}}
+        end
+      end
+      |> List.flatten()
+      |> IO.inspect(label: "Entries")
+
+    for {name, entry} <- configured_entries do
+      Domain.register_pdo_entry(domain, state.slave_config, name, entry)
+    end
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:set_pdo, variable}, _from, state) do
     {domain, type, offset} = state.configured_outputs[variable]
     domain_ref = Domain.get_ref(domain)
 
@@ -120,7 +191,7 @@ defmodule IghEthercat.Slave do
       end
   end
 
-  def handle_call({:get_value, variable}, _from, state) do
+  def handle_call({:get_pdo, variable}, _from, state) do
     {domain, type, offset} = state.configured_inputs[variable]
     domain_ref = Domain.get_ref(domain)
 
@@ -133,7 +204,7 @@ defmodule IghEthercat.Slave do
     {:reply, result, state}
   end
 
-  def handle_call({:watch_value, pid, variable}, _from, state) do
+  def handle_call({:watch_pdo, pid, variable}, _from, state) do
     {domain, type, offset} = state.configured_inputs[variable]
 
     case type do
@@ -162,6 +233,10 @@ defmodule IghEthercat.Slave do
       end
 
     {:reply, {:ok, entries}, state}
+  end
+
+  def terminate(_reason, %{driver: mod, driver_state: s}) do
+    mod.terminate(s)
   end
 
   defp create_range(0), do: []
