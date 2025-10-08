@@ -4,7 +4,7 @@ defmodule IghEthercat.Nif do
   use Zig,
     otp_app: :igh_ethercat,
     c: [
-      include_dirs: "/usr/include/",
+      include_dirs: "/usr/local/include/",
       link_lib: {:system, "ethercat"}
     ],
     nifs: [
