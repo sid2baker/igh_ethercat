@@ -54,7 +54,7 @@ defmodule IghEthercat.Domain do
     {:reply, state.interval, state}
   end
 
-  def handle_call({:register_pdo_entry, slave_config, name, entry}, _from, state) do
+  def handle_call({:register_pdo_entry, slave_config, name, entry}, _from, state) when name in [:input1] do
     result =
       Map.update(
         state.pdo_entries_to_register,
@@ -83,6 +83,7 @@ defmodule IghEthercat.Domain do
         end
       end
       |> List.flatten()
+      |> IO.inspect(label: "PDO Entries")
       |> Map.new()
 
     {:reply, :ok, %{state | entries: result, pdo_entries_to_register: %{}}}
@@ -97,6 +98,7 @@ defmodule IghEthercat.Domain do
 
   def handle_info({:data_changed, data, offsets}, state) do
     IO.inspect(data, label: "Data Changed")
+    IO.inspect(offsets, label: "Offsets")
     for offset <- offsets do
       with {name, size, pids} <- state.subscribers[offset] do
         # not working yet
@@ -107,6 +109,12 @@ defmodule IghEthercat.Domain do
 
     {:noreply, state}
   end
+
+  def handle_call(msg, _from, state) do
+    IO.inspect(msg, label: "Unhandled Message")
+    {:reply, :ok, state}
+  end
+
 
   def handle_info(msg, state) do
     IO.inspect(msg, label: "Unhandled Message")

@@ -3,6 +3,7 @@ defmodule IghEthercat.Nif do
 
   use Zig,
     otp_app: :igh_ethercat,
+    leak_check: true,
     c: [
       include_dirs: "/usr/local/include/",
       link_lib: {:system, "ethercat"}
@@ -51,9 +52,16 @@ defmodule IghEthercat.Nif do
   const root = @import("root");
   const ecrt = @cImport(@cInclude("ecrt.h"));
 
-  pub const MasterResource = beam.Resource(*ecrt.ec_master_t, root, .{});
+  pub const MasterResource = beam.Resource(*ecrt.ec_master_t, root, .{ .Callbacks = MasterResourceCallbacks });
   pub const DomainResource = beam.Resource(*ecrt.ec_domain_t, root, .{});
   pub const SlaveConfigResource = beam.Resource(*ecrt.ec_slave_config_t, root, .{});
+
+  pub const MasterResourceCallbacks = struct {
+      pub fn dtor(s: **ecrt.ec_master_t) void {
+          std.debug.print("dtor called: {}\n", .{s.*});
+          ecrt.ecrt_release_master(s.*);
+      }
+  };
 
   const MasterError = error{
       MasterNotFound,
@@ -309,6 +317,7 @@ defmodule IghEthercat.Nif do
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;
       var prev_master_state: master_state_t = undefined;
+      const yield_interval = @divTrunc(100_000, interval); // yield every 100ms
 
       var domains = std.ArrayList(struct {
           pid: beam.pid,
@@ -326,7 +335,7 @@ defmodule IghEthercat.Nif do
           const size = ecrt.ecrt_domain_size(domain);
           std.debug.print("Domain size: {}\n", .{size});
           const data_ptr = ecrt.ecrt_domain_data(domain);
-          if (data_ptr == null or size == 0) {
+          if (data_ptr == null) {
               return MasterError.InvalidDomainData;
           }
           // Memory is handled by ecrt.h
@@ -402,9 +411,12 @@ defmodule IghEthercat.Nif do
 
           _ = ecrt.ecrt_master_send(master);
 
+          if (counter % yield_interval == 0) {
+              try beam.yield();
+          }
+
           counter +%= 1; // Wraps to 0
           std.time.sleep(interval * std.time.ns_per_us);
-          try beam.yield();
       }
   }
   """

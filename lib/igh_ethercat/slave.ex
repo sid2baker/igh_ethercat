@@ -155,19 +155,20 @@ defmodule IghEthercat.Slave do
         Nif.slave_config_sync_manager(state.slave_config, sync_index, direction, watchdog)
         Nif.slave_config_pdo_assign_clear(state.slave_config, sync_index)
 
-        for {pdo_index, entries} <- pdos, {name, {entry_index, entry_subindex, entry_size}} <- entries do
+        for {pdo_index, entries} <- pdos do
           Nif.slave_config_pdo_assign_add(state.slave_config, sync_index, pdo_index)
           Nif.slave_config_pdo_mapping_clear(state.slave_config, pdo_index)
+          for {name, {entry_index, entry_subindex, entry_size}} <- entries do
+            Nif.slave_config_pdo_mapping_add(
+            state.slave_config,
+            pdo_index,
+            entry_index,
+            entry_subindex,
+            entry_size
+            )
 
-          Nif.slave_config_pdo_mapping_add(
-          state.slave_config,
-          pdo_index,
-          entry_index,
-          entry_subindex,
-          entry_size
-          )
-
-          {name, {entry_index, entry_subindex, entry_size}}
+            {name, {entry_index, entry_subindex, entry_size}}
+          end
         end
       end
       |> List.flatten()
