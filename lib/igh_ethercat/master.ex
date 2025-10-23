@@ -18,7 +18,7 @@ defmodule IghEthercat.Master do
   # Client API
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
-    update_interval = Keyword.get(opts, :update_interval, 100_000)
+    update_interval = Keyword.get(opts, :update_interval, 10_000)
     :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
