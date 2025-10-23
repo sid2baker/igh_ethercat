@@ -1,6 +1,7 @@
 defmodule IghEthercat.Master do
   @behaviour :gen_statem
   require Logger
+  import IghEthercat.Utils
 
   alias IghEthercat.{Nif, Slave, Domain}
 
@@ -149,7 +150,8 @@ defmodule IghEthercat.Master do
             slave_info.product_code
           )
 
-        {:ok, slave} = Slave.create(self(), slave_position, driver, slave_config)
+        {:ok, slave} =
+          Slave.create(self(), slave_position, driver, slave_config, slave_info.sync_count)
 
         slave
       end)
@@ -277,10 +279,7 @@ defmodule IghEthercat.Master do
 
   defp driver_for_slave(vendor_id, product_code) do
     case {vendor_id, product_code} do
-      {_, _} -> IghEthercat.Drivers.DefaultDriver
+      {_, _} -> IghEthercat.Drivers.Generic
     end
   end
-
-  defp create_range(0), do: []
-  defp create_range(n), do: 0..(n - 1)
 end

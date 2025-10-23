@@ -1,6 +1,7 @@
 defmodule IghEthercat.Slave do
   use GenServer
   require Logger
+  import IghEthercat.Utils
 
   alias IghEthercat.{Master, Domain, Nif}
 
@@ -36,8 +37,8 @@ defmodule IghEthercat.Slave do
   @type offset :: non_neg_integer()
 
   # Client API
-  def create(master, position, driver, slave_config) do
-    {:ok, pid} = GenServer.start(__MODULE__, {master, position, driver, slave_config})
+  def create(master, position, driver, slave_config, sync_count) do
+    {:ok, pid} = GenServer.start(__MODULE__, {master, position, driver, slave_config, sync_count})
     Process.monitor(pid)
     {:ok, pid}
   end
@@ -92,7 +93,7 @@ defmodule IghEthercat.Slave do
   end
 
   @impl true
-  def init({master, position, driver, slave_config}) do
+  def init({master, position, driver, slave_config, sync_count}) do
     state = %__MODULE__{
       driver: driver,
       driver_state: %{},
@@ -104,7 +105,52 @@ defmodule IghEthercat.Slave do
       configured_outputs: %{}
     }
 
-    {:ok, state}
+    if driver == IghEthercat.Drivers.Generic do
+      {:ok, state, {:continue, {:load_driver, sync_count}}}
+    else
+      {:ok, state}
+    end
+  end
+
+  @impl true
+  def handle_continue({:load_driver, sync_count}, state) do
+    pdos =
+      for sync_index <- create_range(sync_count) do
+        sync_manager =
+          Master.request_nif(
+            state.master,
+            {:master_get_sync_manager, [state.position, sync_index]}
+          )
+
+        for pos <- create_range(sync_manager.n_pdos) do
+          pdo =
+            Master.request_nif(state.master, {:master_get_pdo, [state.position, sync_index, pos]})
+
+          for entry_pos <- create_range(pdo.n_entries) do
+            entry =
+              Master.request_nif(
+                state.master,
+                {:master_get_pdo_entry, [state.position, sync_index, pos, entry_pos]}
+              )
+
+            %{
+              sync_manager: {sync_manager.index, sync_manager.dir, sync_manager.watchdog_mode},
+              pdo_index: pdo.index,
+              entry: {entry.index, entry.subindex, entry.bit_length}
+            }
+          end
+        end
+      end
+      |> List.flatten()
+      |> Enum.map(fn pdo ->
+        entry_index = elem(pdo.entry, 0)
+        entry_subindex = elem(pdo.entry, 1)
+        {"pdo_#{Integer.to_string(entry_index, 16)}:#{Integer.to_string(entry_subindex, 16)}", pdo}
+      end)
+      |> Map.new()
+      |> IO.inspect(label: "Generic Entries")
+
+    {:noreply, %{state | driver_state: %{pdos: pdos}}}
   end
 
   @impl true
@@ -123,7 +169,7 @@ defmodule IghEthercat.Slave do
   end
 
   def handle_call({:configure, config}, _from, state) do
-    {:ok, driver_state} = state.driver.configure(config)
+    {:ok, driver_state} = state.driver.configure(state.driver_state, config)
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 
@@ -158,13 +204,14 @@ defmodule IghEthercat.Slave do
         for {pdo_index, entries} <- pdos do
           Nif.slave_config_pdo_assign_add(state.slave_config, sync_index, pdo_index)
           Nif.slave_config_pdo_mapping_clear(state.slave_config, pdo_index)
+
           for {name, {entry_index, entry_subindex, entry_size}} <- entries do
             Nif.slave_config_pdo_mapping_add(
-            state.slave_config,
-            pdo_index,
-            entry_index,
-            entry_subindex,
-            entry_size
+              state.slave_config,
+              pdo_index,
+              entry_index,
+              entry_subindex,
+              entry_size
             )
 
             {name, {entry_index, entry_subindex, entry_size}}
@@ -239,7 +286,4 @@ defmodule IghEthercat.Slave do
   def terminate(_reason, %{driver: mod, driver_state: s}) do
     mod.terminate(s)
   end
-
-  defp create_range(0), do: []
-  defp create_range(n), do: 0..(n - 1)
 end

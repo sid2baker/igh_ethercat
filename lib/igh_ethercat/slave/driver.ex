@@ -9,7 +9,7 @@ defmodule IghEthercat.Slave.Driver do
   @type state :: term()
   @type pdo :: atom()
 
-  @callback configure(config :: map()) :: {:ok, state()} | {:error, term()}
+  @callback configure(state :: state(), config :: map()) :: {:ok, state()} | {:error, term()}
   @callback list_pdos(state :: state()) :: {:ok, [pdo()]} | {:error, term()}
   @callback pdo_info(state :: state(), pdo :: pdo()) :: {:ok, map()} | {:error, term()}
   @callback terminate(state :: state()) :: :ok
