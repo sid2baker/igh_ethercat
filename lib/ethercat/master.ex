@@ -227,6 +227,12 @@ defmodule EtherCAT.Master do
   end
 
   def synced(:cast, :activate, data) do
+    # Finalize all domain registrations before activation
+    # We handle this directly here to avoid deadlock (Domain can't call back to Master)
+    Enum.each(data.domains, fn domain ->
+      :ok = finalize_domain_registrations(domain, data.master_ref)
+    end)
+
     # TODO check if all slaves are configured
     {:next_state, :operational, data}
   end
@@ -235,6 +241,7 @@ defmodule EtherCAT.Master do
   def synced({:call, from}, {:slave_operation, position, operation, args}, data) do
     result =
       case operation do
+        # Introspection operations
         :get_sync_manager ->
           [sync_index] = args
           Nif.master_get_sync_manager(data.master_ref, position, sync_index)
@@ -251,6 +258,27 @@ defmodule EtherCAT.Master do
           [alias_val, vendor_id, product_code] = args
           Nif.master_slave_config(data.master_ref, alias_val, position, vendor_id, product_code)
 
+        # Configuration operations (must be called before activation)
+        :config_sync_manager ->
+          [slave_config, sync_index, direction, watchdog] = args
+          Nif.slave_config_sync_manager(slave_config, sync_index, direction, watchdog)
+
+        :config_pdo_assign_clear ->
+          [slave_config, sync_index] = args
+          Nif.slave_config_pdo_assign_clear(slave_config, sync_index)
+
+        :config_pdo_assign_add ->
+          [slave_config, sync_index, pdo_index] = args
+          Nif.slave_config_pdo_assign_add(slave_config, sync_index, pdo_index)
+
+        :config_pdo_mapping_clear ->
+          [slave_config, pdo_index] = args
+          Nif.slave_config_pdo_mapping_clear(slave_config, pdo_index)
+
+        :config_pdo_mapping_add ->
+          [slave_config, pdo_index, entry_index, entry_subindex, entry_size] = args
+          Nif.slave_config_pdo_mapping_add(slave_config, pdo_index, entry_index, entry_subindex, entry_size)
+
         _ ->
           {:error, {:unknown_operation, operation}}
       end
@@ -266,6 +294,14 @@ defmodule EtherCAT.Master do
         :register_pdo_entry ->
           [slave_config, entry_index, entry_subindex, domain_ref] = args
           Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
+
+        :set_value_bool ->
+          [domain_ref, offset, value] = args
+          Nif.set_domain_value_bool(domain_ref, offset, value)
+
+        :get_value_bool ->
+          [domain_ref, offset] = args
+          Nif.get_domain_value_bool(domain_ref, offset)
 
         _ ->
           {:error, {:unknown_operation, operation}}
@@ -349,6 +385,26 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
+  # Gateway for Domain module operations in operational state
+  def operational({:call, from}, {:domain_operation, operation, args}, _data) do
+    result =
+      case operation do
+        :set_value_bool ->
+          [domain_ref, offset, value] = args
+          Nif.set_domain_value_bool(domain_ref, offset, value)
+
+        :get_value_bool ->
+          [domain_ref, offset] = args
+          Nif.get_domain_value_bool(domain_ref, offset)
+
+        _ ->
+          {:error, {:unknown_operation, operation}}
+      end
+
+    actions = [{:reply, from, result}]
+    {:keep_state_and_data, actions}
+  end
+
   def operational(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :operational, data)
   end
@@ -357,6 +413,28 @@ defmodule EtherCAT.Master do
   defp handle_unexpected(event_type, event_content, state, _data) do
     Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
     {:keep_state_and_data, []}
+  end
+
+  # Finalizes domain PDO registrations by calling the NIF directly
+  # This avoids deadlock by not requiring Domain to call back to Master
+  defp finalize_domain_registrations(domain, _master_ref) do
+    # Get pending registrations from domain
+    pending = Domain.get_pending_registrations(domain)
+
+    # Register each entry with the NIF
+    entries =
+      for {slave_config, pdo_entries} <- pending do
+        for {name, {entry_index, entry_subindex, entry_size}} <- pdo_entries do
+          domain_ref = Domain.get_ref(domain)
+          offset = Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
+          {name, {offset, entry_size}}
+        end
+      end
+      |> List.flatten()
+      |> Map.new()
+
+    # Store the results back in domain
+    Domain.store_entries(domain, entries)
   end
 
   # Helper function to determine which driver to use for a slave

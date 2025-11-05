@@ -3,7 +3,7 @@ defmodule EtherCAT.Slave do
   require Logger
   import EtherCAT.Utils
 
-  alias EtherCAT.{Master, Domain, Nif}
+  alias EtherCAT.{Master, Domain}
 
   defstruct [
     :driver,
@@ -14,8 +14,7 @@ defmodule EtherCAT.Slave do
     :vendor_id,
     :product_code,
     :slave_config,
-    :configured_inputs,
-    :configured_outputs
+    :pdo_registrations
   ]
 
   @type t :: %__MODULE__{
@@ -27,14 +26,13 @@ defmodule EtherCAT.Slave do
           vendor_id: non_neg_integer(),
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
-          configured_inputs: %{name() => {domain(), type(), offset()}},
-          configured_outputs: %{name() => {domain(), type(), offset()}}
+          pdo_registrations: %{name() => domain()}
         }
 
-  @type name :: atom()
+  @type name :: String.t()
   @type domain :: atom()
-  @type type :: atom()
   @type offset :: non_neg_integer()
+  @type size :: non_neg_integer()
 
   # Client API
 
@@ -181,8 +179,7 @@ defmodule EtherCAT.Slave do
       alias: 0,
       position: position,
       slave_config: slave_config,
-      configured_inputs: %{},
-      configured_outputs: %{}
+      pdo_registrations: %{}
     }
 
     if driver == EtherCAT.Drivers.Generic do
@@ -225,6 +222,8 @@ defmodule EtherCAT.Slave do
   end
 
   # Internal helpers that call Master
+  # All NIF communication must go through Master to prevent race conditions
+
   defp get_sync_manager_internal(state, sync_index) do
     Master.slave_operation(state.master, state.position, :get_sync_manager, [sync_index])
   end
@@ -239,6 +238,33 @@ defmodule EtherCAT.Slave do
       pdo_pos,
       entry_pos
     ])
+  end
+
+  # Configuration helpers - route through Master to avoid direct NIF calls
+
+  defp config_sync_manager_internal(state, sync_index, direction, watchdog) do
+    Master.slave_operation(state.master, state.position, :config_sync_manager,
+      [state.slave_config, sync_index, direction, watchdog])
+  end
+
+  defp config_pdo_assign_clear_internal(state, sync_index) do
+    Master.slave_operation(state.master, state.position, :config_pdo_assign_clear,
+      [state.slave_config, sync_index])
+  end
+
+  defp config_pdo_assign_add_internal(state, sync_index, pdo_index) do
+    Master.slave_operation(state.master, state.position, :config_pdo_assign_add,
+      [state.slave_config, sync_index, pdo_index])
+  end
+
+  defp config_pdo_mapping_clear_internal(state, pdo_index) do
+    Master.slave_operation(state.master, state.position, :config_pdo_mapping_clear,
+      [state.slave_config, pdo_index])
+  end
+
+  defp config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size) do
+    Master.slave_operation(state.master, state.position, :config_pdo_mapping_add,
+      [state.slave_config, pdo_index, entry_index, entry_subindex, entry_size])
   end
 
   @impl true
@@ -285,31 +311,25 @@ defmodule EtherCAT.Slave do
 
   # New API handlers - configuration
   def handle_call({:configure_sync_manager, sync_index, direction, watchdog}, _from, state) do
-    Nif.slave_config_sync_manager(state.slave_config, sync_index, direction, watchdog)
+    config_sync_manager_internal(state, sync_index, direction, watchdog)
     {:reply, :ok, state}
   end
 
   def handle_call({:configure_pdo_assignment, sync_index, pdo_indices}, _from, state) do
-    Nif.slave_config_pdo_assign_clear(state.slave_config, sync_index)
+    config_pdo_assign_clear_internal(state, sync_index)
 
     for pdo_index <- pdo_indices do
-      Nif.slave_config_pdo_assign_add(state.slave_config, sync_index, pdo_index)
+      config_pdo_assign_add_internal(state, sync_index, pdo_index)
     end
 
     {:reply, :ok, state}
   end
 
   def handle_call({:configure_pdo_mapping, pdo_index, entries}, _from, state) do
-    Nif.slave_config_pdo_mapping_clear(state.slave_config, pdo_index)
+    config_pdo_mapping_clear_internal(state, pdo_index)
 
     for {entry_index, entry_subindex, entry_size} <- entries do
-      Nif.slave_config_pdo_mapping_add(
-        state.slave_config,
-        pdo_index,
-        entry_index,
-        entry_subindex,
-        entry_size
-      )
+      config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
     end
 
     {:reply, :ok, state}
@@ -336,21 +356,18 @@ defmodule EtherCAT.Slave do
 
     configured_entries =
       for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
-        Nif.slave_config_sync_manager(state.slave_config, sync_index, direction, watchdog)
-        Nif.slave_config_pdo_assign_clear(state.slave_config, sync_index)
+        # Configure sync manager through Master
+        config_sync_manager_internal(state, sync_index, direction, watchdog)
+        config_pdo_assign_clear_internal(state, sync_index)
 
         for {pdo_index, entries} <- pdos do
-          Nif.slave_config_pdo_assign_add(state.slave_config, sync_index, pdo_index)
-          Nif.slave_config_pdo_mapping_clear(state.slave_config, pdo_index)
+          # Assign PDO to sync manager
+          config_pdo_assign_add_internal(state, sync_index, pdo_index)
+          config_pdo_mapping_clear_internal(state, pdo_index)
 
           for {name, {entry_index, entry_subindex, entry_size}} <- entries do
-            Nif.slave_config_pdo_mapping_add(
-              state.slave_config,
-              pdo_index,
-              entry_index,
-              entry_subindex,
-              entry_size
-            )
+            # Map entries to PDO
+            config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
 
             {name, {entry_index, entry_subindex, entry_size}}
           end
@@ -359,53 +376,84 @@ defmodule EtherCAT.Slave do
       |> List.flatten()
       |> IO.inspect(label: "Entries")
 
+    # Register with domain
     for {name, entry} <- configured_entries do
       Domain.register_pdo_entry(domain, state.slave_config, name, entry)
     end
 
-    {:reply, :ok, state}
+    # After domain is ready, query back the offset/size and cache it locally
+    # Note: This will only work after Master.activate calls Domain.get_ready
+    # For now, we'll store the registrations and populate offsets later
+    pdo_registrations =
+      configured_entries
+      |> Enum.map(fn {name, _entry} -> {name, domain} end)
+      |> Map.new()
+      |> Map.merge(state.pdo_registrations)
+
+    {:reply, :ok, %{state | pdo_registrations: pdo_registrations}}
   end
 
   # Operational API handlers
   def handle_call({:set_pdo_value, name, value}, _from, state) do
-    {domain, type, offset} = state.configured_outputs[name]
-    domain_ref = Domain.get_ref(domain)
+    case state.pdo_registrations[name] do
+      domain_name when is_atom(domain_name) ->
+        case Domain.get_entry(domain_name, name) do
+          {:ok, {offset, size}} ->
+            result =
+              case size do
+                1 -> Domain.set_value_bool(domain_name, offset, value)
+                _ -> {:error, :not_implemented}
+              end
 
-    result =
-      case type do
-        :bool ->
-          Nif.set_domain_value_bool(domain_ref, offset, value)
+            {:reply, result, state}
 
-        _ ->
-          {:error, :not_implemented}
-      end
+          {:error, :not_found} ->
+            {:reply, {:error, {:entry_not_ready, name}}, state}
+        end
 
-    {:reply, result, state}
+      nil ->
+        {:reply, {:error, {:pdo_not_registered, name}}, state}
+    end
   end
 
   def handle_call({:get_pdo_value, name}, _from, state) do
-    {domain, type, offset} = state.configured_inputs[name]
-    domain_ref = Domain.get_ref(domain)
+    case state.pdo_registrations[name] do
+      domain_name when is_atom(domain_name) ->
+        case Domain.get_entry(domain_name, name) do
+          {:ok, {offset, size}} ->
+            result =
+              case size do
+                1 -> Domain.get_value_bool(domain_name, offset)
+                _ -> {:error, :not_implemented}
+              end
 
-    result =
-      case type do
-        :bool -> Nif.get_domain_value_bool(domain_ref, offset)
-        _ -> {:error, :not_implemented}
-      end
+            {:reply, result, state}
 
-    {:reply, result, state}
+          {:error, :not_found} ->
+            {:reply, {:error, {:entry_not_ready, name}}, state}
+        end
+
+      nil ->
+        {:reply, {:error, {:pdo_not_registered, name}}, state}
+    end
   end
 
   def handle_call({:watch_pdo, name, pid}, _from, state) do
-    {domain, type, offset} = state.configured_inputs[name]
+    case state.pdo_registrations[name] do
+      domain_name when is_atom(domain_name) ->
+        # Query domain for entry info
+        case Domain.get_entry(domain_name, name) do
+          {:ok, {offset, size}} ->
+            result = Domain.subscribe(domain_name, pid, name, offset, size)
+            {:reply, result, state}
 
-    result =
-      case type do
-        :bool -> Domain.subscribe(domain, pid, name, offset, 1)
-        _ -> {:error, :not_implemented}
-      end
+          {:error, :not_found} ->
+            {:reply, {:error, {:entry_not_ready, name}}, state}
+        end
 
-    {:reply, result, state}
+      nil ->
+        {:reply, {:error, {:pdo_not_registered, name}}, state}
+    end
   end
 
   @impl true

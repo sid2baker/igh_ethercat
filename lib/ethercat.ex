@@ -23,7 +23,7 @@ defmodule EtherCAT do
   - Registering PDO entries to domains
   - Activating cyclic communication
   """
-  alias EtherCAT.{Master, Domain, Slave}
+  alias EtherCAT.{Master, Slave}
 
   @doc """
   Basic test - connects to master and discovers slaves.
@@ -31,13 +31,15 @@ defmodule EtherCAT do
   def test do
     {:ok, master} = Master.start_link(update_interval: 1000)
     :ok = Master.connect(master)
-    {:ok, [koppler, analog, di1, di2, do1, do2]} = Master.sync_slaves(master)
+    {:ok, [_koppler, di1, do1]} = Master.sync_slaves(master)
     Slave.configure(di1, [])
-    Slave.list_pdos(di1) |> IO.inspect(label: "PDOS")
+    Slave.list_pdos(di1) |> IO.inspect(label: "Input PDOs")
+    Slave.configure(do1, [])
+    Slave.list_pdos(do1) |> IO.inspect(label: "Output PDOs")
     Slave.register_all_pdos(di1, :default_domain)
-    Domain.get_ready(:default_domain)
-    #Master.activate(master)
-    master
+    Slave.register_all_pdos(do1, :default_domain)
+    Master.activate(master)
+    {master, di1, do1}
   end
 
   @doc """
@@ -59,7 +61,6 @@ defmodule EtherCAT do
       :default_domain
     )
 
-    Domain.get_ready(:default_domain)
     Master.activate(master)
     slave2
   end
@@ -76,9 +77,7 @@ defmodule EtherCAT do
 
     Slave.configure(slave2, [])
     Slave.register_pdos(slave2, [:input1], :default_domain)
-    Domain.get_ready(:default_domain)
     Slave.register_all_pdos(slave2, :domain2)
-    Domain.get_ready(:domain2)
     Master.activate(master)
     master
   end
