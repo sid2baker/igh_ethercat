@@ -1,5 +1,5 @@
-defmodule IghEthercat.Drivers.Generic do
-  use IghEthercat.Slave.Driver
+defmodule EtherCAT.Drivers.Generic do
+  use EtherCAT.Slave.Driver
 
   def configure(state, _config) do
     {:ok, state}

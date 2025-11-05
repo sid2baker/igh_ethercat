@@ -1,8 +1,8 @@
-defmodule IghEthercat.Nif do
+defmodule EtherCAT.Nif do
   @moduledoc false
 
   use Zig,
-    otp_app: :igh_ethercat,
+    otp_app: :ethercat,
     leak_check: true,
     c: [
       include_dirs: "/usr/local/include/",

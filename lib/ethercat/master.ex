@@ -1,9 +1,9 @@
-defmodule IghEthercat.Master do
+defmodule EtherCAT.Master do
   @behaviour :gen_statem
   require Logger
-  import IghEthercat.Utils
+  import EtherCAT.Utils
 
-  alias IghEthercat.{Nif, Slave, Domain}
+  alias EtherCAT.{Nif, Slave, Domain}
 
   defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval]
 
@@ -279,7 +279,7 @@ defmodule IghEthercat.Master do
 
   defp driver_for_slave(vendor_id, product_code) do
     case {vendor_id, product_code} do
-      {_, _} -> IghEthercat.Drivers.Generic
+      {_, _} -> EtherCAT.Drivers.Generic
     end
   end
 end

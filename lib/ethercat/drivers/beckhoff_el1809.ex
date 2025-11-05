@@ -1,13 +1,13 @@
-defmodule IghEthercat.Drivers.DefaultDriver do
+defmodule EtherCAT.Drivers.DefaultDriver do
   @moduledoc """
   Example EtherCAT slave driver.
 
   This module demonstrates how to implement a simple EtherCAT slave driver.
   """
 
-  use IghEthercat.Slave.Driver
+  use EtherCAT.Slave.Driver
 
-  alias IghEthercat.{Nif, Slave, Domain}
+  alias EtherCAT.{Nif, Slave, Domain}
 
   def configure(config) do
     {:ok, %{}}

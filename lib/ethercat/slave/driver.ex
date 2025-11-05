@@ -1,4 +1,4 @@
-defmodule IghEthercat.Slave.Driver do
+defmodule EtherCAT.Slave.Driver do
   @moduledoc """
   Behaviour for EtherCAT slave drivers.
 
@@ -16,7 +16,7 @@ defmodule IghEthercat.Slave.Driver do
 
   defmacro __using__(_opts) do
     quote do
-      @behaviour IghEthercat.Slave.Driver
+      @behaviour EtherCAT.Slave.Driver
     end
   end
 end
