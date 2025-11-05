@@ -213,7 +213,9 @@ defmodule EtherCAT.Slave do
       |> Enum.map(fn pdo ->
         entry_index = elem(pdo.entry, 0)
         entry_subindex = elem(pdo.entry, 1)
-        {"pdo_#{Integer.to_string(entry_index, 16)}:#{Integer.to_string(entry_subindex, 16)}", pdo}
+
+        {"pdo_#{Integer.to_string(entry_index, 16)}:#{Integer.to_string(entry_subindex, 16)}",
+         pdo}
       end)
       |> Map.new()
 
@@ -245,28 +247,44 @@ defmodule EtherCAT.Slave do
   # Configuration helpers - route through Master to avoid direct NIF calls
 
   defp config_sync_manager_internal(state, sync_index, direction, watchdog) do
-    Master.slave_operation(state.master, state.position, :config_sync_manager,
-      [state.slave_config, sync_index, direction, watchdog])
+    Master.slave_operation(state.master, state.position, :config_sync_manager, [
+      state.slave_config,
+      sync_index,
+      direction,
+      watchdog
+    ])
   end
 
   defp config_pdo_assign_clear_internal(state, sync_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_assign_clear,
-      [state.slave_config, sync_index])
+    Master.slave_operation(state.master, state.position, :config_pdo_assign_clear, [
+      state.slave_config,
+      sync_index
+    ])
   end
 
   defp config_pdo_assign_add_internal(state, sync_index, pdo_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_assign_add,
-      [state.slave_config, sync_index, pdo_index])
+    Master.slave_operation(state.master, state.position, :config_pdo_assign_add, [
+      state.slave_config,
+      sync_index,
+      pdo_index
+    ])
   end
 
   defp config_pdo_mapping_clear_internal(state, pdo_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_mapping_clear,
-      [state.slave_config, pdo_index])
+    Master.slave_operation(state.master, state.position, :config_pdo_mapping_clear, [
+      state.slave_config,
+      pdo_index
+    ])
   end
 
   defp config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size) do
-    Master.slave_operation(state.master, state.position, :config_pdo_mapping_add,
-      [state.slave_config, pdo_index, entry_index, entry_subindex, entry_size])
+    Master.slave_operation(state.master, state.position, :config_pdo_mapping_add, [
+      state.slave_config,
+      pdo_index,
+      entry_index,
+      entry_subindex,
+      entry_size
+    ])
   end
 
   @impl true
@@ -371,7 +389,13 @@ defmodule EtherCAT.Slave do
 
           for {name, {entry_index, entry_subindex, entry_size}} <- entries do
             # Map entries to PDO
-            config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
+            config_pdo_mapping_add_internal(
+              state,
+              pdo_index,
+              entry_index,
+              entry_subindex,
+              entry_size
+            )
 
             {name, {entry_index, entry_subindex, entry_size}}
           end

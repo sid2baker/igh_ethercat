@@ -197,7 +197,9 @@ defmodule EtherCAT.Domain do
   end
 
   def handle_call({:set_value_bool, offset, value}, _from, state) do
-    result = Master.domain_operation(state.master, :set_value_bool, [state.resource, offset, value])
+    result =
+      Master.domain_operation(state.master, :set_value_bool, [state.resource, offset, value])
+
     {:reply, result, state}
   end
 
@@ -303,7 +305,7 @@ defmodule EtherCAT.Domain do
 
       # For single bit (boolean values)
       if size == 1 do
-        (byte >>> bit_index) &&& 1
+        byte >>> bit_index &&& 1
       else
         # For multi-bit values spanning multiple bytes
         # Extract bits using LSB-first ordering
@@ -338,9 +340,9 @@ defmodule EtherCAT.Domain do
       byte = :binary.at(data, byte_index)
       bits_in_this_byte = min(8 - bit_index, bits_remaining)
       mask = (1 <<< bits_in_this_byte) - 1
-      value = (byte >>> bit_index) &&& mask
+      value = byte >>> bit_index &&& mask
 
-      new_result = result ||| (value <<< shift)
+      new_result = result ||| value <<< shift
       new_shift = shift + bits_in_this_byte
       new_bits_remaining = bits_remaining - bits_in_this_byte
 

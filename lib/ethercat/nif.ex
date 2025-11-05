@@ -114,14 +114,7 @@ defmodule EtherCAT.Nif do
 
   /// Master state with expanded AL (Application Layer) state flags
   /// Each al_state_* flag is true if at least one slave is in that state
-  const master_state_t = struct {
-      slaves_responding: u32,
-      al_state_init: u1,
-      al_state_preop: u1,
-      al_state_safeop: u1,
-      al_state_op: u1,
-      link_up: u1
-  };
+  const master_state_t = struct { slaves_responding: u32, al_state_init: u1, al_state_preop: u1, al_state_safeop: u1, al_state_op: u1, link_up: u1 };
 
   /// Packed representation of slave configuration state
   const ec_slave_config_state_t = packed struct {
@@ -228,20 +221,8 @@ defmodule EtherCAT.Nif do
 
   /// Configure a slave device
   /// Returns a slave configuration resource for further PDO configuration
-  pub fn master_slave_config(
-      master: MasterResource,
-      alias: u16,
-      position: u16,
-      vendor_id: u32,
-      product_code: u32
-  ) !SlaveConfigResource {
-      const slave_config = ecrt.ecrt_master_slave_config(
-          master.unpack(),
-          alias,
-          position,
-          vendor_id,
-          product_code
-      ) orelse return MasterError.SlaveConfigError;
+  pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) !SlaveConfigResource {
+      const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse return MasterError.SlaveConfigError;
 
       std.debug.print("Slave Config: {}\n", .{slave_config});
       std.debug.print("Master: {}\n", .{master.unpack()});
@@ -275,53 +256,23 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get sync manager information for a slave
-  pub fn master_get_sync_manager(
-      master: MasterResource,
-      slave_position: u16,
-      sync_index: u8
-  ) !beam.term {
+  pub fn master_get_sync_manager(master: MasterResource, slave_position: u16, sync_index: u8) !beam.term {
       var sync: ecrt.ec_sync_info_t = undefined;
       _ = ecrt.ecrt_master_get_sync_manager(master.unpack(), slave_position, sync_index, &sync);
-      return beam.make(.{
-          .index = sync.index,
-          .dir = sync.dir,
-          .n_pdos = sync.n_pdos,
-          .watchdog_mode = sync.watchdog_mode
-      }, .{});
+      return beam.make(.{ .index = sync.index, .dir = sync.dir, .n_pdos = sync.n_pdos, .watchdog_mode = sync.watchdog_mode }, .{});
   }
 
   /// Get PDO information for a slave
-  pub fn master_get_pdo(
-      master: MasterResource,
-      slave_position: u16,
-      sync_index: u8,
-      pos: u16
-  ) !beam.term {
+  pub fn master_get_pdo(master: MasterResource, slave_position: u16, sync_index: u8, pos: u16) !beam.term {
       var pdo: ecrt.ec_pdo_info_t = undefined;
       _ = ecrt.ecrt_master_get_pdo(master.unpack(), slave_position, sync_index, pos, &pdo);
-      return beam.make(.{
-          .index = pdo.index,
-          .n_entries = pdo.n_entries
-      }, .{});
+      return beam.make(.{ .index = pdo.index, .n_entries = pdo.n_entries }, .{});
   }
 
   /// Get PDO entry information for a slave
-  pub fn master_get_pdo_entry(
-      master: MasterResource,
-      slave_position: u16,
-      sync_index: u8,
-      pdo_pos: u16,
-      entry_pos: u16
-  ) !beam.term {
+  pub fn master_get_pdo_entry(master: MasterResource, slave_position: u16, sync_index: u8, pdo_pos: u16, entry_pos: u16) !beam.term {
       var pdo_entry: ecrt.ec_pdo_entry_info_t = undefined;
-      _ = ecrt.ecrt_master_get_pdo_entry(
-          master.unpack(),
-          slave_position,
-          sync_index,
-          pdo_pos,
-          entry_pos,
-          &pdo_entry
-      );
+      _ = ecrt.ecrt_master_get_pdo_entry(master.unpack(), slave_position, sync_index, pdo_pos, entry_pos, &pdo_entry);
       return beam.make(pdo_entry, .{});
   }
 
@@ -363,11 +314,28 @@ defmodule EtherCAT.Nif do
       const byte_index = offset / 8;
       const bit_index = @as(u3, @intCast(offset % 8));
 
+      //if (value) {
+      //    data[byte_index] |= (@as(u8, 1) << bit_index);
+      //} else {
+      //    data[byte_index] &= ~(@as(u8, 1) << bit_index);
+      //}
+      std.debug.print("SET OUTPUT: offset={d}, byte={d}, bit={d}, value={}, buffer_ptr=0x{x}\n", .{ offset, byte_index, bit_index, value, @intFromPtr(data) });
+
+      std.debug.print("  Before: data[{d}] = 0x{x:0>2}\n", .{ byte_index, data[byte_index] });
+
       if (value) {
           data[byte_index] |= (@as(u8, 1) << bit_index);
       } else {
           data[byte_index] &= ~(@as(u8, 1) << bit_index);
       }
+
+      std.debug.print("  After:  data[{d}] = 0x{x:0>2}\n", .{ byte_index, data[byte_index] });
+      // Double-check by reading again
+
+      const check_data = ecrt.ecrt_domain_data(domain.unpack()) orelse
+          return DomainError.NullPointer;
+
+      std.debug.print("  Verify: data[{d}] = 0x{x:0>2} (ptr=0x{x})\n", .{ byte_index, check_data[byte_index], @intFromPtr(check_data) });
   }
 
   /// Get the current state of the domain
@@ -387,90 +355,35 @@ defmodule EtherCAT.Nif do
   // ============================================================================
 
   /// Configure a sync manager for the slave
-  pub fn slave_config_sync_manager(
-      slave_config: SlaveConfigResource,
-      sync_index: u8,
-      direction: ecrt.ec_direction_t,
-      watchdog_mode: ecrt.ec_watchdog_mode_t
-  ) !void {
-      _ = ecrt.ecrt_slave_config_sync_manager(
-          slave_config.unpack(),
-          sync_index,
-          direction,
-          watchdog_mode
-      );
+  pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: ecrt.ec_direction_t, watchdog_mode: ecrt.ec_watchdog_mode_t) !void {
+      _ = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
   }
 
   /// Add a PDO to the sync manager's PDO assignment
-  pub fn slave_config_pdo_assign_add(
-      slave_config: SlaveConfigResource,
-      sync_index: u8,
-      index: u16
-  ) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_add(
-          slave_config.unpack(),
-          sync_index,
-          index
-      );
+  pub fn slave_config_pdo_assign_add(slave_config: SlaveConfigResource, sync_index: u8, index: u16) !void {
+      _ = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
   }
 
   /// Clear the sync manager's PDO assignment
-  pub fn slave_config_pdo_assign_clear(
-      slave_config: SlaveConfigResource,
-      sync_index: u8
-  ) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_clear(
-          slave_config.unpack(),
-
- sync_index
-
-      );
+  pub fn slave_config_pdo_assign_clear(slave_config: SlaveConfigResource, sync_index: u8) !void {
+      _ = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
   }
 
   /// Add a PDO entry to a PDO's mapping
-  pub fn slave_config_pdo_mapping_add(
-      slave_config: SlaveConfigResource,
-      pdo_index: u16,
-      entry_index: u16,
-      entry_subindex: u8,
-      entry_bit_length: u8
-  ) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_add(
-          slave_config.unpack(),
-          pdo_index,
-          entry_index,
-          entry_subindex,
-          entry_bit_length
-      );
+  pub fn slave_config_pdo_mapping_add(slave_config: SlaveConfigResource, pdo_index: u16, entry_index: u16, entry_subindex: u8, entry_bit_length: u8) !void {
+      _ = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
   }
 
   /// Clear a PDO's mapping
-  pub fn slave_config_pdo_mapping_clear(
-      slave_config: SlaveConfigResource,
-      pdo_index: u16
-  ) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_clear(
-          slave_config.unpack(),
-          pdo_index
-      );
+  pub fn slave_config_pdo_mapping_clear(slave_config: SlaveConfigResource, pdo_index: u16) !void {
+      _ = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
   }
 
   /// Register a PDO entry for process data exchange
   /// Returns the offset in bits within the domain data
-  pub fn slave_config_reg_pdo_entry(
-      slave_config: SlaveConfigResource,
-      entry_index: u16,
-      entry_subindex: u8,
-      domain: DomainResource
-  ) !usize {
+  pub fn slave_config_reg_pdo_entry(slave_config: SlaveConfigResource, entry_index: u16, entry_subindex: u8, domain: DomainResource) !usize {
       var bit_position: c_uint = 0;
-      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(
-          slave_config.unpack(),
-          entry_index,
-          entry_subindex,
-          domain.unpack(),
-          &bit_position
-      );
+      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(slave_config.unpack(), entry_index, entry_subindex, domain.unpack(), &bit_position);
 
       const domain_size = try get_domain_size(domain);
       std.debug.print("Domain size: {d} bytes\n", .{domain_size});
@@ -485,22 +398,9 @@ defmodule EtherCAT.Nif do
 
   /// Register a PDO entry by position
   /// Returns the offset in bits within the domain data
-  pub fn slave_config_reg_pdo_entry_pos(
-      slave_config: SlaveConfigResource,
-      sync_index: u8,
-      pdo_pos: c_uint,
-      entry_pos: c_uint,
-      domain: DomainResource
-  ) !usize {
+  pub fn slave_config_reg_pdo_entry_pos(slave_config: SlaveConfigResource, sync_index: u8, pdo_pos: c_uint, entry_pos: c_uint, domain: DomainResource) !usize {
       var bit_position: c_uint = 0;
-      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry_pos(
-          slave_config.unpack(),
-          sync_index,
-          pdo_pos,
-          entry_pos,
-          domain.unpack(),
-          &bit_position
-      );
+      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry_pos(slave_config.unpack(), sync_index, pdo_pos, entry_pos, domain.unpack(), &bit_position);
 
       if (result >= 0) {
           return @as(usize, @intCast(result)) * 8 + bit_position;
@@ -515,11 +415,7 @@ defmodule EtherCAT.Nif do
 
   /// Listen for bus state changes and notify the Elixir process
   /// This runs in a separate thread and sends messages when the master state changes
-  pub fn listen_bus_changes(
-      pid: beam.pid,
-      master_resource: MasterResource,
-      interval: u64
-  ) !void {
+  pub fn listen_bus_changes(pid: beam.pid, master_resource: MasterResource, interval: u64) !void {
       defer {
           beam.send(pid, .killed, .{}) catch {};
       }
@@ -543,12 +439,7 @@ defmodule EtherCAT.Nif do
   /// Main cyclic task for EtherCAT communication
   /// Handles master and domain processing, state monitoring, and data change detection
   /// Runs in a separate thread and sends notifications to registered processes
-  pub fn cyclic_task(
-      master_pid: beam.pid,
-      master_resource: MasterResource,
-      domain_configs: []domain_config_t,
-      interval: u64
-  ) !void {
+  pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_configs: []domain_config_t, interval: u64) !void {
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;
       var prev_master_state: master_state_t = undefined;
@@ -584,14 +475,7 @@ defmodule EtherCAT.Nif do
               return MemoryError.OutOfMemory;
           @memcpy(prev_data, data);
 
-          try domains.append(beam.allocator, .{
-              .pid = domain_config.pid,
-              .domain = domain,
-              .state = undefined,
-              .prev_data = prev_data,
-              .data = data,
-              .interval = domain_config.interval
-          });
+          try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .interval = domain_config.interval });
       }
 
       defer {
@@ -606,22 +490,62 @@ defmodule EtherCAT.Nif do
 
       // Main cyclic loop
       while (true) {
-          // Receive frames from network
+          // EtherCAT Cycle (CORRECT ORDER):
+          // 1. Queue domain data (prepare OUTPUTS to send)
+          // 2. Send frames
+          // 3. Receive frames
+          // 4. Process domain data (extract INPUTS from received frames)
+          // Step 1: Queue domain outputs at configured intervals
+          for (domains.items) |*item| {
+              if (counter % item.interval == 0) {
+                  _ = ecrt.ecrt_domain_queue(item.domain);
+              }
+          }
+
+          // Step 2: Send queued frames to network
+          _ = ecrt.ecrt_master_send(master);
+
+          // Step 3: Receive frames from network
           _ = ecrt.ecrt_master_receive(master);
 
           // Check and notify master state changes
           master_state = try do_get_master_state(master);
+
           if (!std.meta.eql(prev_master_state, master_state)) {
               _ = try beam.send(master_pid, .{ .master_state_changed, master_state }, .{});
           }
+
           prev_master_state = master_state;
 
-          // Process all domains
+          // Step 4: Process all domains (extract inputs)
           for (domains.items) |*item| {
               var state: ecrt.ec_domain_state_t = undefined;
 
-              // Process domain data
+              // Debug: print domain buffer BEFORE process
+              if (counter % 1000 == 0) {
+                  std.debug.print("BEFORE process (ptr=0x{x}): ", .{@intFromPtr(item.data.ptr)});
+
+                  for (item.data, 0..) |byte, i| {
+                      std.debug.print("[{d}]=0x{x:0>2} ", .{ i, byte });
+                  }
+
+                  std.debug.print("\n", .{});
+              }
+
+              // Process domain data (updates INPUTS from received frames)
               _ = ecrt.ecrt_domain_process(item.domain);
+
+              // Debug: print domain buffer AFTER process
+              if (counter % 1000 == 0) {
+                  std.debug.print("AFTER  process: ", .{});
+
+                  for (item.data, 0..) |byte, i| {
+                      std.debug.print("[{d}]=0x{x:0>2} ", .{ i, byte });
+                  }
+
+                  std.debug.print("\n", .{});
+              }
+
               _ = ecrt.ecrt_domain_state(item.domain, &state);
 
               // Notify working counter changes
@@ -636,14 +560,20 @@ defmodule EtherCAT.Nif do
 
               // Detect data changes at bit level
               data_diffs.clearRetainingCapacity();
+
               for (item.data, item.prev_data, 0..) |byte_a, byte_b, byte_i| {
                   const diff = byte_a ^ byte_b; // XOR to find differing bits
+
                   if (diff != 0) {
                       var bit_mask = diff;
+
                       while (bit_mask != 0) {
                           const bit_pos = @ctz(bit_mask); // Count trailing zeros
+
                           try data_diffs.append(beam.allocator, byte_i * 8 + bit_pos);
+
                           bit_mask &= bit_mask - 1; // Clear least significant set bit
+
                       }
                   }
               }
@@ -651,24 +581,13 @@ defmodule EtherCAT.Nif do
               // Notify data changes if any detected
               if (data_diffs.items.len > 0) {
                   @memcpy(item.prev_data, item.data);
-                  _ = try beam.send(
-                      item.pid,
-                      .{ .data_changed, item.data, data_diffs.items },
-                      .{}
-                  );
+
+                  _ = try beam.send(item.pid, .{ .data_changed, item.data, data_diffs.items }, .{});
               }
 
               // Update state for next iteration
               item.state = state;
-
-              // Queue domain data at configured interval
-              if (counter % item.interval == 0) {
-                  _ = ecrt.ecrt_domain_queue(item.domain);
-              }
           }
-
-          // Send frames to network
-          _ = ecrt.ecrt_master_send(master);
 
           // Yield to BEAM scheduler periodically
           if (counter % yield_interval == 0) {

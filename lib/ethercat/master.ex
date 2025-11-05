@@ -277,7 +277,14 @@ defmodule EtherCAT.Master do
 
         :config_pdo_mapping_add ->
           [slave_config, pdo_index, entry_index, entry_subindex, entry_size] = args
-          Nif.slave_config_pdo_mapping_add(slave_config, pdo_index, entry_index, entry_subindex, entry_size)
+
+          Nif.slave_config_pdo_mapping_add(
+            slave_config,
+            pdo_index,
+            entry_index,
+            entry_subindex,
+            entry_size
+          )
 
         _ ->
           {:error, {:unknown_operation, operation}}
@@ -428,7 +435,10 @@ defmodule EtherCAT.Master do
       for {slave_config, pdo_entries} <- pending do
         for {name, {entry_index, entry_subindex, entry_size}} <- pdo_entries do
           domain_ref = Domain.get_ref(domain)
-          offset = Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
+
+          offset =
+            Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
+
           {name, {offset, entry_size}}
         end
       end
