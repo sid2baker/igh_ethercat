@@ -52,6 +52,12 @@ defmodule EtherCAT do
     Slave.register_all_pdos(di1, :default_domain)
     Slave.register_all_pdos(do1, :default_domain)
     Master.activate(master)
+    # block till master is ready
+    :timer.sleep(1000)
+    Slave.set_pdo_value(do1, "pdo_7000:1", true)
+    Slave.set_pdo_value(do1, "pdo_7040:1", true)
+    Slave.set_pdo_value(do1, "pdo_7060:1", true)
+    Slave.set_pdo_value(do1, "pdo_7080:1", true)
     {master, di1, do1}
   end
 
