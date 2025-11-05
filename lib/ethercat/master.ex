@@ -17,34 +17,70 @@ defmodule EtherCAT.Master do
         }
 
   # Client API
+
+  @doc """
+  Starts the EtherCAT master process.
+
+  ## Options
+  - `:master_index` - The EtherCAT master index (default: 0)
+  - `:update_interval` - State update interval in microseconds (default: 10_000)
+  """
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
     update_interval = Keyword.get(opts, :update_interval, 10_000)
     :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
   end
 
+  @doc """
+  Connects to the EtherCAT network and checks if the link is up.
+  """
   def connect(master) do
     :gen_statem.call(master, :connect)
   end
 
-  def request_nif(master, {request_fn, request_args}) do
-    :gen_statem.call(master, {:request_nif, request_fn, request_args})
-  end
-
+  @doc """
+  Synchronizes slaves - discovers and configures all slaves on the bus.
+  Returns `{:ok, [slave_pids]}` on success.
+  """
   def sync_slaves(master) do
     :gen_statem.call(master, :sync_slaves)
   end
 
+  @doc """
+  Creates a new process data domain.
+  Domains allow grouping of process data transfers with different periods.
+  """
   def create_domain(master, name, interval) do
     :gen_statem.call(master, {:create_domain, name, interval})
   end
 
+  @doc """
+  Activates the master for cyclic operation.
+  After activation, no further configuration changes are allowed.
+  """
   def activate(master) do
     :gen_statem.cast(master, :activate)
   end
 
+  @doc """
+  Gets the master's NIF reference.
+  """
   def get_ref(master) do
     :gen_statem.call(master, :get_ref)
+  end
+
+  # Internal API - called by Slave and Domain modules
+  # These functions serve as the single gateway for all NIF operations,
+  # preventing race conditions by ensuring only Master talks to the NIF.
+
+  @doc false
+  def slave_operation(master, position, operation, args) do
+    :gen_statem.call(master, {:slave_operation, position, operation, args})
+  end
+
+  @doc false
+  def domain_operation(master, operation, args) do
+    :gen_statem.call(master, {:domain_operation, operation, args})
   end
 
   # Callbacks
@@ -56,7 +92,7 @@ defmodule EtherCAT.Master do
     case Nif.request_master(master_index) do
       {:ok, ref} ->
         domain_ref = Nif.master_create_domain(ref)
-        {:ok, domain} = Domain.start_link(:default_domain, domain_ref, 1)
+        {:ok, domain} = Domain.start_link(:default_domain, self(), domain_ref, 1)
 
         data = %__MODULE__{
           master_ref: ref,
@@ -74,7 +110,9 @@ defmodule EtherCAT.Master do
   end
 
   # State: offline
-  def offline(:enter, _old_state, data) do
+  # Master is created but not yet connected to the network
+
+  def offline(:enter, _old_state, _data) do
     :keep_state_and_data
   end
 
@@ -88,7 +126,7 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def offline({:call, from}, _event_content, data) do
+  def offline({:call, from}, _event_content, _data) do
     actions = [{:reply, from, {:error, :offline}}]
     {:keep_state_and_data, actions}
   end
@@ -98,6 +136,8 @@ defmodule EtherCAT.Master do
   end
 
   # State: stale
+  # Network is up but slaves are not yet discovered/synchronized
+
   def stale(:enter, _old_state, data) do
     actions = [{:state_timeout, data.update_interval, :update_master_state}]
     {:keep_state_and_data, actions}
@@ -178,7 +218,9 @@ defmodule EtherCAT.Master do
     handle_unexpected(event_type, event_content, :stale, data)
   end
 
-  # State: :synced
+  # State: synced
+  # Slaves are discovered and synchronized, ready for configuration
+
   def synced(:enter, _old_state, data) do
     actions = [{:state_timeout, data.update_interval, :update_master_state}]
     {:keep_state_and_data, actions}
@@ -189,8 +231,46 @@ defmodule EtherCAT.Master do
     {:next_state, :operational, data}
   end
 
-  def synced({:call, from}, {:request_nif, request_fn, request_args}, data) do
-    result = apply(Nif, request_fn, [data.master_ref | request_args])
+  # Gateway for Slave module operations - ensures only Master talks to NIF
+  def synced({:call, from}, {:slave_operation, position, operation, args}, data) do
+    result =
+      case operation do
+        :get_sync_manager ->
+          [sync_index] = args
+          Nif.master_get_sync_manager(data.master_ref, position, sync_index)
+
+        :get_pdo ->
+          [sync_index, pdo_pos] = args
+          Nif.master_get_pdo(data.master_ref, position, sync_index, pdo_pos)
+
+        :get_pdo_entry ->
+          [sync_index, pdo_pos, entry_pos] = args
+          Nif.master_get_pdo_entry(data.master_ref, position, sync_index, pdo_pos, entry_pos)
+
+        :slave_config ->
+          [alias_val, vendor_id, product_code] = args
+          Nif.master_slave_config(data.master_ref, alias_val, position, vendor_id, product_code)
+
+        _ ->
+          {:error, {:unknown_operation, operation}}
+      end
+
+    actions = [{:reply, from, result}]
+    {:keep_state_and_data, actions}
+  end
+
+  # Gateway for Domain module operations - ensures only Master talks to NIF
+  def synced({:call, from}, {:domain_operation, operation, args}, _data) do
+    result =
+      case operation do
+        :register_pdo_entry ->
+          [slave_config, entry_index, entry_subindex, domain_ref] = args
+          Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
+
+        _ ->
+          {:error, {:unknown_operation, operation}}
+      end
+
     actions = [{:reply, from, result}]
     {:keep_state_and_data, actions}
   end
@@ -198,7 +278,7 @@ defmodule EtherCAT.Master do
   def synced({:call, from}, {:create_domain, name, interval}, data) do
     domain_ref = Nif.master_create_domain(data.master_ref)
 
-    case Domain.start_link(name, domain_ref, interval) do
+    case Domain.start_link(name, self(), domain_ref, interval) do
       {:ok, domain} ->
         actions = [{:reply, from, domain_ref}]
         {:keep_state, %{data | domains: [domain | data.domains]}, actions}
@@ -233,6 +313,8 @@ defmodule EtherCAT.Master do
   end
 
   # State: operational
+  # Master is activated and running cyclic communication
+
   def operational(:enter, _old_state, data) do
     Nif.master_activate(data.master_ref)
     parent_pid = self()
@@ -252,12 +334,12 @@ defmodule EtherCAT.Master do
     {:keep_state, %{data | task_pid: task_pid}, []}
   end
 
-  def operational(:info, {:master_state_changed, master_state}, data) do
+  def operational(:info, {:master_state_changed, master_state}, _data) do
     IO.inspect(master_state, label: "Master State Changed")
     {:keep_state_and_data, []}
   end
 
-  def operational(:info, {domain, :data_changed, domain_data, data_changes}, data) do
+  def operational(:info, {_domain, :data_changed, _domain_data, data_changes}, _data) do
     IO.inspect(data_changes, label: "Data Changed")
     {:keep_state_and_data, []}
   end
@@ -271,11 +353,15 @@ defmodule EtherCAT.Master do
     handle_unexpected(event_type, event_content, :operational, data)
   end
 
-  # Common catch-all handler
-  defp handle_unexpected(event_type, event_content, state, data) do
+  # Common catch-all handler for unexpected events
+  defp handle_unexpected(event_type, event_content, state, _data) do
     Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
     {:keep_state_and_data, []}
   end
+
+  # Helper function to determine which driver to use for a slave
+  # Currently returns Generic driver for all slaves
+  # TODO: Implement driver selection based on vendor_id and product_code
 
   defp driver_for_slave(vendor_id, product_code) do
     case {vendor_id, product_code} do

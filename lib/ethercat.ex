@@ -1,7 +1,33 @@
 defmodule EtherCAT do
-  alias EtherCAT.{Master, Domain, Slave}
-  alias EtherCAT.Drivers.DefaultDriver
+  @moduledoc """
+  EtherCAT master implementation using the IgH EtherCAT Master for Linux.
 
+  This module provides an idiomatic Elixir interface to EtherCAT communication,
+  with a clean separation of concerns:
+
+  - `EtherCAT.Master` - Manages the EtherCAT master and network lifecycle
+  - `EtherCAT.Slave` - Represents individual slaves with configuration and data access
+  - `EtherCAT.Domain` - Manages process data domains for cyclic communication
+
+  ## Architecture
+
+  All NIF communication is routed through the Master process to prevent race conditions.
+  Slaves and Domains call back into Master using internal APIs that serve as the
+  single gateway to the underlying C library.
+
+  ## Example Usage
+
+  See `test/0`, `test2/0`, and `test3/0` for working examples of:
+  - Connecting to the network
+  - Discovering and configuring slaves
+  - Registering PDO entries to domains
+  - Activating cyclic communication
+  """
+  alias EtherCAT.{Master, Domain, Slave}
+
+  @doc """
+  Basic test - connects to master and discovers slaves.
+  """
   def test do
     {:ok, master} = Master.start_link(update_interval: 1000)
     :ok = Master.connect(master)
@@ -14,10 +40,14 @@ defmodule EtherCAT do
     master
   end
 
+  @doc """
+  Test with PDO registration and activation.
+  Demonstrates registering specific PDOs and activating cyclic communication.
+  """
   def test2 do
     {:ok, master} = Master.start_link()
     :ok = Master.connect(master)
-    {:ok, [slave1, slave2]} = Master.sync_slaves(master)
+    {:ok, [_slave1, slave2]} = Master.sync_slaves(master)
 
     Slave.configure(slave2, [])
     Slave.list_pdos(slave2) |> IO.inspect(label: "Options")
@@ -34,10 +64,14 @@ defmodule EtherCAT do
     slave2
   end
 
+  @doc """
+  Test with multiple domains.
+  Demonstrates creating additional domains with different update periods.
+  """
   def test3 do
     {:ok, master} = Master.start_link()
     :ok = Master.connect(master)
-    {:ok, [slave1, slave2]} = Master.sync_slaves(master)
+    {:ok, [_slave1, slave2]} = Master.sync_slaves(master)
     Master.create_domain(master, :domain2, 100)
 
     Slave.configure(slave2, [])
@@ -49,6 +83,10 @@ defmodule EtherCAT do
     master
   end
 
+  @doc """
+  Gets a domain value at a specific offset.
+  Note: This function references a non-existent NIF function and needs updating.
+  """
   def get(domain, offset) do
     EtherCAT.Nif.get_domain_value(domain, offset)
   end
