@@ -1,9 +1,9 @@
-defmodule IghEthercat.Domain do
+defmodule EtherCAT.Domain do
   use GenServer
 
   defstruct [:resource, :interval, :pdo_entries_to_register, :entries, :subscribers]
 
-  alias IghEthercat.Nif
+  alias EtherCAT.Nif
 
   @type t :: %__MODULE__{
           resource: String.t(),

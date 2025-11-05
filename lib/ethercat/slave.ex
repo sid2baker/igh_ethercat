@@ -1,9 +1,9 @@
-defmodule IghEthercat.Slave do
+defmodule EtherCAT.Slave do
   use GenServer
   require Logger
-  import IghEthercat.Utils
+  import EtherCAT.Utils
 
-  alias IghEthercat.{Master, Domain, Nif}
+  alias EtherCAT.{Master, Domain, Nif}
 
   defstruct [
     :driver,
@@ -105,7 +105,7 @@ defmodule IghEthercat.Slave do
       configured_outputs: %{}
     }
 
-    if driver == IghEthercat.Drivers.Generic do
+    if driver == EtherCAT.Drivers.Generic do
       {:ok, state, {:continue, {:load_driver, sync_count}}}
     else
       {:ok, state}

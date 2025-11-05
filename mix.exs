@@ -1,9 +1,9 @@
-defmodule IghEthercat.MixProject do
+defmodule EtherCAT.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :igh_ethercat,
+      app: :ethercat,
       version: "0.1.0",
       elixir: "~> 1.19-rc",
       start_permanent: Mix.env() == :prod,
@@ -15,7 +15,7 @@ defmodule IghEthercat.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {IghEthercat.Application, []}
+      mod: {EtherCAT.Application, []}
     ]
   end
 

@@ -1,6 +1,6 @@
-defmodule IghEthercat do
-  alias IghEthercat.{Master, Domain, Slave}
-  alias IghEthercat.Drivers.DefaultDriver
+defmodule EtherCAT do
+  alias EtherCAT.{Master, Domain, Slave}
+  alias EtherCAT.Drivers.DefaultDriver
 
   def test do
     {:ok, master} = Master.start_link(update_interval: 1000)
@@ -50,6 +50,6 @@ defmodule IghEthercat do
   end
 
   def get(domain, offset) do
-    IghEthercat.Nif.get_domain_value(domain, offset)
+    EtherCAT.Nif.get_domain_value(domain, offset)
   end
 end

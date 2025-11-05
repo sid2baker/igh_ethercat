@@ -1,4 +1,4 @@
-defmodule IghEthercat.Application do
+defmodule EtherCAT.Application do
   # See https://hexdocs.pm/elixir/Application.html
   # for more information on OTP Applications
   @moduledoc false
@@ -8,13 +8,13 @@ defmodule IghEthercat.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # Starts a worker by calling: IghEthercat.Worker.start_link(arg)
-      # {IghEthercat.Worker, arg}
+      # Starts a worker by calling: EtherCAT.Worker.start_link(arg)
+      # {EtherCAT.Worker, arg}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: IghEthercat.Supervisor]
+    opts = [strategy: :one_for_one, name: EtherCAT.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end
