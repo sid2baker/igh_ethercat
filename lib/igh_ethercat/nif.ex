@@ -308,7 +308,7 @@ defmodule IghEthercat.Nif do
           last_state = state;
           state = try do_get_master_state(master);
 
-          std.time.sleep(interval * std.time.ns_per_ms);
+          std.Thread.sleep(interval * std.time.ns_per_ms);
           try beam.yield();
       }
   }
@@ -416,7 +416,7 @@ defmodule IghEthercat.Nif do
           }
 
           counter +%= 1; // Wraps to 0
-          std.time.sleep(interval * std.time.ns_per_us);
+          std.Thread.sleep(interval * std.time.ns_per_us);
       }
   }
   """
