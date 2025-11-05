@@ -22,7 +22,7 @@ defmodule IghEthercat.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:zigler, github: "E-xyza/zigler", runtime: false}
+      {:zigler, "~> 0.15", runtime: false}
     ]
   end
 end
