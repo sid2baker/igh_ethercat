@@ -661,10 +661,9 @@ defmodule EtherCAT.Nif do
               // Update state for next iteration
               item.state = state;
 
-              // Queue domain data at configured interval
-              if (counter % item.interval == 0) {
-                  _ = ecrt.ecrt_domain_queue(item.domain);
-              }
+              // Queue domain data for sending (outputs)
+              // This must be called every cycle for real-time operation
+              _ = ecrt.ecrt_domain_queue(item.domain);
           }
 
           // Send frames to network

@@ -201,9 +201,9 @@ defmodule EtherCAT.Master do
   end
 
   def stale(:state_timeout, :update_master_state, data) do
-    master_state =
-      Nif.get_master_state(data.master_ref)
-      |> IO.inspect(label: "Stale")
+    master_state = Nif.get_master_state(data.master_ref)
+    require Logger
+    Logger.debug("Master state (stale): #{inspect(master_state)}")
 
     if master_state.slaves_responding == length(data.slaves) and
          master_state.slaves_responding > 0 do
@@ -331,9 +331,9 @@ defmodule EtherCAT.Master do
   end
 
   def synced(:state_timeout, :update_master_state, data) do
-    master_state =
-      Nif.get_master_state(data.master_ref)
-      |> IO.inspect(label: "Ready")
+    master_state = Nif.get_master_state(data.master_ref)
+    require Logger
+    Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
 
     if master_state.slaves_responding == length(data.slaves) do
       actions = [{:state_timeout, data.update_interval, :update_master_state}]
@@ -371,12 +371,14 @@ defmodule EtherCAT.Master do
   end
 
   def operational(:info, {:master_state_changed, master_state}, _data) do
-    IO.inspect(master_state, label: "Master State Changed")
+    require Logger
+    Logger.info("Master State Changed: #{inspect(master_state)}")
     {:keep_state_and_data, []}
   end
 
   def operational(:info, {_domain, :data_changed, _domain_data, data_changes}, _data) do
-    IO.inspect(data_changes, label: "Data Changed")
+    require Logger
+    Logger.debug("Data Changed: #{inspect(data_changes)}")
     {:keep_state_and_data, []}
   end
 

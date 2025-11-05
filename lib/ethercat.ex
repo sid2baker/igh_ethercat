@@ -27,6 +27,19 @@ defmodule EtherCAT do
 
   @doc """
   Basic test - connects to master and discovers slaves.
+
+  Expects a setup with 3 slaves:
+  - Slave 0: Bus coupler/terminal (ignored)
+  - Slave 1: Digital input card (di1)
+  - Slave 2: Digital output card (do1)
+
+  Returns `{master_pid, input_slave_pid, output_slave_pid}` for interactive testing.
+
+  ## Examples
+
+      iex> {m, i, o} = EtherCAT.test()
+      iex> EtherCAT.Slave.watch_pdo(i, "pdo_6000:1")  # Watch first input
+      iex> EtherCAT.Slave.set_pdo_value(o, "pdo_7000:1", true)  # Set first output
   """
   def test do
     {:ok, master} = Master.start_link(update_interval: 1000)

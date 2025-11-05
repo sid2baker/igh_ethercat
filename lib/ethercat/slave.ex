@@ -216,7 +216,9 @@ defmodule EtherCAT.Slave do
         {"pdo_#{Integer.to_string(entry_index, 16)}:#{Integer.to_string(entry_subindex, 16)}", pdo}
       end)
       |> Map.new()
-      |> IO.inspect(label: "Generic Entries")
+
+    require Logger
+    Logger.debug("Generic driver discovered PDOs: #{inspect(pdos)}")
 
     {:noreply, %{state | driver_state: %{pdos: pdos}}}
   end
@@ -352,7 +354,9 @@ defmodule EtherCAT.Slave do
           end
         )
       end)
-      |> IO.inspect(label: "SM")
+
+    require Logger
+    Logger.debug("Sync managers to configure: #{inspect(sync_managers)}")
 
     configured_entries =
       for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
@@ -374,7 +378,9 @@ defmodule EtherCAT.Slave do
         end
       end
       |> List.flatten()
-      |> IO.inspect(label: "Entries")
+
+    require Logger
+    Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
 
     # Register with domain
     for {name, entry} <- configured_entries do
