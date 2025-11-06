@@ -87,7 +87,7 @@ const domain_config_t = struct {
 /// Output state buffer info for SET operations
 const OutputStateInfo = struct {
     buffer: []u8,
-    output_start: usize,
+    dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
 };
 
 /// Global map of domain pointers to output state buffers
@@ -106,12 +106,14 @@ const DomainItem = struct {
     prev_data: []u8,
     data: []u8,
     output_state: []u8, // Tracks output values across cycles
+    dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
     interval: u32,
 
     /// Cleanup allocated memory for this domain item
     fn deinit(self: *DomainItem, allocator: std.mem.Allocator) void {
         allocator.free(self.prev_data);
         allocator.free(self.output_state);
+        allocator.free(self.dirty_bytes);
     }
 };
 
@@ -297,7 +299,7 @@ pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool)
 
     if (output_state_map.get(domain_addr)) |info| {
         // Write to output_state buffer (cyclic task will copy to domain buffer)
-        if (byte_index >= info.output_start and byte_index < info.buffer.len) {
+        if (byte_index < info.buffer.len) {
             std.debug.print("SET: offset={d} (byte[{d}], bit{d}) = {any}, writing to output_state\n", .{offset, byte_index, bit_index, value});
 
             if (value) {
@@ -306,9 +308,12 @@ pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool)
                 info.buffer[byte_index] &= ~(@as(u8, 1) << bit_index);
             }
 
-            std.debug.print("     output_state[{d}] now = 0x{x:0>2}\n", .{byte_index, info.buffer[byte_index]});
+            // Mark this byte as dirty (it's an output that needs to be preserved)
+            info.dirty_bytes[byte_index] = true;
+
+            std.debug.print("     output_state[{d}] now = 0x{x:0>2} (marked dirty)\n", .{byte_index, info.buffer[byte_index]});
         } else {
-            return DomainError.OutOfBounds; // Trying to write to input section
+            return DomainError.OutOfBounds;
         }
     } else {
         return DomainError.NullPointer; // Domain not registered
@@ -452,6 +457,11 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             return MemoryError.OutOfMemory;
         @memset(output_state, 0); // Initialize outputs to 0
 
+        // Allocate dirty_bytes bitmap to track which bytes are outputs (written by SET)
+        const dirty_bytes = beam.allocator.alloc(bool, size) catch
+            return MemoryError.OutOfMemory;
+        @memset(dirty_bytes, false); // Initially no bytes marked as outputs
+
         // Register this domain's output_state in the global map for SET operations
         // Initialize map on first use
         if (!output_state_map_initialized) {
@@ -459,12 +469,11 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             output_state_map_initialized = true;
         }
         const domain_addr = @intFromPtr(domain);
-        const output_start: usize = 2; // Outputs start at byte 2 for our 4-byte domain
         output_state_map_mutex.lock();
         defer output_state_map_mutex.unlock();
-        try output_state_map.put(domain_addr, .{ .buffer = output_state, .output_start = output_start });
+        try output_state_map.put(domain_addr, .{ .buffer = output_state, .dirty_bytes = dirty_bytes });
 
-        try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .output_state = output_state, .interval = domain_config.interval });
+        try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .output_state = output_state, .dirty_bytes = dirty_bytes, .interval = domain_config.interval });
     }
 
     defer {
@@ -498,18 +507,19 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         // Solution: After process, copy output_state to domain buffer before queue/send.
         for (domains.items) |*item| {
             var state: ecrt.ec_domain_state_t = undefined;
-            const output_start = 2; // Outputs start at byte 2 for 4-byte domain
 
             // Process domain data (updates buffer from received frame, OVERWRITES outputs with echoes)
             _ = ecrt.ecrt_domain_process(item.domain);
 
-            // Restore output section from output_state (preserves SET operations from Elixir)
-            if (item.data.len > output_start) {
-                const output_end = item.data.len;
-                if (counter % 500 == 0 and item.output_state[3] != 0) {
-                    std.debug.print("RESTORE cycle {d}: copying output_state[3]=0x{x:0>2} to data[3]\n", .{counter, item.output_state[3]});
+            // Restore ONLY dirty bytes (those written by SET) from output_state
+            // This works regardless of PDO layout - we only preserve bytes that were explicitly set as outputs
+            for (0..item.data.len) |i| {
+                if (item.dirty_bytes[i]) {
+                    if (counter % 500 == 0 and item.output_state[i] != 0) {
+                        std.debug.print("RESTORE cycle {d}: byte[{d}]=0x{x:0>2} from output_state (dirty)\n", .{counter, i, item.output_state[i]});
+                    }
+                    item.data[i] = item.output_state[i];
                 }
-                @memcpy(item.data[output_start..output_end], item.output_state[output_start..output_end]);
             }
 
             _ = ecrt.ecrt_domain_state(item.domain, &state);
