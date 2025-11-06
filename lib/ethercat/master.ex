@@ -384,8 +384,11 @@ defmodule EtherCAT.Master do
   # This avoids deadlock by not requiring Domain to call back to Master.
   # Called during activation to register all pending PDO entries with their domains.
   defp finalize_domain_registrations(domain, _master_ref) do
+    require Logger
     pending = Domain.get_pending_registrations(domain)
     domain_ref = Domain.get_ref(domain)
+
+    Logger.debug("Finalizing domain registrations: #{map_size(pending)} slave configs")
 
     entries =
       for {slave_config, pdo_entries} <- pending,
@@ -393,9 +396,13 @@ defmodule EtherCAT.Master do
         offset =
           Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
 
+        Logger.debug("  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}")
+
         {name, {offset, entry_size}}
       end
       |> Map.new()
+
+    Logger.debug("Total entries registered: #{map_size(entries)}")
 
     Domain.store_entries(domain, entries)
   end

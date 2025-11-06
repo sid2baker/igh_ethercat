@@ -52,13 +52,15 @@ defmodule EtherCAT do
     Slave.register_all_pdos(di1, :default_domain)
     Slave.register_all_pdos(do1, :default_domain)
     Master.activate(master)
-    # block till master is ready
+    # I connected output 1 with input 1, so i should receive changes
     :timer.sleep(1000)
-    Slave.set_pdo_value(do1, "pdo_7000:1", true)
-    Slave.set_pdo_value(do1, "pdo_7040:1", true)
-    Slave.set_pdo_value(do1, "pdo_7060:1", true)
-    Slave.set_pdo_value(do1, "pdo_7080:1", true)
     Slave.watch_pdo(di1, "pdo_6000:1")
+    :timer.sleep(500)
+    Slave.set_pdo_value(do1, "pdo_7000:1", true)
+    :timer.sleep(500)
+    Slave.set_pdo_value(do1, "pdo_7000:1", false)
+    :timer.sleep(500)
+    Slave.set_pdo_value(do1, "pdo_7000:1", true)
     {master, di1, do1}
   end
 
