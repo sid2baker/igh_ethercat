@@ -132,62 +132,36 @@ defmodule EtherCAT.Nif do
       interval: u32, // Multiplier for the base interval
   };
 
-  /// Organized buffer structure for domain memory management
-  /// All buffers are managed explicitly in Zig, with external buffer provided to EtherCAT library
-  const DomainBuffers = struct {
-      /// External buffer provided to EtherCAT library via ecrt_domain_external_memory()
-      /// This is the "live" buffer that domain_process() reads/writes
-      /// After domain_process(), this contains: inputs (updated from slaves) + outputs (echoed/stale)
-      external: []u8,
-
-      /// Preserves output values written by SET operations across cycles
-      /// After domain_process() overwrites external buffer, we restore outputs from here
-      /// Only dirty_bytes are copied: external[i] = output_state[i] where dirty_bytes[i] == true
-      output_state: []u8,
-
-      /// Bitmap marking which bytes are outputs (written by SET operations)
-      /// true = output byte (must be preserved), false = input byte (read-only)
-      /// This allows mixed input/output PDOs without explicit PDO layout knowledge
-      dirty_bytes: []bool,
-
-      /// Previous cycle's buffer state for efficient change detection
-      /// We XOR external with previous to find changed bits in O(n) time
-      previous: []u8,
-
-      /// Cleanup all allocated buffers
-      fn deinit(self: *DomainBuffers, allocator: std.mem.Allocator) void {
-          allocator.free(self.external);
-          allocator.free(self.output_state);
-          allocator.free(self.dirty_bytes);
-          allocator.free(self.previous);
-      }
-  };
-
-  /// Output state buffer info for SET operations (used in global map)
+  /// Output state buffer info for SET operations
   const OutputStateInfo = struct {
       buffer: []u8,
-      dirty_bytes: []bool,
+      dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
   };
 
   /// Global map of domain pointers to output state buffers
-  /// Required because SET operations from Elixir processes must safely write outputs
-  /// while cyclic task is running in a separate thread
-  /// Thread-safe via mutex protection
+  /// This allows async SET operations to write to output_state instead of domain buffer
   var output_state_map_mutex: std.Thread.Mutex = .{};
   var output_state_map: std.AutoHashMap(usize, OutputStateInfo) = undefined;
   var output_state_map_initialized: bool = false;
 
   /// Tracked domain state for cyclic task processing
+  /// This structure maintains all necessary state for a domain including
+  /// process ID, domain pointer, state, and data buffers for change detection
   const DomainItem = struct {
       pid: beam.pid,
       domain: *ecrt.ec_domain_t,
       state: ecrt.ec_domain_state_t,
-      buffers: DomainBuffers,
+      prev_data: []u8,
+      data: []u8,
+      output_state: []u8, // Tracks output values across cycles
+      dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
       interval: u32,
 
       /// Cleanup allocated memory for this domain item
       fn deinit(self: *DomainItem, allocator: std.mem.Allocator) void {
-          self.buffers.deinit(allocator);
+          allocator.free(self.prev_data);
+          allocator.free(self.output_state);
+          allocator.free(self.dirty_bytes);
       }
   };
 
@@ -343,7 +317,6 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get a boolean value from domain data at the specified bit offset
-  /// Note: ecrt_domain_data() returns the external buffer we provided via ecrt_domain_external_memory()
   pub fn get_domain_value_bool(domain: DomainResource, offset: usize) !bool {
       const data = ecrt.ecrt_domain_data(domain.unpack()) orelse
           return DomainError.NullPointer;
@@ -357,10 +330,7 @@ defmodule EtherCAT.Nif do
   }
 
   /// Set a boolean value in domain data at the specified bit offset
-  /// Thread-safe: Writes to output_state buffer to avoid race with cyclic task
-  ///
-  /// The cyclic task will restore this value from output_state to external buffer
-  /// after domain_process() overwrites it. This ensures outputs are never lost.
+  /// IMPORTANT: Writes to output_state buffer to avoid race with cyclic task
   pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool) !void {
       const domain_ptr = domain.unpack();
       const domain_size = ecrt.ecrt_domain_size(domain_ptr);
@@ -370,25 +340,31 @@ defmodule EtherCAT.Nif do
       const byte_index = offset / 8;
       const bit_index = @as(u3, @intCast(offset % 8));
 
-      // Look up output_state buffer for this domain (thread-safe via mutex)
+      // Look up output_state buffer for this domain
       const domain_addr = @intFromPtr(domain_ptr);
       output_state_map_mutex.lock();
       defer output_state_map_mutex.unlock();
 
       if (output_state_map.get(domain_addr)) |info| {
-          if (byte_index >= info.buffer.len) return DomainError.OutOfBounds;
+          // Write to output_state buffer (cyclic task will copy to domain buffer)
+          if (byte_index < info.buffer.len) {
+              std.debug.print("SET: offset={d} (byte[{d}], bit{d}) = {any}, writing to output_state\n", .{offset, byte_index, bit_index, value});
 
-          // Write to output_state buffer (cyclic task will copy to external buffer)
-          if (value) {
-              info.buffer[byte_index] |= (@as(u8, 1) << bit_index);
+              if (value) {
+                  info.buffer[byte_index] |= (@as(u8, 1) << bit_index);
+              } else {
+                  info.buffer[byte_index] &= ~(@as(u8, 1) << bit_index);
+              }
+
+              // Mark this byte as dirty (it's an output that needs to be preserved)
+              info.dirty_bytes[byte_index] = true;
+
+              std.debug.print("     output_state[{d}] now = 0x{x:0>2} (marked dirty)\n", .{byte_index, info.buffer[byte_index]});
           } else {
-              info.buffer[byte_index] &= ~(@as(u8, 1) << bit_index);
+              return DomainError.OutOfBounds;
           }
-
-          // Mark this byte as dirty (it's an output that must be preserved across cycles)
-          info.dirty_bytes[byte_index] = true;
       } else {
-          return DomainError.NullPointer; // Domain not registered in map
+          return DomainError.NullPointer; // Domain not registered
       }
   }
 
@@ -489,19 +465,14 @@ defmodule EtherCAT.Nif do
   /// Main cyclic task for EtherCAT communication
   /// Handles master and domain processing, state monitoring, and data change detection
   /// Runs in a separate thread and sends notifications to registered processes
-  ///
-  /// Architecture:
-  /// - Allocates external memory for each domain and provides to EtherCAT library
-  /// - Uses DomainBuffers structure for organized memory management
-  /// - Preserves outputs across cycles via dirty_bytes bitmap
-  /// - Detects changes via XOR comparison with previous cycle
   pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_configs: []domain_config_t, interval: u64) !void {
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;
       var prev_master_state: master_state_t = undefined;
       const yield_interval = @divTrunc(100_000, interval); // Yield every 100ms
 
-      // Initialize domain tracking list
+      // Initialize domain tracking list with Zig 0.15.2 compatible syntax
+      // Note: In Zig 0.15.2, ArrayList uses {} initialization and allocator is passed to methods
       var domains = std.ArrayList(DomainItem){};
       defer {
           // Clean up all allocated domain data
@@ -511,64 +482,46 @@ defmodule EtherCAT.Nif do
           domains.deinit(beam.allocator);
       }
 
-      // Initialize global output_state map on first use
-      if (!output_state_map_initialized) {
-          output_state_map = std.AutoHashMap(usize, OutputStateInfo).init(beam.allocator);
-          output_state_map_initialized = true;
-      }
-
-      // Set up domain tracking with external memory
+      // Set up domain tracking
       for (domain_configs) |domain_config| {
           const domain = domain_config.resource.unpack();
           const size = ecrt.ecrt_domain_size(domain);
+          const data_ptr = ecrt.ecrt_domain_data(domain);
 
-          if (size == 0) return MasterError.InvalidDomainData;
+          if (data_ptr == null) {
+              return MasterError.InvalidDomainData;
+          }
 
-          // Allocate external buffer for domain (this becomes the domain's working buffer)
-          const external = beam.allocator.alloc(u8, size) catch
+          // Memory for data is managed by ecrt.h
+          const data = data_ptr[0..size];
+
+          // Allocate our own buffer for tracking previous data
+          const prev_data = beam.allocator.alloc(u8, size) catch
               return MemoryError.OutOfMemory;
-          @memset(external, 0);
+          @memcpy(prev_data, data);
 
-          // Provide external buffer to EtherCAT library
-          // From now on, domain_process() will read/write to our external buffer
-          ecrt.ecrt_domain_external_memory(domain, external.ptr);
-
-          // Allocate output state buffer to preserve SET values across cycles
+          // Allocate buffer for tracking output state across cycles
           const output_state = beam.allocator.alloc(u8, size) catch
               return MemoryError.OutOfMemory;
-          @memset(output_state, 0);
+          @memset(output_state, 0); // Initialize outputs to 0
 
-          // Allocate dirty_bytes bitmap to track which bytes are outputs
+          // Allocate dirty_bytes bitmap to track which bytes are outputs (written by SET)
           const dirty_bytes = beam.allocator.alloc(bool, size) catch
               return MemoryError.OutOfMemory;
-          @memset(dirty_bytes, false);
-
-          // Allocate previous buffer for change detection
-          const previous = beam.allocator.alloc(u8, size) catch
-              return MemoryError.OutOfMemory;
-          @memcpy(previous, external);
+          @memset(dirty_bytes, false); // Initially no bytes marked as outputs
 
           // Register this domain's output_state in the global map for SET operations
+          // Initialize map on first use
+          if (!output_state_map_initialized) {
+              output_state_map = std.AutoHashMap(usize, OutputStateInfo).init(beam.allocator);
+              output_state_map_initialized = true;
+          }
           const domain_addr = @intFromPtr(domain);
           output_state_map_mutex.lock();
+          defer output_state_map_mutex.unlock();
           try output_state_map.put(domain_addr, .{ .buffer = output_state, .dirty_bytes = dirty_bytes });
-          output_state_map_mutex.unlock();
 
-          // Create DomainItem with organized buffers
-          const buffers = DomainBuffers{
-              .external = external,
-              .output_state = output_state,
-              .dirty_bytes = dirty_bytes,
-              .previous = previous,
-          };
-
-          try domains.append(beam.allocator, .{
-              .pid = domain_config.pid,
-              .domain = domain,
-              .state = undefined,
-              .buffers = buffers,
-              .interval = domain_config.interval,
-          });
+          try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .output_state = output_state, .dirty_bytes = dirty_bytes, .interval = domain_config.interval });
       }
 
       defer {
@@ -576,63 +529,72 @@ defmodule EtherCAT.Nif do
       }
 
       var counter: u32 = 0;
-      var cycle_start_time: u64 = 0;
 
-      // Initialize change tracking list (reused across cycles)
+      // Initialize change tracking list with Zig 0.15.2 compatible syntax
       var data_diffs = std.ArrayList(usize){};
       defer data_diffs.deinit(beam.allocator);
 
       // Main cyclic loop
-      // Standard EtherCAT cycle order:
-      // 1. Set application time
-      // 2. Receive frames (get inputs from slaves)
-      // 3. Process domains (library updates external buffer with inputs)
-      // 4. Restore outputs (copy output_state → external for dirty bytes)
-      // 5. Detect and notify changes
-      // 6. Queue domains (prepare outputs to send)
-      // 7. Send frames (transmit outputs to slaves)
+      var cycle_start_time: u64 = 0;
+
       while (true) {
-          // 1. Set application time (synchronize with master clock)
+          // EtherCAT Cycle - Simplified and Correct Order:
+          // The key insight: domain_process() only updates INPUTS, not outputs!
+          // So we can safely process first, then queue outputs.
+
+          // 1. Set application time (synchronize with master)
           cycle_start_time = cycle_start_time + (interval * std.time.ns_per_us);
           _ = ecrt.ecrt_master_application_time(master, cycle_start_time);
 
-          // 2. Receive frames from network
+          // 2. Receive frames from network (contains slave responses with input data)
           _ = ecrt.ecrt_master_receive(master);
 
-          // 3-5. Process each domain
+          // 3. Process domains and restore outputs
+          // Key insight: domain_process() overwrites the ENTIRE buffer with received data.
+          // SET operations write to output_state buffer (via global map lookup).
+          // Solution: After process, copy output_state to domain buffer before queue/send.
           for (domains.items) |*item| {
               var state: ecrt.ec_domain_state_t = undefined;
 
-              // 3. Process domain data (library writes inputs to external buffer)
-              // WARNING: This overwrites the ENTIRE external buffer, including outputs
+              // Process domain data (updates buffer from received frame, OVERWRITES outputs with echoes)
               _ = ecrt.ecrt_domain_process(item.domain);
 
-              // 4. Restore outputs from output_state buffer
-              // Only restore dirty bytes (those explicitly set via SET operations)
-              // This preserves outputs while allowing inputs to update naturally
-              for (0..item.buffers.external.len) |i| {
-                  if (item.buffers.dirty_bytes[i]) {
-                      item.buffers.external[i] = item.buffers.output_state[i];
+              // Restore ONLY dirty bytes (those written by SET) from output_state
+              // This works regardless of PDO layout - we only preserve bytes that were explicitly set as outputs
+              for (0..item.data.len) |i| {
+                  if (item.dirty_bytes[i]) {
+                      if (counter % 500 == 0 and item.output_state[i] != 0) {
+                          std.debug.print("RESTORE cycle {d}: byte[{d}]=0x{x:0>2} from output_state (dirty)\n", .{counter, i, item.output_state[i]});
+                      }
+                      item.data[i] = item.output_state[i];
                   }
               }
 
-              // Get domain state for monitoring
               _ = ecrt.ecrt_domain_state(item.domain, &state);
 
-              // Notify working counter changes (for diagnostics)
+              // Debug: Print all domain bytes every 500 cycles
+              if (counter % 500 == 0) {
+                  std.debug.print("Cycle {d}: ", .{counter});
+                  for (0..item.data.len) |i| {
+                      std.debug.print("[{d}]=0x{x:0>2} ", .{i, item.data[i]});
+                  }
+                  std.debug.print(" WC={d}\n", .{state.working_counter});
+              }
+
+              // Notify working counter changes
               if (state.working_counter != item.state.working_counter) {
                   _ = try beam.send(item.pid, .{ .wc_changed, state.working_counter }, .{});
               }
 
-              // Notify working counter state changes (for error detection)
+              // Notify state changes
               if (state.wc_state != item.state.wc_state) {
                   _ = try beam.send(item.pid, .{ .state_changed, state.wc_state }, .{});
               }
 
-              // 5. Detect data changes at bit level using XOR
+              // Detect data changes at bit level
               data_diffs.clearRetainingCapacity();
 
-              for (item.buffers.external, item.buffers.previous, 0..) |byte_a, byte_b, byte_i| {
+              for (item.data, item.prev_data, 0..) |byte_a, byte_b, byte_i| {
                   const diff = byte_a ^ byte_b; // XOR to find differing bits
 
                   if (diff != 0) {
@@ -640,23 +602,26 @@ defmodule EtherCAT.Nif do
 
                       while (bit_mask != 0) {
                           const bit_pos = @ctz(bit_mask); // Count trailing zeros
+
                           try data_diffs.append(beam.allocator, byte_i * 8 + bit_pos);
+
                           bit_mask &= bit_mask - 1; // Clear least significant set bit
+
                       }
                   }
               }
 
-              // Notify subscribers of data changes
+              // Notify data changes if any detected
               if (data_diffs.items.len > 0) {
-                  @memcpy(item.buffers.previous, item.buffers.external);
-                  _ = try beam.send(item.pid, .{ .data_changed, item.buffers.external, data_diffs.items }, .{});
+                  @memcpy(item.prev_data, item.data);
+                  _ = try beam.send(item.pid, .{ .data_changed, item.data, data_diffs.items }, .{});
               }
 
               // Update state for next iteration
               item.state = state;
           }
 
-          // Check and notify master state changes
+          // Step 4: Check and notify master state changes
           master_state = try do_get_master_state(master);
 
           if (!std.meta.eql(prev_master_state, master_state)) {
@@ -665,17 +630,21 @@ defmodule EtherCAT.Nif do
 
           prev_master_state = master_state;
 
-          // 6. Queue domain outputs at configured intervals
+          // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
           for (domains.items) |*item| {
               if (counter % item.interval == 0) {
+                  // Debug: Show what's being queued every 500 cycles
+                  if (counter % 500 == 0 and item.data.len > 3) {
+                      std.debug.print("QUEUE cycle {d}: byte[3]=0x{x:0>2} (about to queue)\n", .{counter, item.data[3]});
+                  }
                   _ = ecrt.ecrt_domain_queue(item.domain);
               }
           }
 
-          // 7. Send queued frames to network
+          // Step 6: Send queued frames to network
           _ = ecrt.ecrt_master_send(master);
 
-          // Yield to BEAM scheduler periodically (every 100ms)
+          // Yield to BEAM scheduler periodically
           if (counter % yield_interval == 0) {
               try beam.yield();
           }
