@@ -58,6 +58,7 @@ defmodule EtherCAT do
     Slave.set_pdo_value(do1, "pdo_7040:1", true)
     Slave.set_pdo_value(do1, "pdo_7060:1", true)
     Slave.set_pdo_value(do1, "pdo_7080:1", true)
+    Slave.watch_pdo(di1, "pdo_6000:1")
     {master, di1, do1}
   end
 
@@ -99,13 +100,5 @@ defmodule EtherCAT do
     Slave.register_all_pdos(slave2, :domain2)
     Master.activate(master)
     master
-  end
-
-  @doc """
-  Gets a domain value at a specific offset.
-  Note: This function references a non-existent NIF function and needs updating.
-  """
-  def get(domain, offset) do
-    EtherCAT.Nif.get_domain_value(domain, offset)
   end
 end

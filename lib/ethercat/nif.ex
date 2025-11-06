@@ -68,7 +68,6 @@ defmodule EtherCAT.Nif do
   pub const MasterResourceCallbacks = struct {
       /// Destructor called when master resource is garbage collected
       pub fn dtor(s: **ecrt.ec_master_t) void {
-          std.debug.print("dtor called: {}\n", .{s.*});
           ecrt.ecrt_release_master(s.*);
       }
   };
@@ -223,9 +222,6 @@ defmodule EtherCAT.Nif do
   /// Returns a slave configuration resource for further PDO configuration
   pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) !SlaveConfigResource {
       const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse return MasterError.SlaveConfigError;
-
-      std.debug.print("Slave Config: {}\n", .{slave_config});
-      std.debug.print("Master: {}\n", .{master.unpack()});
       return SlaveConfigResource.create(slave_config, .{});
   }
 
@@ -252,7 +248,6 @@ defmodule EtherCAT.Nif do
   pub fn release_master(master: MasterResource) !void {
       ecrt.ecrt_release_master(master.unpack());
       master.release();
-      std.debug.print("Master released: {}\n", .{master.unpack()});
   }
 
   /// Get sync manager information for a slave
@@ -314,28 +309,11 @@ defmodule EtherCAT.Nif do
       const byte_index = offset / 8;
       const bit_index = @as(u3, @intCast(offset % 8));
 
-      //if (value) {
-      //    data[byte_index] |= (@as(u8, 1) << bit_index);
-      //} else {
-      //    data[byte_index] &= ~(@as(u8, 1) << bit_index);
-      //}
-      std.debug.print("SET OUTPUT: offset={d}, byte={d}, bit={d}, value={}, buffer_ptr=0x{x}\n", .{ offset, byte_index, bit_index, value, @intFromPtr(data) });
-
-      std.debug.print("  Before: data[{d}] = 0x{x:0>2}\n", .{ byte_index, data[byte_index] });
-
       if (value) {
           data[byte_index] |= (@as(u8, 1) << bit_index);
       } else {
           data[byte_index] &= ~(@as(u8, 1) << bit_index);
       }
-
-      std.debug.print("  After:  data[{d}] = 0x{x:0>2}\n", .{ byte_index, data[byte_index] });
-      // Double-check by reading again
-
-      const check_data = ecrt.ecrt_domain_data(domain.unpack()) orelse
-          return DomainError.NullPointer;
-
-      std.debug.print("  Verify: data[{d}] = 0x{x:0>2} (ptr=0x{x})\n", .{ byte_index, check_data[byte_index], @intFromPtr(check_data) });
   }
 
   /// Get the current state of the domain
@@ -384,10 +362,6 @@ defmodule EtherCAT.Nif do
   pub fn slave_config_reg_pdo_entry(slave_config: SlaveConfigResource, entry_index: u16, entry_subindex: u8, domain: DomainResource) !usize {
       var bit_position: c_uint = 0;
       const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(slave_config.unpack(), entry_index, entry_subindex, domain.unpack(), &bit_position);
-
-      const domain_size = try get_domain_size(domain);
-      std.debug.print("Domain size: {d} bytes\n", .{domain_size});
-      std.debug.print("Byte offset: {d}, Bit position: {d}\n", .{ result, bit_position });
 
       if (result >= 0) {
           return @as(usize, @intCast(result)) * 8 + bit_position;
@@ -460,9 +434,8 @@ defmodule EtherCAT.Nif do
       for (domain_configs) |domain_config| {
           const domain = domain_config.resource.unpack();
           const size = ecrt.ecrt_domain_size(domain);
-          std.debug.print("Domain size: {d} bytes\n", .{size});
-
           const data_ptr = ecrt.ecrt_domain_data(domain);
+
           if (data_ptr == null) {
               return MasterError.InvalidDomainData;
           }
@@ -521,31 +494,8 @@ defmodule EtherCAT.Nif do
           for (domains.items) |*item| {
               var state: ecrt.ec_domain_state_t = undefined;
 
-              // Debug: print domain buffer BEFORE process
-              if (counter % 1000 == 0) {
-                  std.debug.print("BEFORE process (ptr=0x{x}): ", .{@intFromPtr(item.data.ptr)});
-
-                  for (item.data, 0..) |byte, i| {
-                      std.debug.print("[{d}]=0x{x:0>2} ", .{ i, byte });
-                  }
-
-                  std.debug.print("\n", .{});
-              }
-
               // Process domain data (updates INPUTS from received frames)
               _ = ecrt.ecrt_domain_process(item.domain);
-
-              // Debug: print domain buffer AFTER process
-              if (counter % 1000 == 0) {
-                  std.debug.print("AFTER  process: ", .{});
-
-                  for (item.data, 0..) |byte, i| {
-                      std.debug.print("[{d}]=0x{x:0>2} ", .{ i, byte });
-                  }
-
-                  std.debug.print("\n", .{});
-              }
-
               _ = ecrt.ecrt_domain_state(item.domain, &state);
 
               // Notify working counter changes
@@ -561,11 +511,18 @@ defmodule EtherCAT.Nif do
               // Detect data changes at bit level
               data_diffs.clearRetainingCapacity();
 
+              // Debug: Print data every 1000 cycles to see if it's actually changing
+              if (counter % 1000 == 0) {
+                  std.debug.print("Cycle {d}: data[0]=0x{x:0>2}, prev[0]=0x{x:0>2}\n", .{counter, if (item.data.len > 0) item.data[0] else 0, if (item.prev_data.len > 0) item.prev_data[0] else 0});
+              }
+
               for (item.data, item.prev_data, 0..) |byte_a, byte_b, byte_i| {
                   const diff = byte_a ^ byte_b; // XOR to find differing bits
 
                   if (diff != 0) {
                       var bit_mask = diff;
+
+                      std.debug.print("CHANGE DETECTED at byte {d}: was 0x{x:0>2}, now 0x{x:0>2}, diff=0x{x:0>2}\n", .{byte_i, byte_b, byte_a, diff});
 
                       while (bit_mask != 0) {
                           const bit_pos = @ctz(bit_mask); // Count trailing zeros
@@ -580,6 +537,7 @@ defmodule EtherCAT.Nif do
 
               // Notify data changes if any detected
               if (data_diffs.items.len > 0) {
+                  std.debug.print("Sending data_changed with {} offsets to Domain\n", .{data_diffs.items.len});
                   @memcpy(item.prev_data, item.data);
 
                   _ = try beam.send(item.pid, .{ .data_changed, item.data, data_diffs.items }, .{});

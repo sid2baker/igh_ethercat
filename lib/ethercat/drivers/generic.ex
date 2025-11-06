@@ -1,19 +1,18 @@
 defmodule EtherCAT.Drivers.Generic do
+  @moduledoc """
+  Generic EtherCAT slave driver that auto-discovers PDOs from slave configuration.
+  """
   use EtherCAT.Slave.Driver
 
-  def configure(state, _config) do
-    {:ok, state}
-  end
+  @impl true
+  def configure(state, _config), do: {:ok, state}
 
-  def list_pdos(state) do
-    Map.keys(state.pdos)
-  end
+  @impl true
+  def list_pdos(state), do: Map.keys(state.pdos)
 
-  def pdo_info(state, pdo) do
-    {:ok, Map.get(state.pdos, pdo)}
-  end
+  @impl true
+  def pdo_info(state, pdo), do: {:ok, Map.get(state.pdos, pdo)}
 
-  def terminate(state) do
-    :ok
-  end
+  @impl true
+  def terminate(_state), do: :ok
 end

@@ -356,64 +356,12 @@ defmodule EtherCAT.Slave do
   end
 
   def handle_call({:register_pdos, names, domain}, _from, state) do
-    sync_managers =
-      Enum.reduce(names, %{}, fn name, acc ->
-        {:ok,
-         %{sync_manager: {sync_index, direction, watchdog}, pdo_index: pdo_index, entry: entry}} =
-          state.driver.pdo_info(state.driver_state, name)
-
-        Map.update(
-          acc,
-          sync_index,
-          {direction, watchdog, %{pdo_index => [{name, entry}]}},
-          fn {^direction, ^watchdog, pdos} ->
-            pdos = Map.update(pdos, pdo_index, [{name, entry}], &[{name, entry} | &1])
-            {direction, watchdog, pdos}
-          end
-        )
-      end)
-
-    require Logger
+    sync_managers = build_sync_manager_config(names, state)
     Logger.debug("Sync managers to configure: #{inspect(sync_managers)}")
 
-    configured_entries =
-      for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
-        # Configure sync manager through Master
-        config_sync_manager_internal(state, sync_index, direction, watchdog)
-        config_pdo_assign_clear_internal(state, sync_index)
-
-        for {pdo_index, entries} <- pdos do
-          # Assign PDO to sync manager
-          config_pdo_assign_add_internal(state, sync_index, pdo_index)
-          config_pdo_mapping_clear_internal(state, pdo_index)
-
-          for {name, {entry_index, entry_subindex, entry_size}} <- entries do
-            # Map entries to PDO
-            config_pdo_mapping_add_internal(
-              state,
-              pdo_index,
-              entry_index,
-              entry_subindex,
-              entry_size
-            )
-
-            {name, {entry_index, entry_subindex, entry_size}}
-          end
-        end
-      end
-      |> List.flatten()
-
-    require Logger
+    configured_entries = configure_and_register_pdos(sync_managers, state, domain)
     Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
 
-    # Register with domain
-    for {name, entry} <- configured_entries do
-      Domain.register_pdo_entry(domain, state.slave_config, name, entry)
-    end
-
-    # After domain is ready, query back the offset/size and cache it locally
-    # Note: This will only work after Master.activate calls Domain.get_ready
-    # For now, we'll store the registrations and populate offsets later
     pdo_registrations =
       configured_entries
       |> Enum.map(fn {name, _entry} -> {name, domain} end)
@@ -489,5 +437,60 @@ defmodule EtherCAT.Slave do
   @impl true
   def terminate(_reason, %{driver: mod, driver_state: s}) do
     mod.terminate(s)
+  end
+
+  # Private helpers
+
+  # Builds a map of sync manager configurations from PDO names
+  defp build_sync_manager_config(names, state) do
+    Enum.reduce(names, %{}, fn name, acc ->
+      {:ok,
+       %{sync_manager: {sync_index, direction, watchdog}, pdo_index: pdo_index, entry: entry}} =
+        state.driver.pdo_info(state.driver_state, name)
+
+      Map.update(
+        acc,
+        sync_index,
+        {direction, watchdog, %{pdo_index => [{name, entry}]}},
+        fn {^direction, ^watchdog, pdos} ->
+          pdos = Map.update(pdos, pdo_index, [{name, entry}], &[{name, entry} | &1])
+          {direction, watchdog, pdos}
+        end
+      )
+    end)
+  end
+
+  # Configures sync managers and PDOs, then registers them with the domain
+  defp configure_and_register_pdos(sync_managers, state, domain) do
+    configured_entries =
+      for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
+        config_sync_manager_internal(state, sync_index, direction, watchdog)
+        config_pdo_assign_clear_internal(state, sync_index)
+
+        for {pdo_index, entries} <- pdos do
+          config_pdo_assign_add_internal(state, sync_index, pdo_index)
+          config_pdo_mapping_clear_internal(state, pdo_index)
+
+          for {name, {entry_index, entry_subindex, entry_size}} <- entries do
+            config_pdo_mapping_add_internal(
+              state,
+              pdo_index,
+              entry_index,
+              entry_subindex,
+              entry_size
+            )
+
+            {name, {entry_index, entry_subindex, entry_size}}
+          end
+        end
+      end
+      |> List.flatten()
+
+    # Register all entries with domain
+    for {name, entry} <- configured_entries do
+      Domain.register_pdo_entry(domain, state.slave_config, name, entry)
+    end
+
+    configured_entries
   end
 end

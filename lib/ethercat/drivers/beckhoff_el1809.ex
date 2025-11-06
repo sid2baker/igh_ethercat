@@ -1,40 +1,19 @@
-defmodule EtherCAT.Drivers.DefaultDriver do
+defmodule EtherCAT.Drivers.BeckhoffEL1809 do
   @moduledoc """
-  Example EtherCAT slave driver.
-
-  This module demonstrates how to implement a simple EtherCAT slave driver.
+  Driver for Beckhoff EL1809 16-channel digital input terminal.
   """
-
   use EtherCAT.Slave.Driver
 
-  alias EtherCAT.{Nif, Slave, Domain}
+  @impl true
+  def configure(state, _config), do: {:ok, state}
 
-  def configure(config) do
-    {:ok, %{}}
+  @impl true
+  def list_pdos(_state) do
+    Enum.map(1..16, &:"input#{&1}")
   end
 
-  def list_pdos(state) do
-    [
-      :input1,
-      :input2,
-      :input3,
-      :input4,
-      :input5,
-      :input6,
-      :input7,
-      :input8,
-      :input9,
-      :input10,
-      :input11,
-      :input12,
-      :input13,
-      :input14,
-      :input15,
-      :input16
-    ]
-  end
-
-  def pdo_info(state, pdo) do
+  @impl true
+  def pdo_info(_state, pdo) do
     case pdo do
       :input1 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A00, entry: {0x6000, 0x01, 1}}}
       :input2 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A01, entry: {0x6010, 0x01, 1}}}
@@ -52,11 +31,10 @@ defmodule EtherCAT.Drivers.DefaultDriver do
       :input14 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0D, entry: {0x60D0, 0x01, 1}}}
       :input15 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0E, entry: {0x60E0, 0x01, 1}}}
       :input16 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0F, entry: {0x60F0, 0x01, 1}}}
-      _ -> {:error, :invalud_pdo}
+      _ -> {:error, :invalid_pdo}
     end
   end
 
-  def terminate(state) do
-    :ok
-  end
+  @impl true
+  def terminate(_state), do: :ok
 end

@@ -9,6 +9,7 @@ defmodule EtherCAT.Domain do
   All NIF communication is routed through the Master process to prevent race conditions.
   """
   use GenServer
+  require Logger
 
   defstruct [:master, :resource, :interval, :pdo_entries_to_register, :entries, :subscribers]
 
@@ -165,7 +166,6 @@ defmodule EtherCAT.Domain do
       |> List.flatten()
 
     result_map = Map.new(result)
-    require Logger
     Logger.debug("PDO Entries registered: #{inspect(result_map)}")
 
     {:reply, :ok, %{state | entries: result_map, pdo_entries_to_register: %{}}}
@@ -185,6 +185,9 @@ defmodule EtherCAT.Domain do
           {name, size, MapSet.put(pids, pid)}
         end
       )
+
+    Logger.debug("Subscribed #{inspect(pid)} to #{name} at offset #{offset}, size #{size}")
+    Logger.debug("Total subscribers: #{map_size(subscribers)}")
 
     {:reply, :ok, %{state | subscribers: subscribers}}
   end
@@ -218,11 +221,14 @@ defmodule EtherCAT.Domain do
 
   # Receives cyclic data changes from the NIF and notifies subscribers
   def handle_info({:data_changed, data, offsets}, state) do
+    Logger.debug("Domain received data_changed with #{length(offsets)} changed offsets: #{inspect(offsets)}")
+
     for offset <- offsets do
       case state.subscribers[offset] do
         {name, size, pids} ->
           # Extract the value at the bit offset
           value = extract_bits(data, offset, size)
+          Logger.debug("Notifying #{MapSet.size(pids)} subscribers for #{name} (offset #{offset}): value=#{value}")
           Enum.each(pids, fn pid -> send(pid, {:data_changed, name, value}) end)
 
         nil ->
@@ -269,7 +275,6 @@ defmodule EtherCAT.Domain do
 
   # Catch-all for unexpected messages
   def handle_info(msg, state) do
-    require Logger
     Logger.debug("Domain received unexpected message: #{inspect(msg)}")
     {:noreply, state}
   end
@@ -292,61 +297,48 @@ defmodule EtherCAT.Domain do
   # 2. Find the bit within that byte: bit_index = N % 8
   # 3. Extract using bit shift: (byte >> bit_index) & 1
   defp extract_bits(data, offset, size) when is_binary(data) do
-    use Bitwise
+    import Bitwise
 
     byte_index = div(offset, 8)
     bit_index = rem(offset, 8)
 
-    # Check if we have enough data
     if byte_index >= byte_size(data) do
       0
     else
-      byte = :binary.at(data, byte_index)
-
       # For single bit (boolean values)
       if size == 1 do
+        byte = :binary.at(data, byte_index)
         byte >>> bit_index &&& 1
       else
         # For multi-bit values spanning multiple bytes
-        # Extract bits using LSB-first ordering
-        extract_multibyte_value(data, byte_index, bit_index, size)
+        extract_multibyte_value(data, byte_index, bit_index, size, 0, 0)
       end
     end
   end
 
-  # Extracts a multi-bit value that may span multiple bytes
-  defp extract_multibyte_value(data, byte_index, bit_index, size) do
-    use Bitwise
+  # Extracts a multi-bit value that may span multiple bytes using tail recursion
+  defp extract_multibyte_value(_data, _byte_index, _bit_index, 0, result, _shift),
+    do: result
 
-    bits_remaining = size
-    current_byte = byte_index
-    current_bit = bit_index
-    result = 0
-    shift = 0
+  defp extract_multibyte_value(data, byte_index, bit_index, bits_remaining, result, shift)
+       when byte_index < byte_size(data) do
+    import Bitwise
 
-    extract_multibyte_loop(data, current_byte, current_bit, bits_remaining, result, shift)
+    byte = :binary.at(data, byte_index)
+    bits_in_byte = min(8 - bit_index, bits_remaining)
+    mask = (1 <<< bits_in_byte) - 1
+    value = byte >>> bit_index &&& mask
+
+    extract_multibyte_value(
+      data,
+      byte_index + 1,
+      0,
+      bits_remaining - bits_in_byte,
+      result ||| value <<< shift,
+      shift + bits_in_byte
+    )
   end
 
-  defp extract_multibyte_loop(_data, _byte_index, _bit_index, 0, result, _shift) do
-    result
-  end
-
-  defp extract_multibyte_loop(data, byte_index, bit_index, bits_remaining, result, shift) do
-    use Bitwise
-
-    if byte_index >= byte_size(data) do
-      result
-    else
-      byte = :binary.at(data, byte_index)
-      bits_in_this_byte = min(8 - bit_index, bits_remaining)
-      mask = (1 <<< bits_in_this_byte) - 1
-      value = byte >>> bit_index &&& mask
-
-      new_result = result ||| value <<< shift
-      new_shift = shift + bits_in_this_byte
-      new_bits_remaining = bits_remaining - bits_in_this_byte
-
-      extract_multibyte_loop(data, byte_index + 1, 0, new_bits_remaining, new_result, new_shift)
-    end
-  end
+  defp extract_multibyte_value(_data, _byte_index, _bit_index, _bits_remaining, result, _shift),
+    do: result
 end
