@@ -84,17 +84,19 @@ const domain_config_t = struct {
     interval: u32, // Multiplier for the base interval
 };
 
-/// Output state buffer info for SET operations
-const OutputStateInfo = struct {
-    buffer: []u8,
-    dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
+/// Output event for queuing domain value changes
+/// Handles arbitrary bit-aligned writes for all primitive types
+const OutputEvent = struct {
+    domain_ptr: usize,      // Address of domain to match against DomainItem
+    bit_offset: usize,      // Bit offset in domain (same as used in get/set functions)
+    data: [8]u8,            // Raw value bytes (little-endian, right-aligned)
+    bit_length: u8,         // Number of bits (1 for bool, 32 for u32, etc.)
 };
 
-/// Global map of domain pointers to output state buffers
-/// This allows async SET operations to write to output_state instead of domain buffer
-var output_state_map_mutex: std.Thread.Mutex = .{};
-var output_state_map: std.AutoHashMap(usize, OutputStateInfo) = undefined;
-var output_state_map_initialized: bool = false;
+/// Global event queue for output writes (single-writer from Elixir, single-reader from cyclic_task)
+var output_events_mutex: std.Thread.Mutex = .{};
+  var output_events: std.ArrayList(OutputEvent) = undefined;
+var output_events_initialized: bool = false;
 
 /// Tracked domain state for cyclic task processing
 /// This structure maintains all necessary state for a domain including
@@ -105,15 +107,11 @@ const DomainItem = struct {
     state: ecrt.ec_domain_state_t,
     prev_data: []u8,
     data: []u8,
-    output_state: []u8, // Tracks output values across cycles
-    dirty_bytes: []bool, // Bitmap: true if byte was written by SET (is an output)
     interval: u32,
 
     /// Cleanup allocated memory for this domain item
     fn deinit(self: *DomainItem, allocator: std.mem.Allocator) void {
         allocator.free(self.prev_data);
-        allocator.free(self.output_state);
-        allocator.free(self.dirty_bytes);
     }
 };
 
@@ -281,43 +279,74 @@ pub fn get_domain_value_bool(domain: DomainResource, offset: usize) !bool {
     return (data[byte_index] >> bit_index) & 1 != 0;
 }
 
+/// Write arbitrary bits to domain buffer at specified bit offset
+/// Used by cyclic_task to apply output events
+fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, bit_length: u8) void {
+    var bits_written: usize = 0;
+
+    while (bits_written < bit_length) {
+        const current_bit_offset = bit_offset + bits_written;
+        const byte_index = current_bit_offset / 8;
+        const bit_index_usize = current_bit_offset % 8;
+          const bit_index = @as(u3, @intCast(bit_index_usize));
+
+        // How many bits can we write in this byte?
+        const bits_remaining_in_byte = 8 - bit_index_usize;
+        const bits_to_write = @min(bit_length - bits_written, bits_remaining_in_byte);
+
+        // Extract bits from value_bytes
+        const value_byte_index = bits_written / 8;
+          const value_bit_index_usize = bits_written % 8;
+        const value_bit_index = @as(u3, @intCast(value_bit_index_usize));
+
+        // Create mask for bits we're writing
+        const mask = (@as(u8, 1) << @intCast(bits_to_write)) - 1;
+
+        // Extract value bits and shift to target position
+        const value_bits = (value_bytes[value_byte_index] >> value_bit_index) & mask;
+        const shifted_value = value_bits << bit_index;
+
+        // Clear target bits and write new value
+        const clear_mask = ~(mask << bit_index);
+        data[byte_index] = (data[byte_index] & clear_mask) | shifted_value;
+
+        bits_written += bits_to_write;
+    }
+}
+
 /// Set a boolean value in domain data at the specified bit offset
-/// IMPORTANT: Writes to output_state buffer to avoid race with cyclic task
+/// Appends an event to the queue; cyclic_task will apply it before queue_domains
 pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool) !void {
     const domain_ptr = domain.unpack();
     const domain_size = ecrt.ecrt_domain_size(domain_ptr);
 
     if (offset >= domain_size * 8) return DomainError.OutOfBounds;
 
-    const byte_index = offset / 8;
-    const bit_index = @as(u3, @intCast(offset % 8));
-
-    // Look up output_state buffer for this domain
-    const domain_addr = @intFromPtr(domain_ptr);
-    output_state_map_mutex.lock();
-    defer output_state_map_mutex.unlock();
-
-    if (output_state_map.get(domain_addr)) |info| {
-        // Write to output_state buffer (cyclic task will copy to domain buffer)
-        if (byte_index < info.buffer.len) {
-            std.debug.print("SET: offset={d} (byte[{d}], bit{d}) = {any}, writing to output_state\n", .{offset, byte_index, bit_index, value});
-
-            if (value) {
-                info.buffer[byte_index] |= (@as(u8, 1) << bit_index);
-            } else {
-                info.buffer[byte_index] &= ~(@as(u8, 1) << bit_index);
-            }
-
-            // Mark this byte as dirty (it's an output that needs to be preserved)
-            info.dirty_bytes[byte_index] = true;
-
-            std.debug.print("     output_state[{d}] now = 0x{x:0>2} (marked dirty)\n", .{byte_index, info.buffer[byte_index]});
-        } else {
-            return DomainError.OutOfBounds;
+    // Initialize event queue on first use
+    if (!output_events_initialized) {
+        output_events_mutex.lock();
+        defer output_events_mutex.unlock();
+        if (!output_events_initialized) {
+            output_events = std.ArrayList(OutputEvent){};
+            output_events_initialized = true;
         }
-    } else {
-        return DomainError.NullPointer; // Domain not registered
     }
+
+    // Create event with bool value (1 bit)
+    var event_data: [8]u8 = [_]u8{0} ** 8;
+    event_data[0] = if (value) 1 else 0;
+
+    const event = OutputEvent{
+        .domain_ptr = @intFromPtr(domain_ptr),
+        .bit_offset = offset,
+        .data = event_data,
+        .bit_length = 1,
+    };
+
+    // Append to event queue (single writer, so lock is brief)
+    output_events_mutex.lock();
+    defer output_events_mutex.unlock();
+    try output_events.append(beam.allocator, event);
 }
 
 /// Get the current state of the domain
@@ -452,28 +481,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             return MemoryError.OutOfMemory;
         @memcpy(prev_data, data);
 
-        // Allocate buffer for tracking output state across cycles
-        const output_state = beam.allocator.alloc(u8, size) catch
-            return MemoryError.OutOfMemory;
-        @memset(output_state, 0); // Initialize outputs to 0
-
-        // Allocate dirty_bytes bitmap to track which bytes are outputs (written by SET)
-        const dirty_bytes = beam.allocator.alloc(bool, size) catch
-            return MemoryError.OutOfMemory;
-        @memset(dirty_bytes, false); // Initially no bytes marked as outputs
-
-        // Register this domain's output_state in the global map for SET operations
-        // Initialize map on first use
-        if (!output_state_map_initialized) {
-            output_state_map = std.AutoHashMap(usize, OutputStateInfo).init(beam.allocator);
-            output_state_map_initialized = true;
-        }
-        const domain_addr = @intFromPtr(domain);
-        output_state_map_mutex.lock();
-        defer output_state_map_mutex.unlock();
-        try output_state_map.put(domain_addr, .{ .buffer = output_state, .dirty_bytes = dirty_bytes });
-
-        try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .output_state = output_state, .dirty_bytes = dirty_bytes, .interval = domain_config.interval });
+        try domains.append(beam.allocator, .{ .pid = domain_config.pid, .domain = domain, .state = undefined, .prev_data = prev_data, .data = data, .interval = domain_config.interval });
     }
 
     defer {
@@ -501,37 +509,14 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         // 2. Receive frames from network (contains slave responses with input data)
         _ = ecrt.ecrt_master_receive(master);
 
-        // 3. Process domains and restore outputs
-        // Key insight: domain_process() overwrites the ENTIRE buffer with received data.
-        // SET operations write to output_state buffer (via global map lookup).
-        // Solution: After process, copy output_state to domain buffer before queue/send.
+        // 3. Process domains
         for (domains.items) |*item| {
             var state: ecrt.ec_domain_state_t = undefined;
 
-            // Process domain data (updates buffer from received frame, OVERWRITES outputs with echoes)
+            // Process domain data (updates buffer from received frame)
             _ = ecrt.ecrt_domain_process(item.domain);
 
-            // Restore ONLY dirty bytes (those written by SET) from output_state
-            // This works regardless of PDO layout - we only preserve bytes that were explicitly set as outputs
-            for (0..item.data.len) |i| {
-                if (item.dirty_bytes[i]) {
-                    if (counter % 500 == 0 and item.output_state[i] != 0) {
-                        std.debug.print("RESTORE cycle {d}: byte[{d}]=0x{x:0>2} from output_state (dirty)\n", .{counter, i, item.output_state[i]});
-                    }
-                    item.data[i] = item.output_state[i];
-                }
-            }
-
             _ = ecrt.ecrt_domain_state(item.domain, &state);
-
-            // Debug: Print all domain bytes every 500 cycles
-            if (counter % 500 == 0) {
-                std.debug.print("Cycle {d}: ", .{counter});
-                for (0..item.data.len) |i| {
-                    std.debug.print("[{d}]=0x{x:0>2} ", .{i, item.data[i]});
-                }
-                std.debug.print(" WC={d}\n", .{state.working_counter});
-            }
 
             // Notify working counter changes
             if (state.working_counter != item.state.working_counter) {
@@ -573,7 +558,29 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             item.state = state;
         }
 
-        // Step 4: Check and notify master state changes
+        // Step 4: Drain output event queue and apply to domain buffers
+        // This happens AFTER process (which updates inputs) and BEFORE queue (which sends outputs)
+        {
+            output_events_mutex.lock();
+            defer output_events_mutex.unlock();
+
+            for (output_events.items) |event| {
+                // Find matching domain
+                for (domains.items) |*item| {
+                    const item_domain_ptr = @intFromPtr(item.domain);
+                    if (item_domain_ptr == event.domain_ptr) {
+                        // Apply event to domain buffer
+                        write_bits_to_domain(item.data, event.bit_offset, &event.data, event.bit_length);
+                        break;
+                    }
+                }
+            }
+
+            // Clear event queue after applying all events
+            output_events.clearRetainingCapacity();
+        }
+
+        // Step 5: Check and notify master state changes
         master_state = try do_get_master_state(master);
 
         if (!std.meta.eql(prev_master_state, master_state)) {
@@ -582,18 +589,14 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         prev_master_state = master_state;
 
-        // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
+        // Step 6: Queue domain outputs at configured intervals (prepare outputs to send)
         for (domains.items) |*item| {
             if (counter % item.interval == 0) {
-                // Debug: Show what's being queued every 500 cycles
-                if (counter % 500 == 0 and item.data.len > 3) {
-                    std.debug.print("QUEUE cycle {d}: byte[3]=0x{x:0>2} (about to queue)\n", .{counter, item.data[3]});
-                }
                 _ = ecrt.ecrt_domain_queue(item.domain);
             }
         }
 
-        // Step 6: Send queued frames to network
+        // Step 7: Send queued frames to network
         _ = ecrt.ecrt_master_send(master);
 
         // Yield to BEAM scheduler periodically
