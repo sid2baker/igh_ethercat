@@ -1,4 +1,63 @@
 defmodule EtherCAT.Master do
+  @moduledoc """
+  EtherCAT master state machine managing network lifecycle and slave coordination.
+
+  The Master is the central coordination point for EtherCAT communication, managing:
+  - Network connection and link status
+  - Slave discovery and configuration
+  - Domain creation and management
+  - Operational mode activation
+  - Cyclic task execution
+
+  ## State Machine
+
+  The Master implements a state machine with four states:
+
+  - **`:offline`** - Initial state, master created but not connected
+  - **`:stale`** - Network link is up, waiting for slaves to respond
+  - **`:synced`** - Slaves discovered and synchronized, ready for configuration
+  - **`:operational`** - Cyclic communication active, real-time I/O in progress
+
+  State transitions occur automatically based on network conditions and explicit
+  commands like `connect/1`, `sync_slaves/1`, and `start_cyclic_mode/1`.
+
+  ## Thread Safety
+
+  The Master serves as the single gateway for all NIF operations, ensuring
+  thread-safe access to the underlying IgH EtherCAT library. Slave and Domain
+  modules route all NIF calls through the Master process, preventing race
+  conditions and resource conflicts.
+
+  ## Architecture
+
+  ```
+  EtherCAT.Master (GenStatem)
+    ├─ manages → Master NIF Resource
+    ├─ supervises → [EtherCAT.Slave]
+    ├─ supervises → [EtherCAT.Domain]
+    └─ spawns → Cyclic Task (threaded NIF)
+  ```
+
+  ## Example Workflow
+
+      # Start the master
+      {:ok, master} = Master.start_link(update_interval: 10_000)
+
+      # Connect to network
+      :ok = Master.connect(master)
+
+      # Discover and synchronize slaves
+      {:ok, [slave1, slave2]} = Master.sync_slaves(master)
+
+      # Configure slaves and register PDOs
+      Slave.configure(slave1, [])
+      Slave.register_all_pdos(slave1, :default_domain)
+
+      # Activate cyclic communication
+      Master.start_cyclic_mode(master)
+
+      # Master now exchanges data with slaves in real-time
+  """
   @behaviour :gen_statem
   require Logger
   import EtherCAT.Utils
@@ -21,50 +80,149 @@ defmodule EtherCAT.Master do
   @doc """
   Starts the EtherCAT master process.
 
+  Initializes a master instance and creates the default domain. The master
+  begins in the `:offline` state and must be connected via `connect/1` before
+  use.
+
   ## Options
-  - `:master_index` - The EtherCAT master index (default: 0)
-  - `:update_interval` - State update interval in microseconds (default: 10_000)
+  - `:master_index` - The EtherCAT master index (default: 0) - maps to /dev/EtherCATX
+  - `:update_interval` - Cyclic task interval in microseconds (default: 10_000 = 10ms)
+  - `:name` - Registration name (default: `EtherCAT.Master`)
+
+  ## Returns
+  - `{:ok, pid}` on success
+  - `{:error, reason}` on failure (e.g., master device not found)
+
+  ## Example
+
+      # Start with default settings (10ms cycle)
+      {:ok, master} = Master.start_link()
+
+      # Start with 1ms cycle for faster control loops
+      {:ok, master} = Master.start_link(update_interval: 1_000)
+
+      # Access a different master device
+      {:ok, master} = Master.start_link(master_index: 1)
   """
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
     update_interval = Keyword.get(opts, :update_interval, 10_000)
-    :gen_statem.start_link(__MODULE__, {master_index, update_interval}, name: __MODULE__)
+    name = Keyword.get(opts, :name, __MODULE__)
+    :gen_statem.start_link({:local, name}, __MODULE__, {master_index, update_interval}, [])
   end
 
   @doc """
-  Connects to the EtherCAT network and checks if the link is up.
+  Connects to the EtherCAT network and verifies link status.
+
+  Transitions the master from `:offline` to `:stale` state if the network
+  link is up. The master will then wait for slaves to respond.
+
+  ## Parameters
+  - `master` - The master process (PID or registered name)
+
+  ## Returns
+  - `:ok` if connection successful and link is up
+  - `{:error, :link_down}` if physical link is not established
+  - `{:error, :offline}` if called from the wrong state
+
+  ## Example
+
+      :ok = Master.connect(master)
   """
+  @spec connect(GenServer.server()) :: :ok | {:error, term()}
   def connect(master) do
     :gen_statem.call(master, :connect)
   end
 
   @doc """
-  Synchronizes slaves - discovers and configures all slaves on the bus.
-  Returns `{:ok, [slave_pids]}` on success.
+  Synchronizes slaves - discovers and initializes all slaves on the bus.
+
+  Queries the master for all responding slaves, creates a process for each,
+  and assigns appropriate drivers. The master transitions to `:synced` state.
+
+  ## Parameters
+  - `master` - The master process (PID or registered name)
+
+  ## Returns
+  - `{:ok, [slave_pids]}` - List of slave process PIDs in bus order
+  - `{:error, reason}` - If called from wrong state or slaves not responding
+
+  ## Example
+
+      {:ok, slaves} = Master.sync_slaves(master)
+      [coupler, input_terminal, output_terminal] = slaves
   """
+  @spec sync_slaves(GenServer.server()) :: {:ok, [pid()]} | {:error, term()}
   def sync_slaves(master) do
     :gen_statem.call(master, :sync_slaves)
   end
 
   @doc """
-  Creates a new process data domain.
-  Domains allow grouping of process data transfers with different periods.
+  Creates a new process data domain with independent update interval.
+
+  Domains allow grouping of PDO entries with different timing requirements,
+  enabling efficient multi-rate control loops on a single master.
+
+  ## Parameters
+  - `master` - The master process (PID or registered name)
+  - `name` - Unique identifier for the domain (atom)
+  - `interval` - Update interval multiplier (in cycles)
+
+  ## Returns
+  - `{:ok, domain_ref}` - Reference to the created domain
+  - `{:error, reason}` - If domain creation fails
+
+  ## Example
+
+      # Fast domain for critical control (every cycle)
+      {:ok, fast} = Master.create_domain(master, :fast_io, 1)
+
+      # Slow domain for monitoring (every 100 cycles)
+      {:ok, slow} = Master.create_domain(master, :monitoring, 100)
   """
+  @spec create_domain(GenServer.server(), atom(), pos_integer()) ::
+          {:ok, reference()} | {:error, term()}
   def create_domain(master, name, interval) do
     :gen_statem.call(master, {:create_domain, name, interval})
   end
 
   @doc """
-  Starts cyclic mode operation on the master.
-  After starting, no further configuration changes are allowed.
+  Activates cyclic mode operation on the master.
+
+  Registers all pending PDO entries, activates the master, and starts the
+  real-time cyclic task. After activation, no further configuration changes
+  are allowed - slaves and domains become locked.
+
+  The master transitions to `:operational` state and begins exchanging process
+  data with slaves at the configured interval.
+
+  ## Parameters
+  - `master` - The master process (PID or registered name)
+
+  ## Returns
+  - `:ok` (async operation, use message handlers to monitor state)
+
+  ## Example
+
+      Master.start_cyclic_mode(master)
+      # Master now running cyclic communication
   """
+  @spec start_cyclic_mode(GenServer.server()) :: :ok
   def start_cyclic_mode(master) do
     :gen_statem.cast(master, :start_cyclic_mode)
   end
 
   @doc """
-  Gets the master's NIF reference.
+  Gets the master's NIF reference for low-level operations.
+
+  This is primarily used internally by Slave and Domain modules. Most
+  applications should not need to call this directly.
+
+  ## Returns
+  - Master resource reference
   """
+  @spec get_ref(GenServer.server()) :: reference()
   def get_ref(master) do
     :gen_statem.call(master, :get_ref)
   end
@@ -278,14 +436,25 @@ defmodule EtherCAT.Master do
 
   def synced(:state_timeout, :update_master_state, data) do
     master_state = Nif.get_master_state(data.master_ref)
-    require Logger
     Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
 
     if master_state.slaves_responding == length(data.slaves) do
       actions = [{:state_timeout, data.update_interval, :update_master_state}]
       {:keep_state_and_data, actions}
     else
-      # TODO kill current slaves
+      # Slave count mismatch - network topology changed
+      # Terminate existing slave processes before transitioning to stale
+      Logger.warning(
+        "Slave count mismatch: expected #{length(data.slaves)}, got #{master_state.slaves_responding}. Re-scanning bus."
+      )
+
+      # Gracefully terminate all slave processes
+      Enum.each(data.slaves, fn slave_pid ->
+        if Process.alive?(slave_pid) do
+          GenServer.stop(slave_pid, :normal)
+        end
+      end)
+
       {:next_state, :stale, %{data | slaves: []}}
     end
   end

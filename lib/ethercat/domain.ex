@@ -2,11 +2,52 @@ defmodule EtherCAT.Domain do
   @moduledoc """
   Manages EtherCAT process data domains.
 
-  Domains allow grouping of process data transfers with different update periods.
-  They handle PDO entry registration and cyclic data exchange between the master
-  and slaves.
+  Domains allow grouping of process data transfers with independent update periods,
+  enabling efficient cyclic communication with different timing requirements. They
+  handle PDO entry registration and manage data exchange between the master and slaves.
+
+  ## Domain Lifecycle
+
+  1. **Creation** - Domain is created via `Master.create_domain/3` with a name and interval
+  2. **Configuration** - PDO entries are registered via `register_pdo_entry/4`
+  3. **Activation** - Master activates all domains when entering operational mode
+  4. **Operation** - Cyclic task processes and queues domain data at configured intervals
+  5. **Notifications** - Subscribers receive messages when PDO values change
+
+  ## Update Intervals
+
+  Each domain has an interval multiplier (in microseconds) that determines how often
+  its data is exchanged. For example:
+  - Default domain: 1µs (every cycle)
+  - Slow sensors: 100µs (every 100 cycles)
+  - Configuration data: 1000µs (every 1000 cycles)
+
+  ## Change Notifications
+
+  The domain tracks data changes at the bit level and notifies subscribers only when
+  values actually change. This minimizes message traffic while maintaining real-time
+  responsiveness.
+
+  ## Thread Safety
 
   All NIF communication is routed through the Master process to prevent race conditions.
+  The domain never calls NIFs directly, ensuring thread-safe operation.
+
+  ## Example
+
+      # Create a domain with 100µs update interval
+      domain_ref = Master.create_domain(master, :slow_domain, 100)
+
+      # Register PDO entries to this domain
+      Domain.register_pdo_entry(domain_ref, slave_config, "temperature", {0x6000, 1, 16})
+
+      # Subscribe to value changes
+      Domain.subscribe(domain_ref, self(), "temperature")
+
+      # Receive notifications
+      receive do
+        {:data_changed, "temperature", value} -> IO.puts("Temp: #{value}")
+      end
   """
   use GenServer
   require Logger
@@ -33,47 +74,83 @@ defmodule EtherCAT.Domain do
   Starts a domain process.
 
   ## Parameters
-  - `name` - Registered name for the domain
+  - `name` - Registered name for the domain (atom)
   - `master` - Master process PID
   - `resource` - Domain reference from the NIF
   - `interval` - Update interval in microseconds
+
+  ## Returns
+  - `{:ok, pid}` on success
+  - `{:error, reason}` on failure
   """
+  @spec start_link(atom(), pid(), reference(), pos_integer()) :: GenServer.on_start()
   def start_link(name, master, resource, interval) do
     GenServer.start_link(__MODULE__, {master, resource, interval}, name: name)
   end
 
   @doc """
   Returns the pending PDO entries from the domain.
+
+  This is called by the Master before activation to retrieve all registered
+  PDO entries that need to be configured in the NIF layer.
+
+  ## Returns
+  Map of slave configs to their PDO entry lists.
   """
+  @spec get_pdo_entries(GenServer.server()) :: map()
   def get_pdo_entries(domain) do
     GenServer.call(domain, :get_pdo_entries)
   end
 
   @doc false
+  @spec store_and_lock_entries(GenServer.server(), map()) :: :ok
   def store_and_lock_entries(domain, entries) do
     GenServer.call(domain, {:store_and_lock_entries, entries})
   end
 
   @doc """
   Returns the domain's NIF reference.
+
+  This reference is used by the Master to access domain operations in the NIF layer.
   """
+  @spec get_ref(GenServer.server()) :: reference()
   def get_ref(domain) do
     GenServer.call(domain, :get_ref)
   end
 
   @doc """
-  Returns the domain's update interval.
+  Returns the domain's update interval in microseconds.
+
+  The interval determines how often the domain's data is exchanged during
+  cyclic operation.
   """
+  @spec get_interval(GenServer.server()) :: pos_integer()
   def get_interval(domain) do
     GenServer.call(domain, :get_interval)
   end
 
   @doc """
-  Registers a PDO entry to this domain.
-  Entries are queued and registered.
-  Entry should be {entry_type, entry_index, entry_subindex, entry_size} or
-  {entry_index, entry_subindex, entry_size} (type will be inferred from size).
+  Registers a PDO entry to this domain for cyclic data exchange.
+
+  Entries are queued during configuration and actually registered when the
+  master enters operational mode.
+
+  ## Entry Format
+
+  The entry parameter can be:
+  - `{entry_type, entry_index, entry_subindex, bit_length}` - explicit type
+  - `{entry_index, entry_subindex, bit_length}` - type inferred from bit length
+
+  ## Example
+
+      # Register with explicit type
+      Domain.register_pdo_entry(domain, slave_config, "temperature", {:uint16, 0x6000, 1, 16})
+
+      # Register with inferred type (uint16 from 16 bits)
+      Domain.register_pdo_entry(domain, slave_config, "pressure", {0x6010, 1, 16})
   """
+  @spec register_pdo_entry(GenServer.server(), reference(), name(), tuple()) ::
+          :ok | {:error, term()}
   def register_pdo_entry(domain, slave_config, name, entry) do
     GenServer.call(domain, {:register_pdo_entry, slave_config, name, entry})
   end
@@ -87,6 +164,7 @@ defmodule EtherCAT.Domain do
   defp infer_entry_type(size), do: {:unknown, size}
 
   @doc false
+  @spec subscribe(GenServer.server(), pid(), name()) :: :ok
   def subscribe(domain, pid, name) do
     GenServer.call(domain, {:subscribe, pid, name})
   end

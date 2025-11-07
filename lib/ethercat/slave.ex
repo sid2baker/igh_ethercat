@@ -1,4 +1,65 @@
 defmodule EtherCAT.Slave do
+  @moduledoc """
+  Represents an individual EtherCAT slave device on the network.
+
+  Each slave process manages a single physical device, providing:
+  - Driver-based configuration and PDO management
+  - Sync manager and PDO mapping configuration
+  - Registration of PDO entries to domains
+  - Value read/write operations for process data
+  - Change notification subscriptions
+
+  ## Architecture
+
+  Slaves use a pluggable driver architecture where each driver implements the
+  `EtherCAT.Slave.Driver` behavior. Drivers encapsulate device-specific knowledge:
+  - Available PDO mappings
+  - Sync manager configurations
+  - Default settings and initialization
+
+  ## Lifecycle
+
+  1. **Creation** - Slave is created during `Master.sync_slaves/1`
+  2. **Configuration** - Driver configures sync managers and PDO mappings
+  3. **Registration** - PDO entries are registered to domains
+  4. **Activation** - Master activates all slaves for cyclic communication
+  5. **Operation** - Slave provides read/write access to process data
+
+  ## PDO Management
+
+  Process Data Objects (PDOs) are the primary mechanism for real-time data exchange:
+  - Input PDOs: Data from slave to master (sensor readings, status)
+  - Output PDOs: Data from master to slave (control signals, commands)
+
+  Slaves manage PDO registration and track which domain each PDO belongs to,
+  enabling targeted subscriptions and efficient data routing.
+
+  ## Thread Safety
+
+  All NIF operations are routed through the Master process, ensuring thread-safe
+  access to the underlying C library without race conditions.
+
+  ## Example
+
+      # Configure a slave with specific PDOs
+      Slave.configure(slave, [])
+
+      # List available PDOs from the driver
+      pdos = Slave.list_pdos(slave)
+      #=> ["pdo_6000:1", "pdo_6010:1", "pdo_7000:1"]
+
+      # Register PDOs to a domain for cyclic exchange
+      Slave.register_pdos(slave, ["pdo_6000:1", "pdo_6010:1"], :default_domain)
+
+      # Subscribe to value changes
+      Slave.watch_pdo(slave, "pdo_6000:1")
+
+      # Set output values
+      Slave.set_pdo_value(slave, "pdo_7000:1", true)
+
+      # Read input values
+      {:ok, value} = Slave.get_pdo_value(slave, "pdo_6000:1")
+  """
   use GenServer
   require Logger
   import EtherCAT.Utils
@@ -37,29 +98,80 @@ defmodule EtherCAT.Slave do
   # Client API
 
   @doc """
-  Creates a new slave process.
+  Creates a new slave process for managing an EtherCAT device.
+
+  This function is typically called by the Master during slave synchronization.
+  It initializes the slave with a driver and begins auto-discovery if using
+  the Generic driver.
 
   ## Parameters
-  - `master`: The master process PID
-  - `position`: The slave's position on the bus
-  - `driver`: The driver module to use for this slave
-  - `slave_config`: The slave configuration reference from the NIF
-  - `sync_count`: Number of sync managers
+  - `master` - The master process PID
+  - `position` - The slave's position on the bus (0-based)
+  - `driver` - The driver module implementing `EtherCAT.Slave.Driver`
+  - `slave_config` - The slave configuration reference from the NIF
+  - `sync_count` - Number of sync managers available on the device
+
+  ## Returns
+  - `{:ok, pid}` - The slave process PID
+
+  ## Example
+
+      {:ok, slave} = Slave.create(master, 1, EtherCAT.Drivers.Generic, config, 4)
   """
+  @spec create(pid(), non_neg_integer(), module(), reference(), non_neg_integer()) ::
+          {:ok, pid()}
   def create(master, position, driver, slave_config, sync_count) do
     {:ok, pid} = GenServer.start(__MODULE__, {master, position, driver, slave_config, sync_count})
     Process.monitor(pid)
     {:ok, pid}
   end
 
+  @doc """
+  Changes the driver for an existing slave.
+
+  This recreates the slave configuration with the new driver. Should only be
+  used before the master enters operational mode.
+  """
+  @spec set_driver(pid(), module()) :: :ok
   def set_driver(slave, driver) do
     GenServer.call(slave, {:set_driver, driver})
   end
 
+  @doc """
+  Applies driver-specific configuration to the slave.
+
+  The configuration map is passed to the driver's `configure/2` callback,
+  allowing device-specific initialization and setup.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `config` - Configuration map (driver-specific)
+
+  ## Example
+
+      Slave.configure(slave, %{sample_rate: 1000, mode: :continuous})
+  """
+  @spec configure(pid(), map()) :: :ok
   def configure(slave, config) do
     GenServer.call(slave, {:configure, config})
   end
 
+  @doc """
+  Lists all available PDO names from the slave's driver.
+
+  The returned list depends on the driver implementation:
+  - Generic driver: Auto-discovered names like "pdo_6000:1"
+  - Device-specific drivers: Semantic names like :temperature, :pressure
+
+  ## Returns
+  List of PDO identifiers (atoms or strings)
+
+  ## Example
+
+      pdos = Slave.list_pdos(slave)
+      #=> [:input1, :input2, :output1]
+  """
+  @spec list_pdos(pid()) :: [atom() | String.t()]
   def list_pdos(slave) do
     GenServer.call(slave, :list_pdos)
   end
@@ -117,14 +229,39 @@ defmodule EtherCAT.Slave do
 
   @doc """
   Registers named PDOs to a domain for cyclic data exchange.
+
+  This configures the slave's sync managers and PDO mappings based on the
+  driver's configuration, then registers the PDO entries with the specified
+  domain for real-time I/O.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `names` - List of PDO names (from `list_pdos/1`)
+  - `domain` - Domain identifier (default: `:default_domain`)
+
+  ## Example
+
+      Slave.register_pdos(slave, [:input1, :input2], :default_domain)
   """
+  @spec register_pdos(pid(), [name()], domain()) :: :ok
   def register_pdos(slave, names, domain \\ :default_domain) do
     GenServer.call(slave, {:register_pdos, names, domain})
   end
 
   @doc """
-  Convenience function to register all PDOs from the driver to a domain.
+  Convenience function to register all available PDOs to a domain.
+
+  Equivalent to calling `register_pdos(slave, list_pdos(slave), domain)`.
+
+  ## Example
+
+      # Register all PDOs to the default domain
+      Slave.register_all_pdos(slave)
+
+      # Register all PDOs to a custom domain
+      Slave.register_all_pdos(slave, :slow_domain)
   """
+  @spec register_all_pdos(pid(), domain()) :: :ok
   def register_all_pdos(slave, domain \\ :default_domain) do
     all_pdos = list_pdos(slave)
     register_pdos(slave, all_pdos, domain)
@@ -132,7 +269,11 @@ defmodule EtherCAT.Slave do
 
   @doc """
   Registers PDO entries to a domain for cyclic data exchange.
+
+  Low-level function for registering specific PDO entries. Most users should
+  use `register_pdos/3` instead, which handles configuration automatically.
   """
+  @spec register_pdo_entries(pid(), domain(), map()) :: :ok
   def register_pdo_entries(slave, domain, entries) do
     GenServer.call(slave, {:register_pdo_entries, domain, entries})
   end
@@ -141,21 +282,86 @@ defmodule EtherCAT.Slave do
 
   @doc """
   Sets the value of a PDO output.
+
+  Writes a value to an output PDO that will be sent to the slave during the
+  next cyclic exchange. The PDO must have been registered before the master
+  entered operational mode.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - PDO name (as returned by `list_pdos/1`)
+  - `value` - Value to write (type depends on PDO configuration)
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if PDO not found or not registered
+
+  ## Example
+
+      # Set a boolean output
+      Slave.set_pdo_value(slave, :output1, true)
+
+      # Set an integer output
+      Slave.set_pdo_value(slave, "pdo_7010:1", 42)
   """
+  @spec set_pdo_value(pid(), name(), term()) :: :ok | {:error, term()}
   def set_pdo_value(slave, name, value) do
     GenServer.call(slave, {:set_pdo_value, name, value})
   end
 
   @doc """
   Gets the current value of a PDO input.
+
+  Reads the most recent value received from the slave during cyclic exchange.
+  The PDO must have been registered before the master entered operational mode.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - PDO name (as returned by `list_pdos/1`)
+
+  ## Returns
+  - `{:ok, value}` on success
+  - `{:error, reason}` if PDO not found or not registered
+
+  ## Example
+
+      {:ok, temperature} = Slave.get_pdo_value(slave, :temperature)
+      {:ok, input_state} = Slave.get_pdo_value(slave, "pdo_6000:1")
   """
+  @spec get_pdo_value(pid(), name()) :: {:ok, term()} | {:error, term()}
   def get_pdo_value(slave, name) do
     GenServer.call(slave, {:get_pdo_value, name})
   end
 
   @doc """
   Subscribes a process to receive notifications when a PDO value changes.
+
+  The subscriber will receive `{:data_changed, name, value}` messages whenever
+  the PDO value changes during cyclic operation.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - PDO name to watch
+  - `pid` - Process to receive notifications (default: calling process)
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if PDO not found or not registered
+
+  ## Example
+
+      # Watch from the calling process
+      Slave.watch_pdo(slave, :temperature)
+
+      receive do
+        {:data_changed, :temperature, value} ->
+          IO.puts("Temperature changed to: #{value}")
+      end
+
+      # Watch from another process
+      Slave.watch_pdo(slave, :pressure, monitor_pid)
   """
+  @spec watch_pdo(pid(), name(), pid()) :: :ok | {:error, term()}
   def watch_pdo(slave, name, pid \\ self()) do
     GenServer.call(slave, {:watch_pdo, name, pid})
   end
