@@ -41,10 +41,9 @@ A real-time EtherCAT master implementation for Elixir/Erlang, wrapping the IgH E
 
 **OTP Architecture**
 - Master as GenStatem managing network lifecycle
-- Per-slave GenServers with supervised failure isolation
-- Domains as GenServers for PDO subscription & routing
-- DynamicSupervisors for slaves and domains with automatic restart
+- Slaves and domains as linked GenServers (die with Master when NIF resources invalid)
 - Registry-based process discovery for reliable component lookup
+- Simple lifecycle matching hardware dependencies (no orphaned processes)
 - Comprehensive telemetry for monitoring and observability
 - Graceful termination with proper cleanup
 

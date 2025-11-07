@@ -15,43 +15,49 @@ This document describes the OTP patterns implemented in the EtherCAT library for
 
 ## Supervision Tree
 
-The EtherCAT library implements a comprehensive supervision hierarchy for fault tolerance and automatic recovery.
+The EtherCAT library uses a **simple linked process model** that matches the hardware lifecycle.
 
 ### Architecture
 
 ```
 EtherCAT.Supervisor (one_for_one)
-  ├─ EtherCAT.Registry (Registry)
-  │  └─ Process discovery for all components
-  ├─ EtherCAT.DomainSupervisor (DynamicSupervisor)
-  │  └─ Supervises domain processes
-  └─ EtherCAT.SlaveSupervisor (DynamicSupervisor)
-     └─ Supervises slave processes
+  └─ EtherCAT.Registry (Registry)
+     └─ Process discovery for all components
 
 EtherCAT.Master (standalone or supervised)
-  ├─ Creates and manages slaves
-  ├─ Creates and manages domains
-  └─ Monitors all children
+  ├─ Domains (linked, die with Master)
+  └─ Slaves (linked, die with Master)
 ```
 
-### Why This Design?
+### Why Simple Linking?
 
-1. **Isolation**: Each component can crash without affecting siblings
-2. **Dynamic Children**: Slaves and domains are added/removed as the bus topology changes
-3. **Registry**: Provides reliable process discovery without relying on named processes
-4. **Restart Strategies**: Different components have appropriate restart policies
+Slaves and domains are **tightly coupled** to the Master's NIF resources:
+
+1. **NIF Resource Lifecycle**: `domain_ref` and `slave_config` references are only valid while Master's `master_ref` exists
+2. **Hardware Dependency**: Physical network connection is owned by Master - if it dies, you need to reconnect anyway
+3. **No Orphans**: Slaves/domains with invalid NIF resources are useless - better to die with Master
+4. **Predictable**: When Master dies → everything dies. When Master restarts → rediscover bus from scratch
+
+**What about crashes?**
+- **Slave crashes**: Master receives EXIT, logs it, removes from list. May need resync.
+- **Domain crashes**: Master receives EXIT, logs it, removes from list. Subscribers notified.
+- **Master crashes**: Everything dies (correct behavior). Supervisor restarts Master if configured.
+
+### Why NOT DynamicSupervisor?
+
+DynamicSupervisor would independently restart slaves/domains, creating **orphaned processes**:
+- Restarted slave still has old `slave_config` reference → points to dead Master
+- Restarted domain still has old `domain_ref` → points to dead Master
+- These processes would be alive but non-functional → silent failures
 
 ### Supervision Configuration
 
 ```elixir
-# Application supervisor - restarts infrastructure components
+# Application supervisor - just Registry
 strategy: :one_for_one
-max_restarts: 3
-max_seconds: 5
 
-# DynamicSupervisors - allow many children without cascade failures
-strategy: :one_for_one
-max_restarts: 10  # Higher limit for dynamic components
+# Master traps exits and handles child failures
+Process.flag(:trap_exit, true)
 ```
 
 ## Process Discovery with Registry
@@ -112,26 +118,17 @@ defmodule MyApp.Application do
 end
 ```
 
-### Domain Child Spec
+### Domain and Slave Lifecycle
 
 ```elixir
-# Domains are typically started by the Master
-# But can be manually started under a supervisor if needed
-domain_spec = %{
-  name: :my_domain,
-  master: master_pid,
-  resource: domain_ref,
-  interval: 1
-}
+# Domains are started by Master using simple linking
+{:ok, domain_pid} = Domain.start_link(name, master_pid, domain_ref, interval)
 
-DynamicSupervisor.start_child(EtherCAT.DomainSupervisor, domain_spec)
-```
+# Slaves are started by Master during sync_slaves using simple linking
+{:ok, slave_pid} = Slave.start_link(master_pid, position, driver, slave_config, sync_count)
 
-### Slave Child Spec
-
-```elixir
-# Slaves are started by the Master during sync_slaves
-# They're automatically supervised by EtherCAT.SlaveSupervisor
+# Both are linked to Master - when Master dies, they die automatically
+# When they die, Master receives EXIT message and can handle it
 ```
 
 ## Error Handling

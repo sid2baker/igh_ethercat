@@ -312,16 +312,8 @@ defmodule EtherCAT.Master do
 
         domain_ref = Nif.master_create_domain(ref, self(), 1)
 
-        # Start default domain under DynamicSupervisor for proper supervision
-        domain_child_spec = %{
-          id: :default_domain,
-          start: {Domain, :start_link, [:default_domain, self(), domain_ref, 1]},
-          restart: :permanent,
-          shutdown: 5000,
-          type: :worker
-        }
-
-        case DynamicSupervisor.start_child(EtherCAT.DomainSupervisor, domain_child_spec) do
+        # Start default domain as linked process (dies with Master)
+        case Domain.start_link(:default_domain, self(), domain_ref, 1) do
           {:ok, domain_pid} ->
             # Update the domain accessor with the Domain process PID
             Nif.domain_set_pid(domain_ref, domain_pid)
@@ -357,17 +349,17 @@ defmodule EtherCAT.Master do
       Process.exit(data.task_pid, :shutdown)
     end
 
-    # Gracefully terminate all slaves
+    # Terminate all slaves (linked, so they'll die automatically, but we send explicit shutdown)
     Enum.each(data.slaves, fn slave_pid ->
       if Process.alive?(slave_pid) do
-        DynamicSupervisor.terminate_child(EtherCAT.SlaveSupervisor, slave_pid)
+        Process.exit(slave_pid, :shutdown)
       end
     end)
 
-    # Gracefully terminate all domains
+    # Terminate all domains (linked, so they'll die automatically, but we send explicit shutdown)
     Enum.each(data.domains, fn domain_pid ->
       if Process.alive?(domain_pid) do
-        DynamicSupervisor.terminate_child(EtherCAT.DomainSupervisor, domain_pid)
+        Process.exit(domain_pid, :shutdown)
       end
     end)
 
@@ -471,18 +463,9 @@ defmodule EtherCAT.Master do
               slave_info.product_code
             )
 
-          # Start slave under DynamicSupervisor for proper supervision
-          slave_child_spec = %{
-            id: {Slave, slave_position},
-            start:
-              {Slave, :start_link,
-               [self(), slave_position, driver, slave_config, slave_info.sync_count]},
-            restart: :permanent,
-            shutdown: 5000,
-            type: :worker
-          }
-
-          {:ok, slave} = DynamicSupervisor.start_child(EtherCAT.SlaveSupervisor, slave_child_spec)
+          # Start slave as linked process (dies with Master)
+          {:ok, slave} =
+            Slave.start_link(self(), slave_position, driver, slave_config, slave_info.sync_count)
 
           slave
         end
@@ -589,16 +572,8 @@ defmodule EtherCAT.Master do
   def synced({:call, from}, {:create_domain, name, interval}, data) do
     domain_ref = Nif.master_create_domain(data.master_ref, self(), interval)
 
-    # Start domain under DynamicSupervisor for proper supervision
-    domain_child_spec = %{
-      id: name,
-      start: {Domain, :start_link, [name, self(), domain_ref, interval]},
-      restart: :permanent,
-      shutdown: 5000,
-      type: :worker
-    }
-
-    case DynamicSupervisor.start_child(EtherCAT.DomainSupervisor, domain_child_spec) do
+    # Start domain as linked process (dies with Master)
+    case Domain.start_link(name, self(), domain_ref, interval) do
       {:ok, domain_pid} ->
         # Update the domain accessor with the Domain process PID
         Nif.domain_set_pid(domain_ref, domain_pid)

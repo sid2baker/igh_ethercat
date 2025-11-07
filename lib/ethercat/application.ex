@@ -2,47 +2,56 @@ defmodule EtherCAT.Application do
   @moduledoc """
   OTP Application for the EtherCAT library.
 
-  This application provides a comprehensive supervision tree for EtherCAT masters,
-  slaves, and domains with proper OTP patterns for reliability and fault tolerance.
+  This application provides the supervision tree for EtherCAT infrastructure.
 
   ## Supervision Architecture
 
-  The application starts a supervision tree with the following components:
-
   ```
   EtherCAT.Supervisor (one_for_one)
-    ├─ EtherCAT.Registry (Registry)
-    │  └─ Process discovery for masters, domains, and slaves
-    ├─ EtherCAT.DomainSupervisor (DynamicSupervisor)
-    │  └─ Dynamically supervises domain processes
-    └─ EtherCAT.SlaveSupervisor (DynamicSupervisor)
-       └─ Dynamically supervises slave processes
+    └─ EtherCAT.Registry (Registry)
+       └─ Process discovery for masters, domains, and slaves
+
+  EtherCAT.Master (started independently or under your app's supervisor)
+    ├─ Domains (linked processes, die with Master)
+    └─ Slaves (linked processes, die with Master)
   ```
 
-  ## Dynamic Supervision
+  ## Lifecycle Management
 
-  EtherCAT masters can be started either:
-  1. Standalone using `EtherCAT.Master.start_link/1` for manual control
-  2. Under the application supervision tree for automatic restart
+  **Master owns its children via linking:**
+  - When Master dies → all slaves and domains die (correct: NIF resources invalid)
+  - When slave/domain dies → Master receives EXIT and can handle it
+  - Simple, predictable lifecycle matching the physical hardware dependencies
 
-  Slaves and domains are automatically supervised by their respective DynamicSupervisors,
-  ensuring they restart on failure while maintaining system stability.
+  **Why no DynamicSupervisor?**
+  Slaves and domains are tightly coupled to the Master's NIF resources:
+  - `domain_ref` and `slave_config` are only valid while Master is alive
+  - Restarting a slave/domain independently would create orphaned processes with invalid resources
+  - On Master crash, you need to reconnect and rediscover the bus anyway
 
   ## Process Discovery
 
-  All EtherCAT processes register themselves in `EtherCAT.Registry` with the following keys:
+  All EtherCAT processes register themselves in `EtherCAT.Registry`:
   - Masters: `{:master, master_index}`
   - Domains: `{:domain, master_pid, domain_name}`
   - Slaves: `{:slave, master_pid, position}`
 
-  This allows for reliable process lookup without relying on process names or direct PID storage.
+  This allows reliable process lookup without relying on process names.
 
-  ## Fault Tolerance
+  ## Starting a Master
 
-  - **one_for_one strategy**: Each component restarts independently on failure
-  - **DynamicSupervisors**: Slaves and domains can crash without affecting siblings
-  - **Registry**: Automatic process tracking with cleanup on termination
-  - **Isolated failures**: Master crashes don't propagate to the entire application
+  **Option 1: Standalone (common for single master)**
+  ```elixir
+  {:ok, master} = EtherCAT.Master.start_link()
+  ```
+
+  **Option 2: Under your application's supervisor (for automatic restart)**
+  ```elixir
+  children = [
+    {EtherCAT.Master, master_index: 0, name: MyApp.EtherCATMaster}
+  ]
+  Supervisor.start_link(children, strategy: :one_for_one)
+  ```
   """
   use Application
 
@@ -50,23 +59,12 @@ defmodule EtherCAT.Application do
   def start(_type, _args) do
     children = [
       # Registry for process discovery across all EtherCAT components
-      {Registry, keys: :unique, name: EtherCAT.Registry},
-
-      # DynamicSupervisor for domain processes
-      # Domains can be started/stopped dynamically as needed
-      {DynamicSupervisor,
-       name: EtherCAT.DomainSupervisor, strategy: :one_for_one, max_restarts: 10},
-
-      # DynamicSupervisor for slave processes
-      # Slaves can be started/stopped as the bus topology changes
-      {DynamicSupervisor, name: EtherCAT.SlaveSupervisor, strategy: :one_for_one, max_restarts: 10}
+      {Registry, keys: :unique, name: EtherCAT.Registry}
     ]
 
     opts = [
       strategy: :one_for_one,
-      name: EtherCAT.Supervisor,
-      max_restarts: 3,
-      max_seconds: 5
+      name: EtherCAT.Supervisor
     ]
 
     Supervisor.start_link(children, opts)
