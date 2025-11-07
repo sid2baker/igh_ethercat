@@ -22,7 +22,8 @@ defmodule EtherCAT.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:zigler, "~> 0.15", runtime: false}
+      {:zigler, "~> 0.15", runtime: false},
+      {:telemetry, "~> 1.2"}
     ]
   end
 end

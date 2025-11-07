@@ -2,45 +2,71 @@ defmodule EtherCAT.Application do
   @moduledoc """
   OTP Application for the EtherCAT library.
 
-  This application provides the supervision tree for EtherCAT masters and slaves.
-  Currently, it starts an empty supervisor that allows dynamic child processes
-  to be added at runtime.
+  This application provides a comprehensive supervision tree for EtherCAT masters,
+  slaves, and domains with proper OTP patterns for reliability and fault tolerance.
+
+  ## Supervision Architecture
+
+  The application starts a supervision tree with the following components:
+
+  ```
+  EtherCAT.Supervisor (one_for_one)
+    ├─ EtherCAT.Registry (Registry)
+    │  └─ Process discovery for masters, domains, and slaves
+    ├─ EtherCAT.DomainSupervisor (DynamicSupervisor)
+    │  └─ Dynamically supervises domain processes
+    └─ EtherCAT.SlaveSupervisor (DynamicSupervisor)
+       └─ Dynamically supervises slave processes
+  ```
 
   ## Dynamic Supervision
 
-  EtherCAT masters are started on-demand using `EtherCAT.Master.start_link/1`
-  rather than being supervised automatically. This gives applications full control
-  over when and how EtherCAT communication is initiated.
+  EtherCAT masters can be started either:
+  1. Standalone using `EtherCAT.Master.start_link/1` for manual control
+  2. Under the application supervision tree for automatic restart
 
-  Each master process supervises its own slaves and domains, creating a hierarchical
-  supervision tree:
+  Slaves and domains are automatically supervised by their respective DynamicSupervisors,
+  ensuring they restart on failure while maintaining system stability.
 
-  ```
-  EtherCAT.Supervisor (empty, available for future use)
-    └─ (no static children)
+  ## Process Discovery
 
-  EtherCAT.Master (started dynamically)
-    ├─ EtherCAT.Slave (1..N slaves)
-    └─ EtherCAT.Domain (1..N domains)
-  ```
+  All EtherCAT processes register themselves in `EtherCAT.Registry` with the following keys:
+  - Masters: `{:master, master_index}`
+  - Domains: `{:domain, master_pid, domain_name}`
+  - Slaves: `{:slave, master_pid, position}`
 
-  ## Future Enhancements
+  This allows for reliable process lookup without relying on process names or direct PID storage.
 
-  This supervisor can be extended to manage:
-  - Global configuration services
-  - Master discovery and registration
-  - Monitoring and telemetry aggregation
-  - Connection pooling for multiple masters
+  ## Fault Tolerance
+
+  - **one_for_one strategy**: Each component restarts independently on failure
+  - **DynamicSupervisors**: Slaves and domains can crash without affecting siblings
+  - **Registry**: Automatic process tracking with cleanup on termination
+  - **Isolated failures**: Master crashes don't propagate to the entire application
   """
   use Application
 
   @impl true
   def start(_type, _args) do
-    children = []
+    children = [
+      # Registry for process discovery across all EtherCAT components
+      {Registry, keys: :unique, name: EtherCAT.Registry},
+
+      # DynamicSupervisor for domain processes
+      # Domains can be started/stopped dynamically as needed
+      {DynamicSupervisor,
+       name: EtherCAT.DomainSupervisor, strategy: :one_for_one, max_restarts: 10},
+
+      # DynamicSupervisor for slave processes
+      # Slaves can be started/stopped as the bus topology changes
+      {DynamicSupervisor, name: EtherCAT.SlaveSupervisor, strategy: :one_for_one, max_restarts: 10}
+    ]
 
     opts = [
       strategy: :one_for_one,
-      name: EtherCAT.Supervisor
+      name: EtherCAT.Supervisor,
+      max_restarts: 3,
+      max_seconds: 5
     ]
 
     Supervisor.start_link(children, opts)
