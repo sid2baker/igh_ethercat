@@ -142,9 +142,9 @@ defmodule EtherCAT.Nif do
   };
 
   /// Global event queue for output writes (single-writer from Elixir, single-reader from cyclic_task)
+  /// Initialized in master_activate, before cyclic_task can run
   var output_events_mutex: std.Thread.Mutex = .{};
-    var output_events: std.ArrayList(OutputEvent) = undefined;
-  var output_events_initialized: bool = false;
+  var output_events: std.ArrayList(OutputEvent) = undefined;
 
   /// Tracked domain state for cyclic task processing
   /// This structure maintains all necessary state for a domain including
@@ -188,6 +188,9 @@ defmodule EtherCAT.Nif do
   pub fn master_activate(master: MasterResource) !void {
       const result = ecrt.ecrt_master_activate(master.unpack());
       if (result != 0) return MasterError.ActivateError;
+
+      // Initialize output event queue (required before cyclic_task starts)
+      output_events = std.ArrayList(OutputEvent){};
   }
 
   /// Receive frames from the network
@@ -370,16 +373,6 @@ defmodule EtherCAT.Nif do
 
       if (offset >= domain_size * 8) return DomainError.OutOfBounds;
 
-      // Initialize event queue on first use
-      if (!output_events_initialized) {
-          output_events_mutex.lock();
-          defer output_events_mutex.unlock();
-          if (!output_events_initialized) {
-              output_events = std.ArrayList(OutputEvent){};
-              output_events_initialized = true;
-          }
-      }
-
       // Create event with bool value (1 bit)
       var event_data: [8]u8 = [_]u8{0} ** 8;
       event_data[0] = if (value) 1 else 0;
@@ -542,14 +535,12 @@ defmodule EtherCAT.Nif do
       var data_diffs = std.ArrayList(usize){};
       defer data_diffs.deinit(beam.allocator);
 
-      // Main cyclic loop
+      // Main cyclic loop with deterministic timing
+      var next_cycle_time: i128 = std.time.nanoTimestamp();
+      const cycle_period_ns: i128 = @intCast(interval * std.time.ns_per_us);
       var cycle_start_time: u64 = 0;
 
       while (true) {
-          // EtherCAT Cycle - Simplified and Correct Order:
-          // The key insight: domain_process() only updates INPUTS, not outputs!
-          // So we can safely process first, then queue outputs.
-
           // 1. Set application time (synchronize with master)
           cycle_start_time = cycle_start_time + (interval * std.time.ns_per_us);
           _ = ecrt.ecrt_master_application_time(master, cycle_start_time);
@@ -647,13 +638,25 @@ defmodule EtherCAT.Nif do
           // Step 7: Send queued frames to network
           _ = ecrt.ecrt_master_send(master);
 
+          // Step 8: Deterministic sleep to maintain exact cycle rate
+          next_cycle_time += cycle_period_ns;
+          const now = std.time.nanoTimestamp();
+          const sleep_ns = next_cycle_time - now;
+
+          if (sleep_ns > 0) {
+              std.Thread.sleep(@intCast(sleep_ns));
+          } else {
+              // Cycle overrun: work took longer than the cycle period
+              const overrun_us = @divTrunc(-sleep_ns, std.time.ns_per_us);
+              std.debug.print("WARNING: Cycle overrun by {d}µs (cycle {d})\n", .{overrun_us, counter});
+          }
+
           // Yield to BEAM scheduler periodically
           if (counter % yield_interval == 0) {
               try beam.yield();
           }
 
           counter +%= 1; // Wrapping increment
-          std.Thread.sleep(interval * std.time.ns_per_us);
       }
   }
   """

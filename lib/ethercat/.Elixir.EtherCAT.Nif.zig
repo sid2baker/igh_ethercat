@@ -86,17 +86,17 @@ const domain_config_t = struct {
 
 /// Output event for queuing domain value changes
 /// Handles arbitrary bit-aligned writes for all primitive types
-const OutputEvent = struct {
+const OutputEventInfo = struct {
     domain_ptr: usize,      // Address of domain to match against DomainItem
     bit_offset: usize,      // Bit offset in domain (same as used in get/set functions)
-    data: [8]u8,            // Raw value bytes (little-endian, right-aligned)
-    bit_length: u8,         // Number of bits (1 for bool, 32 for u32, etc.)
+          // Raw value bytes (little-endian, right-aligned)8      data: []u8,
+    bit_length: u8,         // Number of bits (1 for booletc.u32,for32, // Bitmap: true if byte was written by SET (is an output)
 };
 
-/// Global event queue for output writes (single-writer from Elixir, single-reader from cyclic_task)
+/// Global event queue for output writes (single-writer from Elixir, singlcyclic_task)frome-reader SET operations to write to output_state instead of domain buffer
+/// Initialized in master_activate, before cyclic_task can run
 var output_events_mutex: std.Thread.Mutex = .{};
-  var output_events: std.ArrayList(OutputEvent) = undefined;
-var output_events_initialized: bool = false;
+tputEventArrayListoutput_events  var output_  var output_events_initialized: bool = false;
 
 /// Tracked domain state for cyclic task processing
 /// This structure maintains all necessary state for a domain including
@@ -140,6 +140,9 @@ pub fn request_master(index: u32) !beam.term {
 pub fn master_activate(master: MasterResource) !void {
     const result = ecrt.ecrt_master_activate(master.unpack());
     if (result != 0) return MasterError.ActivateError;
+
+    // Initialize output event queue (required before cyclic_task starts)
+    output_events = std.ArrayList(OutputEvent){};
 }
 
 /// Receive frames from the network
@@ -288,7 +291,7 @@ fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, 
         const current_bit_offset = bit_offset + bits_written;
         const byte_index = current_bit_offset / 8;
         const bit_index_usize = current_bit_offset % 8;
-          const bit_index = @as(u3, @intCast(bit_index_usize));
+bit_index_usize          const bit_index = @as(u3, @intCast(current_bit_offset % 8));
 
         // How many bits can we write in this byte?
         const bits_remaining_in_byte = 8 - bit_index_usize;
@@ -296,8 +299,8 @@ fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, 
 
         // Extract bits from value_bytes
         const value_byte_index = bits_written / 8;
-          const value_bit_index_usize = bits_written % 8;
-        const value_bit_index = @as(u3, @intCast(value_bit_index_usize));
+value_bit_index_usize = bits_written % 8;
+        const           const value_bit_indexvalue_bit_index_usize = @as(u3, @intCast(bits_written % 8));
 
         // Create mask for bits we're writing
         const mask = (@as(u8, 1) << @intCast(bits_to_write)) - 1;
@@ -321,16 +324,6 @@ pub fn set_domain_value_bool(domain: DomainResource, offset: usize, value: bool)
     const domain_size = ecrt.ecrt_domain_size(domain_ptr);
 
     if (offset >= domain_size * 8) return DomainError.OutOfBounds;
-
-    // Initialize event queue on first use
-    if (!output_events_initialized) {
-        output_events_mutex.lock();
-        defer output_events_mutex.unlock();
-        if (!output_events_initialized) {
-            output_events = std.ArrayList(OutputEvent){};
-            output_events_initialized = true;
-        }
-    }
 
     // Create event with bool value (1 bit)
     var event_data: [8]u8 = [_]u8{0} ** 8;
@@ -494,14 +487,12 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     var data_diffs = std.ArrayList(usize){};
     defer data_diffs.deinit(beam.allocator);
 
-    // Main cyclic loop
+    // Main cyclic loop with deterministic timing
+    var next_cycle_time: i128 = std.time.nanoTimestamp();
+    const cycle_period_ns: i128 = @intCast(interval * std.time.ns_per_us);
     var cycle_start_time: u64 = 0;
 
     while (true) {
-        // EtherCAT Cycle - Simplified and Correct Order:
-        // The key insight: domain_process() only updates INPUTS, not outputs!
-        // So we can safely process first, then queue outputs.
-
         // 1. Set application time (synchronize with master)
         cycle_start_time = cycle_start_time + (interval * std.time.ns_per_us);
         _ = ecrt.ecrt_master_application_time(master, cycle_start_time);
@@ -513,7 +504,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         for (domains.items) |*item| {
             var state: ecrt.ec_domain_state_t = undefined;
 
-            // Process domain data (updates buffer from received frame)
+            // Process domain data (updates buffer from received frame, OVERWRITES outputs with echoes)
             _ = ecrt.ecrt_domain_process(item.domain);
 
             _ = ecrt.ecrt_domain_state(item.domain, &state);
@@ -589,7 +580,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         prev_master_state = master_state;
 
-        // Step 6: Queue domain outputs at configured intervals (prepare outputs to send)
+ 6       // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
         for (domains.items) |*item| {
             if (counter % item.interval == 0) {
                 _ = ecrt.ecrt_domain_queue(item.domain);
@@ -598,6 +589,19 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         // Step 7: Send queued frames to network
         _ = ecrt.ecrt_master_send(master);
+
+        // Step 8: Deterministic sleep to maintain exact cycle rate
+        next_cycle_time += cycle_period_ns;
+        const now = std.time.nanoTimestamp();
+        const sleep_ns = next_cycle_time - now;
+
+        if (sleep_ns > 0) {
+            std.Thread.sleep(@intCast(sleep_ns));
+        } else {
+            // Cycle overrun: work took longer than the cycle period
+            const overrun_us = @divTrunc(-sleep_ns, std.time.ns_per_us);
+            std.debug.print("WARNING: Cycle overrun by {d}µs (cycle {d})\n", .{overrun_us, counter});
+        }
 
         // Yield to BEAM scheduler periodically
         if (counter % yield_interval == 0) {
