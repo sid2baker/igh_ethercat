@@ -1,0 +1,220 @@
+    warning: unused alias Nif
+    │
+ 54 │   alias EtherCAT.Nif
+    │   ~
+    │
+    └─ lib/ethercat/domain.ex:54:3
+
+    warning: defp cyclic_task-launch/4 is private, @doc attribute is always discarded for private functions/macros/types
+    │
+  1 │ defmodule EtherCAT.Nif do
+    │ ~~~~~~~~~~~~~~~~~~~~~~~~~
+    │
+    └─ lib/ethercat/nif.ex:1: EtherCAT.Nif."cyclic_task-launch"/4
+
+    warning: defp listen_bus_changes-launch/3 is private, @doc attribute is always discarded for private functions/macros/types
+    │
+  1 │ defmodule EtherCAT.Nif do
+    │ ~~~~~~~~~~~~~~~~~~~~~~~~~
+    │
+    └─ lib/ethercat/nif.ex:1: EtherCAT.Nif."listen_bus_changes-launch"/3
+
+Running ExUnit with seed: 722089, max_cases: 1
+Including tags: [:hardware]
+
+
+Hardware.FunctionalValidationTest [test/hardware/functional_validation_test.exs]
+  * test 1. bit-level operations - single bit toggle [L#106]
+19:11:00.172 [info] === Test 1: Bit-level Operations ===
+
+19:11:00.193 [debug] loaded module at Elixir.EtherCAT.Nif
+
+19:11:00.209 [debug] Generic driver discovered PDOs: %{}
+
+19:11:00.216 [debug] Generic driver discovered PDOs: %{"pdo_6000:1" => %{entry: {24576, 1, 1}, pdo_index: 6656, sync_manager: {0, 2, 2}}, "pdo_6010:1" => %{entry: {24592, 1, 1}, pdo_index: 6657, sync_manager: {0, 2, 2}}, "pdo_6020:1" => %{entry: {24608, 1, 1}, pdo_index: 6658, sync_manager: {0, 2, 2}}, "pdo_6030:1" => %{entry: {24624, 1, 1}, pdo_index: 6659, sync_manager: {0, 2, 2}}, "pdo_6040:1" => %{entry: {24640, 1, 1}, pdo_index: 6660, sync_manager: {0, 2, 2}}, "pdo_6050:1" => %{entry: {24656, 1, 1}, pdo_index: 6661, sync_manager: {0, 2, 2}}, "pdo_6060:1" => %{entry: {24672, 1, 1}, pdo_index: 6662, sync_manager: {0, 2, 2}}, "pdo_6070:1" => %{entry: {24688, 1, 1}, pdo_index: 6663, sync_manager: {0, 2, 2}}, "pdo_6080:1" => %{entry: {24704, 1, 1}, pdo_index: 6664, sync_manager: {0, 2, 2}}, "pdo_6090:1" => %{entry: {24720, 1, 1}, pdo_index: 6665, sync_manager: {0, 2, 2}}, ...}
+
+19:11:00.216 [debug] Generic driver discovered PDOs: %{"pdo_7000:1" => %{entry: {28672, 1, 1}, pdo_index: 5632, sync_manager: {0, 1, 1}}, "pdo_7010:1" => %{entry: {28688, 1, 1}, pdo_index: 5633, sync_manager: {0, 1, 1}}, "pdo_7020:1" => %{entry: {28704, 1, 1}, pdo_index: 5634, sync_manager: {0, 1, 1}}, "pdo_7030:1" => %{entry: {28720, 1, 1}, pdo_index: 5635, sync_manager: {0, 1, 1}}, "pdo_7040:1" => %{entry: {28736, 1, 1}, pdo_index: 5636, sync_manager: {0, 1, 1}}, "pdo_7050:1" => %{entry: {28752, 1, 1}, pdo_index: 5637, sync_manager: {0, 1, 1}}, "pdo_7060:1" => %{entry: {28768, 1, 1}, pdo_index: 5638, sync_manager: {0, 1, 1}}, "pdo_7070:1" => %{entry: {28784, 1, 1}, pdo_index: 5639, sync_manager: {0, 1, 1}}, "pdo_7080:1" => %{entry: {28800, 1, 1}, pdo_index: 5640, sync_manager: {1, 1, 1}}, "pdo_7090:1" => %{entry: {28816, 1, 1}, pdo_index: 5641, sync_manager: {1, 1, 1}}, ...}
+
+19:11:00.217 [info] Input PDOs: ["pdo_6000:1", "pdo_6010:1", "pdo_6020:1", "pdo_6030:1", "pdo_6040:1", "pdo_6050:1", "pdo_6060:1", "pdo_6070:1", "pdo_6080:1", "pdo_6090:1", "pdo_60A0:1", "pdo_60B0:1", "pdo_60C0:1", "pdo_60D0:1", "pdo_60E0:1", "pdo_60F0:1"]
+
+19:11:00.218 [debug] Sync managers to configure: %{0 => {2, 2, %{6656 => [{"pdo_6000:1", {24576, 1, 1}}], 6657 => [{"pdo_6010:1", {24592, 1, 1}}], 6658 => [{"pdo_6020:1", {24608, 1, 1}}], 6659 => [{"pdo_6030:1", {24624, 1, 1}}], 6660 => [{"pdo_6040:1", {24640, 1, 1}}], 6661 => [{"pdo_6050:1", {24656, 1, 1}}], 6662 => [{"pdo_6060:1", {24672, 1, 1}}], 6663 => [{"pdo_6070:1", {24688, 1, 1}}], 6664 => [{"pdo_6080:1", {24704, 1, 1}}], 6665 => [{"pdo_6090:1", {24720, 1, 1}}], 6666 => [{"pdo_60A0:1", {24736, 1, 1}}], 6667 => [{"pdo_60B0:1", {24752, 1, 1}}], 6668 => [{"pdo_60C0:1", {24768, 1, 1}}], 6669 => [{"pdo_60D0:1", {24784, ...}}], ...}}}
+
+19:11:00.218 [debug] Configured PDO entries: [{"pdo_6000:1", {24576, 1, 1}}, {"pdo_6010:1", {24592, 1, 1}}, {"pdo_6020:1", {24608, 1, 1}}, {"pdo_6030:1", {24624, 1, 1}}, {"pdo_6040:1", {24640, 1, 1}}, {"pdo_6050:1", {24656, 1, 1}}, {"pdo_6060:1", {24672, 1, 1}}, {"pdo_6070:1", {24688, 1, 1}}, {"pdo_6080:1", {24704, 1, 1}}, {"pdo_6090:1", {24720, 1, 1}}, {"pdo_60A0:1", {24736, 1, 1}}, {"pdo_60B0:1", {24752, 1, 1}}, {"pdo_60C0:1", {24768, 1, 1}}, {"pdo_60D0:1", {24784, 1, 1}}, {"pdo_60E0:1", {24800, 1, 1}}, {"pdo_60F0:1", {24816, 1, 1}}]
+
+19:11:00.219 [info] Output PDOs: ["pdo_7000:1", "pdo_7010:1", "pdo_7020:1", "pdo_7030:1", "pdo_7040:1", "pdo_7050:1", "pdo_7060:1", "pdo_7070:1", "pdo_7080:1", "pdo_7090:1", "pdo_70A0:1", "pdo_70B0:1", "pdo_70C0:1", "pdo_70D0:1", "pdo_70E0:1", "pdo_70F0:1"]
+
+19:11:00.219 [debug] Sync managers to configure: %{0 => {1, 1, %{5632 => [{"pdo_7000:1", {28672, 1, 1}}], 5633 => [{"pdo_7010:1", {28688, 1, 1}}], 5634 => [{"pdo_7020:1", {28704, 1, 1}}], 5635 => [{"pdo_7030:1", {28720, 1, 1}}], 5636 => [{"pdo_7040:1", {28736, 1, 1}}], 5637 => [{"pdo_7050:1", {28752, 1, 1}}], 5638 => [{"pdo_7060:1", {28768, 1, 1}}], 5639 => [{"pdo_7070:1", {28784, 1, 1}}]}}, 1 => {1, 1, %{5640 => [{"pdo_7080:1", {28800, 1, 1}}], 5641 => [{"pdo_7090:1", {28816, 1, 1}}], 5642 => [{"pdo_70A0:1", {28832, 1, 1}}], 5643 => [{"pdo_70B0:1", {28848, 1, 1}}], 5644 => [{"pdo_70C0:1", {28864, 1, 1}}], 5645 => [...], ...}}}
+
+19:11:00.220 [debug] Configured PDO entries: [{"pdo_7000:1", {28672, 1, 1}}, {"pdo_7010:1", {28688, 1, 1}}, {"pdo_7020:1", {28704, 1, 1}}, {"pdo_7030:1", {28720, 1, 1}}, {"pdo_7040:1", {28736, 1, 1}}, {"pdo_7050:1", {28752, 1, 1}}, {"pdo_7060:1", {28768, 1, 1}}, {"pdo_7070:1", {28784, 1, 1}}, {"pdo_7080:1", {28800, 1, 1}}, {"pdo_7090:1", {28816, 1, 1}}, {"pdo_70A0:1", {28832, 1, 1}}, {"pdo_70B0:1", {28848, 1, 1}}, {"pdo_70C0:1", {28864, 1, 1}}, {"pdo_70D0:1", {28880, 1, 1}}, {"pdo_70E0:1", {28896, 1, 1}}, {"pdo_70F0:1", {28912, 1, 1}}]
+
+19:11:00.220 [debug] Registering PDO entries for domain: 2 slave configs
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60F0:1: entry=0x60F0:1, offset=15, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60E0:1: entry=0x60E0:1, offset=14, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60D0:1: entry=0x60D0:1, offset=13, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60C0:1: entry=0x60C0:1, offset=12, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60B0:1: entry=0x60B0:1, offset=11, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_60A0:1: entry=0x60A0:1, offset=10, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6090:1: entry=0x6090:1, offset=9, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6080:1: entry=0x6080:1, offset=8, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6070:1: entry=0x6070:1, offset=7, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6060:1: entry=0x6060:1, offset=6, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6050:1: entry=0x6050:1, offset=5, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6040:1: entry=0x6040:1, offset=4, size=1, type=bool
+
+19:11:00.220 [debug]   Registered slave_1:pdo_6030:1: entry=0x6030:1, offset=3, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_1:pdo_6020:1: entry=0x6020:1, offset=2, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_1:pdo_6010:1: entry=0x6010:1, offset=1, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_1:pdo_6000:1: entry=0x6000:1, offset=0, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70F0:1: entry=0x70F0:1, offset=23, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70E0:1: entry=0x70E0:1, offset=22, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70D0:1: entry=0x70D0:1, offset=21, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70C0:1: entry=0x70C0:1, offset=20, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70B0:1: entry=0x70B0:1, offset=19, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_70A0:1: entry=0x70A0:1, offset=18, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7090:1: entry=0x7090:1, offset=17, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7080:1: entry=0x7080:1, offset=16, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7070:1: entry=0x7070:1, offset=31, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7060:1: entry=0x7060:1, offset=30, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7050:1: entry=0x7050:1, offset=29, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7040:1: entry=0x7040:1, offset=28, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7030:1: entry=0x7030:1, offset=27, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7020:1: entry=0x7020:1, offset=26, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7010:1: entry=0x7010:1, offset=25, size=1, type=bool
+
+19:11:00.221 [debug]   Registered slave_2:pdo_7000:1: entry=0x7000:1, offset=24, size=1, type=bool
+
+19:11:00.221 [debug] Total entries registered: 32
+
+19:11:00.222 [info] Master State Changed: %{link_up: 1, slaves_responding: 3, al_state_init: 0, al_state_preop: 1, al_state_safeop: 0, al_state_op: 0}
+
+19:11:00.285 [info] Master State Changed: %{link_up: 1, slaves_responding: 3, al_state_init: 0, al_state_preop: 0, al_state_safeop: 0, al_state_op: 1}
+
+19:11:00.720 [info] Testing PDO pair: pdo_7000:1 -> pdo_6000:1
+
+19:11:00.720 [info] Step 1: Setting output to FALSE
+  * test 1. bit-level operations - single bit toggle (1057.1ms) [L#106]
+Failed to reserve master: Device or resource busy
+
+19:11:01.229 [info] === Test 4: PDO Subscriptions ===
+
+19:11:01.232 [info] === Test 2: Byte-level Operations ===
+Failed to reserve master: Device or resource busy
+
+19:11:01.232 [info] === Test 6: Edge Cases ===
+Failed to reserve master: Device or resource busy
+
+19:11:01.232 [info] === Test 5: Multi-PDO Concurrent Operations ===
+Failed to reserve master: Device or resource busy
+
+19:11:01.233 [info] === Test 3: Rapid State Changes ===
+Failed to reserve master: Device or resource busy
+WARNING: Cycle overrun by 171µs (cycle 1010)
+
+  1) test 1. bit-level operations - single bit toggle (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:106
+     match (=) failed
+     code:  assert {:ok, actual_value} = EtherCAT.get_pdo(input_slave, input_pdo)
+     left:  {:ok, actual_value}
+     right: false
+     stacktrace:
+       test/hardware/functional_validation_test.exs:89: Hardware.FunctionalValidationTest.assert_loopback/5
+       test/hardware/functional_validation_test.exs:119: (test)
+
+  * test 4. PDO subscriptions - notification delivery [L#226]  * test 4. PDO subscriptions - notification delivery (2.8ms) [L#226]
+
+  2) test 4. PDO subscriptions - notification delivery (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:226
+     ** (MatchError) no match of right hand side value:
+
+         {:error, :failed_to_create_master}
+
+     code: {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+     stacktrace:
+       test/hardware/functional_validation_test.exs:48: Hardware.FunctionalValidationTest.setup_master_and_slaves/0
+       test/hardware/functional_validation_test.exs:228: (test)
+
+  * test 2. byte-level operations - pattern validation [L#135]  * test 2. byte-level operations - pattern validation (0.2ms) [L#135]
+
+  3) test 2. byte-level operations - pattern validation (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:135
+     ** (MatchError) no match of right hand side value:
+
+         {:error, :failed_to_create_master}
+
+     code: {master, di, do_slave, _input_pdos, _output_pdos} = setup_master_and_slaves()
+     stacktrace:
+       test/hardware/functional_validation_test.exs:48: Hardware.FunctionalValidationTest.setup_master_and_slaves/0
+       test/hardware/functional_validation_test.exs:137: (test)
+
+  * test 6. edge cases - idempotency and boundaries [L#342]  * test 6. edge cases - idempotency and boundaries (0.1ms) [L#342]
+
+  4) test 6. edge cases - idempotency and boundaries (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:342
+     ** (MatchError) no match of right hand side value:
+
+         {:error, :failed_to_create_master}
+
+     code: {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+     stacktrace:
+       test/hardware/functional_validation_test.exs:48: Hardware.FunctionalValidationTest.setup_master_and_slaves/0
+       test/hardware/functional_validation_test.exs:344: (test)
+
+  * test 5. multi-PDO concurrent operations [L#276]  * test 5. multi-PDO concurrent operations (0.1ms) [L#276]
+
+  5) test 5. multi-PDO concurrent operations (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:276
+     ** (MatchError) no match of right hand side value:
+
+         {:error, :failed_to_create_master}
+
+     code: {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+     stacktrace:
+       test/hardware/functional_validation_test.exs:48: Hardware.FunctionalValidationTest.setup_master_and_slaves/0
+       test/hardware/functional_validation_test.exs:278: (test)
+
+  * test 3. rapid state changes - stress timing [L#190]  * test 3. rapid state changes - stress timing (0.1ms) [L#190]
+
+  6) test 3. rapid state changes - stress timing (Hardware.FunctionalValidationTest)
+     test/hardware/functional_validation_test.exs:190
+     ** (MatchError) no match of right hand side value:
+
+         {:error, :failed_to_create_master}
+
+     code: {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+     stacktrace:
+       test/hardware/functional_validation_test.exs:48: Hardware.FunctionalValidationTest.setup_master_and_slaves/0
+       test/hardware/functional_validation_test.exs:192: (test)
+
+
+Finished in 1.4 seconds (0.00s async, 1.4s sync)
+6 tests, 6 failures

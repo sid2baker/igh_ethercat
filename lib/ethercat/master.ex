@@ -507,7 +507,12 @@ defmodule EtherCAT.Master do
   end
 
   def operational({:call, from}, {:domain_get_value, domain_ref, name}, _data) do
-    result = Nif.get_value(domain_ref, name)
+    result =
+      case Nif.get_value(domain_ref, name) do
+        {:error, _} = error -> error
+        value -> {:ok, value}
+      end
+
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
