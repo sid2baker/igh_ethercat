@@ -86,36 +86,9 @@ defmodule EtherCAT.Domain do
   defp infer_entry_type(64), do: :uint64
   defp infer_entry_type(size), do: {:unknown, size}
 
-  @doc """
-  Subscribes a process to receive data change notifications for a PDO entry.
-  """
+  @doc false
   def subscribe(domain, pid, name) do
     GenServer.call(domain, {:subscribe, pid, name})
-  end
-
-  @doc """
-  Gets the registered entry information (offset and size) for a PDO by name.
-  Returns `{:ok, {offset, size}}` or `{:error, :not_found}`.
-  Must be called after `get_ready/1`.
-  """
-  def get_entry(domain, name) do
-    GenServer.call(domain, {:get_entry, name})
-  end
-
-  @doc """
-  Sets a boolean value in the domain at the specified offset.
-  All NIF communication is routed through Master.
-  """
-  def set_value_bool(domain, offset, value) do
-    GenServer.call(domain, {:set_value_bool, offset, value})
-  end
-
-  @doc """
-  Gets a boolean value from the domain at the specified offset.
-  All NIF communication is routed through Master.
-  """
-  def get_value_bool(domain, offset) do
-    GenServer.call(domain, {:get_value_bool, offset})
   end
 
   # GenServer callbacks
@@ -186,23 +159,6 @@ defmodule EtherCAT.Domain do
     Logger.debug("Total subscribers: #{map_size(subscribers)}")
 
     {:reply, :ok, %{state | subscribers: subscribers}}
-  end
-
-  def handle_call({:get_entry, name}, _from, state) do
-    case state.entries[name] do
-      {offset, size} -> {:reply, {:ok, {offset, size}}, state}
-      nil -> {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  def handle_call({:set_value_bool, offset, value}, _from, state) do
-    result = Nif.set_domain_value_bool(state.resource, offset, value)
-    {:reply, result, state}
-  end
-
-  def handle_call({:get_value_bool, offset}, _from, state) do
-    result = Nif.get_domain_value_bool(state.resource, offset)
-    {:reply, result, state}
   end
 
   def handle_call(:get_pdo_entries, _from, state) do

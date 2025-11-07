@@ -78,6 +78,21 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:slave_operation, position, operation, args})
   end
 
+  @doc false
+  def domain_set_value(master, domain_ref, name, value) do
+    :gen_statem.call(master, {:domain_set_value, domain_ref, name, value})
+  end
+
+  @doc false
+  def domain_get_value(master, domain_ref, name) do
+    :gen_statem.call(master, {:domain_get_value, domain_ref, name})
+  end
+
+  @doc false
+  def domain_subscribe(master, domain, pid, name) do
+    :gen_statem.call(master, {:domain_subscribe, domain, pid, name})
+  end
+
   # Callbacks
   @impl true
   def callback_mode(), do: [:state_functions, :state_enter]
@@ -314,6 +329,22 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :get_ref, data) do
     actions = [{:reply, from, data.master_ref}]
     {:keep_state_and_data, actions}
+  end
+
+  # Gateway for domain operations in operational state
+  def operational({:call, from}, {:domain_set_value, domain_ref, name, value}, _data) do
+    result = Nif.set_value(domain_ref, name, value)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def operational({:call, from}, {:domain_get_value, domain_ref, name}, _data) do
+    result = Nif.get_value(domain_ref, name)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def operational({:call, from}, {:domain_subscribe, domain, pid, name}, _data) do
+    result = Domain.subscribe(domain, pid, name)
+    {:keep_state_and_data, [{:reply, from, result}]}
   end
 
   def operational(event_type, event_content, data) do

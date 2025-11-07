@@ -26,7 +26,7 @@ defmodule EtherCAT.Slave do
           vendor_id: non_neg_integer(),
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
-          pdo_registrations: %{name() => domain()}
+          pdo_registrations: %{unique_name :: String.t() => domain()}
         }
 
   @type name :: String.t()
@@ -362,9 +362,13 @@ defmodule EtherCAT.Slave do
     configured_entries = configure_and_register_pdos(sync_managers, state, domain)
     Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
 
+    # Map unique names to domain for tracking registrations
     pdo_registrations =
       configured_entries
-      |> Enum.map(fn {name, _entry} -> {name, domain} end)
+      |> Enum.map(fn {name, _entry} ->
+        unique_name = "slave_#{state.position}:#{name}"
+        {unique_name, domain}
+      end)
       |> Map.new()
       |> Map.merge(state.pdo_registrations)
 
@@ -373,21 +377,15 @@ defmodule EtherCAT.Slave do
 
   # Operational API handlers
   def handle_call({:set_pdo_value, name, value}, _from, state) do
-    case state.pdo_registrations[name] do
+    unique_name = "slave_#{state.position}:#{name}"
+
+    case state.pdo_registrations[unique_name] do
       domain_name when is_atom(domain_name) ->
-        case Domain.get_entry(domain_name, name) do
-          {:ok, {offset, size}} ->
-            result =
-              case size do
-                1 -> Domain.set_value_bool(domain_name, offset, value)
-                _ -> {:error, :not_implemented}
-              end
-
-            {:reply, result, state}
-
-          {:error, :not_found} ->
-            {:reply, {:error, {:entry_not_ready, name}}, state}
-        end
+        # Get domain reference
+        domain_ref = Domain.get_ref(domain_name)
+        # Call Master as the single NIF gateway
+        result = Master.domain_set_value(state.master, domain_ref, unique_name, value)
+        {:reply, result, state}
 
       nil ->
         {:reply, {:error, {:pdo_not_registered, name}}, state}
@@ -395,21 +393,15 @@ defmodule EtherCAT.Slave do
   end
 
   def handle_call({:get_pdo_value, name}, _from, state) do
-    case state.pdo_registrations[name] do
+    unique_name = "slave_#{state.position}:#{name}"
+
+    case state.pdo_registrations[unique_name] do
       domain_name when is_atom(domain_name) ->
-        case Domain.get_entry(domain_name, name) do
-          {:ok, {offset, size}} ->
-            result =
-              case size do
-                1 -> Domain.get_value_bool(domain_name, offset)
-                _ -> {:error, :not_implemented}
-              end
-
-            {:reply, result, state}
-
-          {:error, :not_found} ->
-            {:reply, {:error, {:entry_not_ready, name}}, state}
-        end
+        # Get domain reference
+        domain_ref = Domain.get_ref(domain_name)
+        # Call Master as the single NIF gateway
+        result = Master.domain_get_value(state.master, domain_ref, unique_name)
+        {:reply, result, state}
 
       nil ->
         {:reply, {:error, {:pdo_not_registered, name}}, state}
@@ -417,10 +409,12 @@ defmodule EtherCAT.Slave do
   end
 
   def handle_call({:watch_pdo, name, pid}, _from, state) do
-    case state.pdo_registrations[name] do
+    unique_name = "slave_#{state.position}:#{name}"
+
+    case state.pdo_registrations[unique_name] do
       domain_name when is_atom(domain_name) ->
-        # Subscribe to the entry by name
-        result = Domain.subscribe(domain_name, pid, name)
+        # Call Master to subscribe (Master routes to Domain)
+        result = Master.domain_subscribe(state.master, domain_name, pid, unique_name)
         {:reply, result, state}
 
       nil ->
@@ -480,9 +474,11 @@ defmodule EtherCAT.Slave do
       end
       |> List.flatten()
 
-    # Register all entries with domain
+    # Register all entries with domain, using globally unique names
     for {name, entry} <- configured_entries do
-      Domain.register_pdo_entry(domain, state.slave_config, name, entry)
+      # Prefix with slave position to ensure uniqueness across slaves
+      unique_name = "slave_#{state.position}:#{name}"
+      Domain.register_pdo_entry(domain, state.slave_config, unique_name, entry)
     end
 
     configured_entries
