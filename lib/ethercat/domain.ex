@@ -71,6 +71,35 @@ defmodule EtherCAT.Domain do
   # Client API
 
   @doc """
+  Returns a child specification for starting this module under a supervisor.
+
+  This is useful when you want to start a domain under a DynamicSupervisor
+  or regular Supervisor with custom parameters.
+
+  ## Parameters
+  - Map with keys:
+    - `:name` - Registered name for the domain (atom)
+    - `:master` - Master process PID
+    - `:resource` - Domain reference from the NIF
+    - `:interval` - Update interval in microseconds
+    - `:id` - Optional child spec identifier (default: name)
+    - `:restart` - Restart strategy (default: `:permanent`)
+  """
+  @spec child_spec(map()) :: Supervisor.child_spec()
+  def child_spec(%{name: name, master: master, resource: resource, interval: interval} = opts) do
+    id = Map.get(opts, :id, name)
+    restart = Map.get(opts, :restart, :permanent)
+
+    %{
+      id: id,
+      start: {__MODULE__, :start_link, [name, master, resource, interval]},
+      restart: restart,
+      shutdown: 5000,
+      type: :worker
+    }
+  end
+
+  @doc """
   Starts a domain process.
 
   ## Parameters
@@ -171,7 +200,17 @@ defmodule EtherCAT.Domain do
 
   # GenServer callbacks
 
+  @impl true
   def init({master, resource, interval}) do
+    # Register this domain in the Registry for process discovery
+    # Use a unique key combining master PID and resource reference
+    domain_name = Process.get(:"$initial_call") |> elem(1) |> List.first()
+
+    Registry.register(EtherCAT.Registry, {:domain, master, domain_name}, %{
+      master: master,
+      interval: interval
+    })
+
     {:ok,
      %__MODULE__{
        master: master,
@@ -306,5 +345,27 @@ defmodule EtherCAT.Domain do
   def handle_info(msg, state) do
     Logger.debug("Domain received unexpected message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  @impl true
+  def terminate(reason, state) do
+    Logger.info("Domain terminating: #{inspect(reason)}")
+
+    # Notify all subscribers that domain is shutting down
+    Enum.each(state.subscribers, fn {_name, pids} ->
+      Enum.each(pids, fn pid ->
+        if Process.alive?(pid) do
+          send(pid, {:domain_shutdown, self()})
+        end
+      end)
+    end)
+
+    :telemetry.execute(
+      [:ethercat, :domain, :terminate],
+      %{subscriber_count: map_size(state.subscribers)},
+      %{reason: reason}
+    )
+
+    :ok
   end
 end

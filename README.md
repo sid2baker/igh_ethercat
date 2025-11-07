@@ -41,8 +41,11 @@ A real-time EtherCAT master implementation for Elixir/Erlang, wrapping the IgH E
 
 **OTP Architecture**
 - Master as GenStatem managing network lifecycle
-- Per-slave GenServers with supervised failure isolation
-- Domains as GenServers for PDO subscription & routing
+- Slaves and domains as linked GenServers (die with Master when NIF resources invalid)
+- Registry-based process discovery for reliable component lookup
+- Simple lifecycle matching hardware dependencies (no orphaned processes)
+- Comprehensive telemetry for monitoring and observability
+- Graceful termination with proper cleanup
 
 **Flexible Driver System**
 - Generic driver: auto-discovers slave PDOs via EEPROM inspection
@@ -148,11 +151,18 @@ end
 - Cyclic timing dependent on Linux kernel RT patches for hard real-time
 - Zig 0.15.2 specific (uses `ArrayList{}` initialization syntax)
 
+## Documentation
+
+- **[OTP Patterns Guide](OTP_PATTERNS.md)** - Comprehensive guide to OTP patterns, supervision tree, error handling, and best practices
+- **[Telemetry Events](TELEMETRY.md)** - Complete reference of telemetry events for monitoring and observability
+
 ## References
 
 - [IgH EtherCAT Master Documentation](https://etherlab.org/doc/)
 - [EtherCAT Technology Group](https://www.ethercat.org/)
 - [Zigler - Zig NIFs for Erlang](https://hexdocs.pm/zigler/)
+- [Elixir OTP Documentation](https://hexdocs.pm/elixir/Supervisor.html)
+- [Telemetry](https://hexdocs.pm/telemetry/)
 
 ## License
 

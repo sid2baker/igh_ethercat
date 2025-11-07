@@ -98,11 +98,72 @@ defmodule EtherCAT.Slave do
   # Client API
 
   @doc """
-  Creates a new slave process for managing an EtherCAT device.
+  Returns a child specification for starting this module under a supervisor.
+
+  ## Parameters
+  - Map with keys:
+    - `:master` - The master process PID
+    - `:position` - The slave's position on the bus (0-based)
+    - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
+    - `:slave_config` - The slave configuration reference from the NIF
+    - `:sync_count` - Number of sync managers available on the device
+    - `:id` - Optional child spec identifier (default: `{__MODULE__, position}`)
+    - `:restart` - Restart strategy (default: `:permanent`)
+  """
+  @spec child_spec(map()) :: Supervisor.child_spec()
+  def child_spec(
+        %{
+          master: master,
+          position: position,
+          driver: driver,
+          slave_config: slave_config,
+          sync_count: sync_count
+        } = opts
+      ) do
+    id = Map.get(opts, :id, {__MODULE__, position})
+    restart = Map.get(opts, :restart, :permanent)
+
+    %{
+      id: id,
+      start: {__MODULE__, :start_link, [master, position, driver, slave_config, sync_count]},
+      restart: restart,
+      shutdown: 5000,
+      type: :worker
+    }
+  end
+
+  @doc """
+  Starts a slave process linked to the calling process.
 
   This function is typically called by the Master during slave synchronization.
   It initializes the slave with a driver and begins auto-discovery if using
   the Generic driver.
+
+  ## Parameters
+  - `master` - The master process PID
+  - `position` - The slave's position on the bus (0-based)
+  - `driver` - The driver module implementing `EtherCAT.Slave.Driver`
+  - `slave_config` - The slave configuration reference from the NIF
+  - `sync_count` - Number of sync managers available on the device
+
+  ## Returns
+  - `{:ok, pid}` - The slave process PID
+
+  ## Example
+
+      {:ok, slave} = Slave.start_link(master, 1, EtherCAT.Drivers.Generic, config, 4)
+  """
+  @spec start_link(pid(), non_neg_integer(), module(), reference(), non_neg_integer()) ::
+          GenServer.on_start()
+  def start_link(master, position, driver, slave_config, sync_count) do
+    GenServer.start_link(__MODULE__, {master, position, driver, slave_config, sync_count})
+  end
+
+  @doc """
+  Creates a new slave process for managing an EtherCAT device.
+
+  This is a legacy function maintained for backward compatibility.
+  Prefer using `start_link/5` for proper supervision.
 
   ## Parameters
   - `master` - The master process PID
@@ -121,9 +182,15 @@ defmodule EtherCAT.Slave do
   @spec create(pid(), non_neg_integer(), module(), reference(), non_neg_integer()) ::
           {:ok, pid()}
   def create(master, position, driver, slave_config, sync_count) do
-    {:ok, pid} = GenServer.start(__MODULE__, {master, position, driver, slave_config, sync_count})
-    Process.monitor(pid)
-    {:ok, pid}
+    # Use start_link for proper supervision
+    case start_link(master, position, driver, slave_config, sync_count) do
+      {:ok, pid} ->
+        Process.monitor(pid)
+        {:ok, pid}
+
+      error ->
+        error
+    end
   end
 
   @doc """
@@ -131,10 +198,15 @@ defmodule EtherCAT.Slave do
 
   This recreates the slave configuration with the new driver. Should only be
   used before the master enters operational mode.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `driver` - The new driver module
+  - `timeout` - Call timeout in milliseconds (default: 5000)
   """
-  @spec set_driver(pid(), module()) :: :ok
-  def set_driver(slave, driver) do
-    GenServer.call(slave, {:set_driver, driver})
+  @spec set_driver(pid(), module(), timeout()) :: :ok
+  def set_driver(slave, driver, timeout \\ 5000) do
+    GenServer.call(slave, {:set_driver, driver}, timeout)
   end
 
   @doc """
@@ -146,14 +218,15 @@ defmodule EtherCAT.Slave do
   ## Parameters
   - `slave` - The slave process PID
   - `config` - Configuration map (driver-specific)
+  - `timeout` - Call timeout in milliseconds (default: 5000)
 
   ## Example
 
       Slave.configure(slave, %{sample_rate: 1000, mode: :continuous})
   """
-  @spec configure(pid(), map()) :: :ok
-  def configure(slave, config) do
-    GenServer.call(slave, {:configure, config})
+  @spec configure(pid(), map(), timeout()) :: :ok
+  def configure(slave, config, timeout \\ 5000) do
+    GenServer.call(slave, {:configure, config}, timeout)
   end
 
   @doc """
@@ -163,6 +236,10 @@ defmodule EtherCAT.Slave do
   - Generic driver: Auto-discovered names like "pdo_6000:1"
   - Device-specific drivers: Semantic names like :temperature, :pressure
 
+  ## Parameters
+  - `slave` - The slave process PID
+  - `timeout` - Call timeout in milliseconds (default: 5000)
+
   ## Returns
   List of PDO identifiers (atoms or strings)
 
@@ -171,9 +248,9 @@ defmodule EtherCAT.Slave do
       pdos = Slave.list_pdos(slave)
       #=> [:input1, :input2, :output1]
   """
-  @spec list_pdos(pid()) :: [atom() | String.t()]
-  def list_pdos(slave) do
-    GenServer.call(slave, :list_pdos)
+  @spec list_pdos(pid(), timeout()) :: [atom() | String.t()]
+  def list_pdos(slave, timeout \\ 5000) do
+    GenServer.call(slave, :list_pdos, timeout)
   end
 
   # Introspection API
@@ -238,14 +315,15 @@ defmodule EtherCAT.Slave do
   - `slave` - The slave process PID
   - `names` - List of PDO names (from `list_pdos/1`)
   - `domain` - Domain identifier (default: `:default_domain`)
+  - `timeout` - Call timeout in milliseconds (default: 10_000 for configuration)
 
   ## Example
 
       Slave.register_pdos(slave, [:input1, :input2], :default_domain)
   """
-  @spec register_pdos(pid(), [name()], domain()) :: :ok
-  def register_pdos(slave, names, domain \\ :default_domain) do
-    GenServer.call(slave, {:register_pdos, names, domain})
+  @spec register_pdos(pid(), [name()], domain(), timeout()) :: :ok
+  def register_pdos(slave, names, domain \\ :default_domain, timeout \\ 10_000) do
+    GenServer.call(slave, {:register_pdos, names, domain}, timeout)
   end
 
   @doc """
@@ -378,6 +456,13 @@ defmodule EtherCAT.Slave do
 
   @impl true
   def init({master, position, driver, slave_config, sync_count}) do
+    # Register this slave in the Registry for process discovery
+    Registry.register(EtherCAT.Registry, {:slave, master, position}, %{
+      master: master,
+      position: position,
+      driver: driver
+    })
+
     state = %__MODULE__{
       driver: driver,
       driver_state: %{},
@@ -629,8 +714,21 @@ defmodule EtherCAT.Slave do
   end
 
   @impl true
-  def terminate(_reason, %{driver: mod, driver_state: s}) do
-    mod.terminate(s)
+  def terminate(reason, state) do
+    Logger.info("Slave at position #{state.position} terminating: #{inspect(reason)}")
+
+    :telemetry.execute(
+      [:ethercat, :slave, :terminate],
+      %{position: state.position},
+      %{reason: reason, driver: state.driver}
+    )
+
+    # Call driver's terminate callback
+    if state.driver && state.driver_state do
+      state.driver.terminate(state.driver_state)
+    end
+
+    :ok
   end
 
   # Private helpers
