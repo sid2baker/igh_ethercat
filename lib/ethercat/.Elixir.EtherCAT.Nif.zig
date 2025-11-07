@@ -142,6 +142,7 @@ pub const DomainAccessor = struct {
     interval: u32,  // Interval multiplier for cyclic task
     prev_data: []u8,  // Previous cycle data for change detection
     data: []u8,       // Current cycle data (points to ecrt-managed memory)
+    state: ecrt.ec_domain_state_t,  // Domain state for change detection
 
     pub fn init(domain: *ecrt.ec_domain_t, pid: beam.pid, interval: u32) DomainAccessor {
         return .{
@@ -151,6 +152,7 @@ pub const DomainAccessor = struct {
             .interval = interval,
             .prev_data = &[_]u8{},  // Will be allocated in cyclic_task
             .data = &[_]u8{},       // Will be set in cyclic_task
+            .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
         };
     }
 
@@ -758,14 +760,9 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     const yield_interval = @divTrunc(100_000, interval); // Yield every 100ms
 
     // Initialize change tracking for all domain accessors
-    // Also track domain state per accessor (can't store in resource due to C struct)
-    var domain_states = std.ArrayList(ecrt.ec_domain_state_t){};
-    defer domain_states.deinit(beam.allocator);
-
     for (domain_accessors) |domain_accessor_resource| {
         const accessor = domain_accessor_resource.unpack();
         try accessor.initChangeTracking();
-        try domain_states.append(beam.allocator, undefined);
     }
 
     defer {
@@ -792,23 +789,23 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         _ = ecrt.ecrt_master_receive(master);
 
         // 3. Process domains
-        for (domain_accessors, domain_states.items) |domain_accessor_resource, *prev_state| {
+        for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
-            var state: ecrt.ec_domain_state_t = undefined;
+            var new_state: ecrt.ec_domain_state_t = undefined;
 
             // Process domain data (updates buffer from received frame)
               _ = ecrt.ecrt_domain_process(accessor.getDomain());
 
-              _ = ecrt.ecrt_domain_state(accessor.getDomain(), &state);
+              _ = ecrt.ecrt_domain_state(accessor.getDomain(), &new_state);
 
             // Notify working counter changes
-            if (state.working_counter != prev_state.working_counter) {
-                _ = try beam.send(accessor.pid, .{ .wc_changed, state.working_counter }, .{});
+            if (new_state.working_counter != accessor.state.working_counter) {
+                _ = try beam.send(accessor.pid, .{ .wc_changed, new_state.working_counter }, .{});
             }
 
             // Notify state changes
-            if (state.wc_state != prev_state.wc_state) {
-                _ = try beam.send(accessor.pid, .{ .state_changed, state.wc_state }, .{});
+            if (new_state.wc_state != accessor.state.wc_state) {
+                _ = try beam.send(accessor.pid, .{ .state_changed, new_state.wc_state }, .{});
             }
 
             // Detect data changes at bit level and map to PDO entries
@@ -856,7 +853,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             }
 
             // Update state for next iteration
-            prev_state.* = state;
+            accessor.state = new_state;
         }
 
         // Step 4: Drain output event queue and apply to domain buffers
