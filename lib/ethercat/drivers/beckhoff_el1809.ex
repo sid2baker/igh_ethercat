@@ -1,40 +1,97 @@
 defmodule EtherCAT.Drivers.BeckhoffEL1809 do
   @moduledoc """
   Driver for Beckhoff EL1809 16-channel digital input terminal.
+
+  The EL1809 is a digital input terminal with 16 channels for 24V DC signals.
+  Each channel provides a single bit input with a 3ms input filter.
+
+  ## Specifications
+
+  - Vendor ID: 0x00000002 (Beckhoff)
+  - Product Code: 0x07113052
+  - 16 digital inputs (24V DC)
+  - Single-ended, 3ms input filter
+  - LED status indicators per channel
+
+  ## PDO Mappings
+
+  Each input channel is mapped to a dedicated PDO:
+  - `:input1` through `:input16` - Individual channel inputs (1 bit each)
+  - All inputs use sync manager 0 (SM0) with direction 2 (input/read)
+  - PDO indices: 0x1A00 through 0x1A0F
+  - Object dictionary base: 0x6000 through 0x60F0
+
+  ## Example Usage
+
+      # Configure a Beckhoff EL1809 slave
+      alias EtherCAT.Drivers.BeckhoffEL1809
+      {:ok, slave} = Slave.create(master, position, BeckhoffEL1809, config, sync_count)
+
+      # List available inputs
+      Slave.list_pdos(slave)
+      #=> [:input1, :input2, ..., :input16]
+
+      # Register specific inputs
+      Slave.register_pdos(slave, [:input1, :input2, :input3], :default_domain)
   """
   use EtherCAT.Slave.Driver
 
-  @impl true
-  def configure(state, _config), do: {:ok, state}
+  # Device specifications
+  @vendor_id 0x00000002
+  @product_code 0x07113052
+  @channel_count 16
+
+  # Sync manager configuration (shared by all channels)
+  @sync_manager {0, 2, 0}
+
+  # Generate PDO mappings at compile time
+  @pdo_mappings for channel <- 1..@channel_count do
+                  pdo_name = :"input#{channel}"
+                  pdo_index = 0x1A00 + (channel - 1)
+                  entry_index = 0x6000 + (channel - 1) * 0x10
+
+                  {pdo_name,
+                   %{
+                     sync_manager: @sync_manager,
+                     pdo_index: pdo_index,
+                     entry: {entry_index, 0x01, 1}
+                   }}
+                end
+                |> Map.new()
 
   @impl true
-  def list_pdos(_state) do
-    Enum.map(1..16, &:"input#{&1}")
+  def configure(state, _config) when is_map(state) do
+    {:ok, state}
   end
 
   @impl true
-  def pdo_info(_state, pdo) do
-    case pdo do
-      :input1 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A00, entry: {0x6000, 0x01, 1}}}
-      :input2 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A01, entry: {0x6010, 0x01, 1}}}
-      :input3 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A02, entry: {0x6020, 0x01, 1}}}
-      :input4 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A03, entry: {0x6030, 0x01, 1}}}
-      :input5 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A04, entry: {0x6040, 0x01, 1}}}
-      :input6 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A05, entry: {0x6050, 0x01, 1}}}
-      :input7 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A06, entry: {0x6060, 0x01, 1}}}
-      :input8 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A07, entry: {0x6070, 0x01, 1}}}
-      :input9 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A08, entry: {0x6080, 0x01, 1}}}
-      :input10 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A09, entry: {0x6090, 0x01, 1}}}
-      :input11 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0A, entry: {0x60A0, 0x01, 1}}}
-      :input12 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0B, entry: {0x60B0, 0x01, 1}}}
-      :input13 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0C, entry: {0x60C0, 0x01, 1}}}
-      :input14 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0D, entry: {0x60D0, 0x01, 1}}}
-      :input15 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0E, entry: {0x60E0, 0x01, 1}}}
-      :input16 -> {:ok, %{sync_manager: {0, 2, 0}, pdo_index: 0x1A0F, entry: {0x60F0, 0x01, 1}}}
-      _ -> {:error, :invalid_pdo}
+  def list_pdos(_state) do
+    Enum.map(1..@channel_count, &:"input#{&1}")
+  end
+
+  @impl true
+  def pdo_info(_state, pdo_name) when is_atom(pdo_name) do
+    case Map.fetch(@pdo_mappings, pdo_name) do
+      {:ok, config} -> {:ok, config}
+      :error -> {:error, {:unknown_pdo, pdo_name}}
     end
   end
 
   @impl true
   def terminate(_state), do: :ok
+
+  @doc """
+  Returns the vendor ID for Beckhoff devices.
+  """
+  def vendor_id, do: @vendor_id
+
+  @doc """
+  Returns the product code for the EL1809 terminal.
+  """
+  def product_code, do: @product_code
+
+  @doc """
+  Returns the number of input channels.
+  """
+  def channel_count, do: @channel_count
 end
