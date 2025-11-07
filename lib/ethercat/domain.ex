@@ -46,7 +46,7 @@ defmodule EtherCAT.Domain do
 
       # Receive notifications
       receive do
-        {:data_changed, "temperature", value} -> IO.puts("Temp: #{value}")
+        {:data_changed, "temperature", value} -> IO.puts("Temp: ")
       end
   """
   use GenServer

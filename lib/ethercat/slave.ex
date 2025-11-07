@@ -87,7 +87,7 @@ defmodule EtherCAT.Slave do
           vendor_id: non_neg_integer(),
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
-          pdo_registrations: %{unique_name :: String.t() => domain()}
+          pdo_registrations: %{(unique_name :: String.t()) => domain()}
         }
 
   @type name :: String.t()
@@ -355,7 +355,7 @@ defmodule EtherCAT.Slave do
 
       receive do
         {:data_changed, :temperature, value} ->
-          IO.puts("Temperature changed to: #{value}")
+          IO.puts("Temperature changed to: ")
       end
 
       # Watch from another process
