@@ -419,15 +419,9 @@ defmodule EtherCAT.Slave do
   def handle_call({:watch_pdo, name, pid}, _from, state) do
     case state.pdo_registrations[name] do
       domain_name when is_atom(domain_name) ->
-        # Query domain for entry info
-        case Domain.get_entry(domain_name, name) do
-          {:ok, {offset, size}} ->
-            result = Domain.subscribe(domain_name, pid, name, offset, size)
-            {:reply, result, state}
-
-          {:error, :not_found} ->
-            {:reply, {:error, {:entry_not_ready, name}}, state}
-        end
+        # Subscribe to the entry by name
+        result = Domain.subscribe(domain_name, pid, name)
+        {:reply, result, state}
 
       nil ->
         {:reply, {:error, {:pdo_not_registered, name}}, state}

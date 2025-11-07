@@ -51,7 +51,7 @@ defmodule EtherCAT do
     Slave.list_pdos(do1) |> IO.inspect(label: "Output PDOs")
     Slave.register_all_pdos(di1, :default_domain)
     Slave.register_all_pdos(do1, :default_domain)
-    Master.activate(master)
+    Master.start_cyclic_mode(master)
     # I connected output 1 with input 1, so i should receive changes
     :timer.sleep(1000)
     Slave.watch_pdo(di1, "pdo_6000:1")
@@ -83,7 +83,7 @@ defmodule EtherCAT do
       :default_domain
     )
 
-    Master.activate(master)
+    Master.start_cyclic_mode(master)
     slave2
   end
 
@@ -100,7 +100,7 @@ defmodule EtherCAT do
     Slave.configure(slave2, [])
     Slave.register_pdos(slave2, [:input1], :default_domain)
     Slave.register_all_pdos(slave2, :domain2)
-    Master.activate(master)
+    Master.start_cyclic_mode(master)
     master
   end
 end

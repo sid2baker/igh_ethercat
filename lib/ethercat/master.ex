@@ -55,11 +55,11 @@ defmodule EtherCAT.Master do
   end
 
   @doc """
-  Activates the master for cyclic operation.
-  After activation, no further configuration changes are allowed.
+  Starts cyclic mode operation on the master.
+  After starting, no further configuration changes are allowed.
   """
-  def activate(master) do
-    :gen_statem.cast(master, :activate)
+  def start_cyclic_mode(master) do
+    :gen_statem.cast(master, :start_cyclic_mode)
   end
 
   @doc """
@@ -78,11 +78,6 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:slave_operation, position, operation, args})
   end
 
-  @doc false
-  def domain_operation(master, operation, args) do
-    :gen_statem.call(master, {:domain_operation, operation, args})
-  end
-
   # Callbacks
   @impl true
   def callback_mode(), do: [:state_functions, :state_enter]
@@ -91,12 +86,15 @@ defmodule EtherCAT.Master do
   def init({master_index, update_interval}) do
     case Nif.request_master(master_index) do
       {:ok, ref} ->
-        domain_ref = Nif.master_create_domain(ref)
-        {:ok, domain} = Domain.start_link(:default_domain, self(), domain_ref, 1)
+        domain_ref = Nif.master_create_domain(ref, self(), 1)
+        {:ok, domain_pid} = Domain.start_link(:default_domain, self(), domain_ref, 1)
+
+        # Update the domain accessor with the Domain process PID
+        Nif.domain_set_pid(domain_ref, domain_pid)
 
         data = %__MODULE__{
           master_ref: ref,
-          domains: [domain],
+          domains: [domain_pid],
           slaves: [],
           task_pid: nil,
           update_interval: update_interval
@@ -195,14 +193,45 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
-  def synced(:cast, :activate, data) do
-    # Finalize all domain registrations before activation
-    # We handle this directly here to avoid deadlock (Domain can't call back to Master)
+  def synced(:cast, :start_cyclic_mode, data) do
+    # Retrieve pending PDO entries from all domains, register them, and lock the domains
     Enum.each(data.domains, fn domain ->
-      :ok = finalize_domain_registrations(domain, data.master_ref)
+      pending_entries = Domain.get_pdo_entries(domain)
+      domain_ref = Domain.get_ref(domain)
+
+      Logger.debug(
+        "Registering PDO entries for domain: #{map_size(pending_entries)} slave configs"
+      )
+
+      # Register all pending PDO entries via NIF and build the registered entries map
+      registered_entries =
+        for {slave_config, pdo_entries} <- pending_entries,
+            {name, {entry_type, entry_index, entry_subindex, entry_size}} <- pdo_entries do
+          offset =
+            Nif.slave_config_reg_pdo_entry(
+              slave_config,
+              name,
+              entry_type,
+              entry_index,
+              entry_subindex,
+              entry_size,
+              domain_ref
+            )
+
+          Logger.debug(
+            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, type=#{entry_type}"
+          )
+
+          {name, {offset, entry_size}}
+        end
+        |> Map.new()
+
+      Logger.debug("Total entries registered: #{map_size(registered_entries)}")
+
+      # Store the registered entries back in the domain and lock it
+      Domain.store_and_lock_entries(domain, registered_entries)
     end)
 
-    # TODO check if all slaves are configured
     {:next_state, :operational, data}
   end
 
@@ -212,18 +241,16 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  # Gateway for Domain module operations - ensures only Master talks to NIF
-  def synced({:call, from}, {:domain_operation, operation, args}, _data) do
-    result = execute_domain_operation(operation, args)
-    {:keep_state_and_data, [{:reply, from, result}]}
-  end
-
   def synced({:call, from}, {:create_domain, name, interval}, data) do
-    domain_ref = Nif.master_create_domain(data.master_ref)
+    domain_ref = Nif.master_create_domain(data.master_ref, self(), interval)
 
     case Domain.start_link(name, self(), domain_ref, interval) do
-      {:ok, domain} ->
-        {:keep_state, %{data | domains: [domain | data.domains]}, [{:reply, from, domain_ref}]}
+      {:ok, domain_pid} ->
+        # Update the domain accessor with the Domain process PID
+        Nif.domain_set_pid(domain_ref, domain_pid)
+
+        {:keep_state, %{data | domains: [domain_pid | data.domains]},
+         [{:reply, from, domain_ref}]}
 
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
@@ -259,16 +286,14 @@ defmodule EtherCAT.Master do
     Nif.master_activate(data.master_ref)
     parent_pid = self()
 
-    domain_configs =
+    domain_resources =
       Enum.map(data.domains, fn domain ->
-        resource = Domain.get_ref(domain)
-        interval = Domain.get_interval(domain)
-        %{pid: domain, resource: resource, interval: interval}
+        Domain.get_ref(domain)
       end)
 
     task_pid =
       spawn_link(fn ->
-        Nif.cyclic_task(parent_pid, data.master_ref, domain_configs, data.update_interval)
+        Nif.cyclic_task(parent_pid, data.master_ref, domain_resources, data.update_interval)
       end)
 
     {:keep_state, %{data | task_pid: task_pid}, []}
@@ -289,12 +314,6 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :get_ref, data) do
     actions = [{:reply, from, data.master_ref}]
     {:keep_state_and_data, actions}
-  end
-
-  # Gateway for Domain module operations in operational state
-  def operational({:call, from}, {:domain_operation, operation, args}, _data) do
-    result = execute_domain_operation(operation, args)
-    {:keep_state_and_data, [{:reply, from, result}]}
   end
 
   def operational(event_type, event_content, data) do
@@ -358,53 +377,6 @@ defmodule EtherCAT.Master do
       _ ->
         {:error, {:unknown_operation, operation}}
     end
-  end
-
-  # Executes domain operations by routing them to appropriate NIF functions
-  defp execute_domain_operation(operation, args) do
-    case operation do
-      :register_pdo_entry ->
-        [slave_config, entry_index, entry_subindex, domain_ref] = args
-        Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
-
-      :set_value_bool ->
-        [domain_ref, offset, value] = args
-        Nif.set_domain_value_bool(domain_ref, offset, value)
-
-      :get_value_bool ->
-        [domain_ref, offset] = args
-        Nif.get_domain_value_bool(domain_ref, offset)
-
-      _ ->
-        {:error, {:unknown_operation, operation}}
-    end
-  end
-
-  # Finalizes domain PDO registrations by calling the NIF directly.
-  # This avoids deadlock by not requiring Domain to call back to Master.
-  # Called during activation to register all pending PDO entries with their domains.
-  defp finalize_domain_registrations(domain, _master_ref) do
-    require Logger
-    pending = Domain.get_pending_registrations(domain)
-    domain_ref = Domain.get_ref(domain)
-
-    Logger.debug("Finalizing domain registrations: #{map_size(pending)} slave configs")
-
-    entries =
-      for {slave_config, pdo_entries} <- pending,
-          {name, {entry_index, entry_subindex, entry_size}} <- pdo_entries do
-        offset =
-          Nif.slave_config_reg_pdo_entry(slave_config, entry_index, entry_subindex, domain_ref)
-
-        Logger.debug("  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}")
-
-        {name, {offset, entry_size}}
-      end
-      |> Map.new()
-
-    Logger.debug("Total entries registered: #{map_size(entries)}")
-
-    Domain.store_entries(domain, entries)
   end
 
   # Determines which driver to use for a slave based on vendor ID and product code.
