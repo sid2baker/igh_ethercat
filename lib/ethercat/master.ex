@@ -730,13 +730,19 @@ defmodule EtherCAT.Master do
 
       # Domain exited
       pid in data.domains ->
-        Logger.warning("Domain #{inspect(pid)} exited with reason: #{inspect(reason)} in state #{state}")
+        Logger.warning(
+          "Domain #{inspect(pid)} exited with reason: #{inspect(reason)} in state #{state}"
+        )
+
         # Remove from domains list - supervisor will restart it if needed
         {:keep_state, %{data | domains: List.delete(data.domains, pid)}}
 
       # Slave exited
       pid in data.slaves ->
-        Logger.warning("Slave #{inspect(pid)} exited with reason: #{inspect(reason)} in state #{state}")
+        Logger.warning(
+          "Slave #{inspect(pid)} exited with reason: #{inspect(reason)} in state #{state}"
+        )
+
         # Remove from slaves list - may need to resync
         {:keep_state, %{data | slaves: List.delete(data.slaves, pid)}}
 

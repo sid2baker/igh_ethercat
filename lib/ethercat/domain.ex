@@ -51,7 +51,6 @@ defmodule EtherCAT.Domain do
   """
   use GenServer
   require Logger
-  alias EtherCAT.Nif
 
   defstruct [:master, :resource, :interval, :entries, :subscribers, locked?: false]
 
@@ -114,7 +113,7 @@ defmodule EtherCAT.Domain do
   """
   @spec start_link(atom(), pid(), reference(), pos_integer()) :: GenServer.on_start()
   def start_link(name, master, resource, interval) do
-    GenServer.start_link(__MODULE__, {master, resource, interval}, name: name)
+    GenServer.start_link(__MODULE__, {name, master, resource, interval}, name: name)
   end
 
   @doc """
@@ -201,12 +200,10 @@ defmodule EtherCAT.Domain do
   # GenServer callbacks
 
   @impl true
-  def init({master, resource, interval}) do
+  def init({name, master, resource, interval}) do
     # Register this domain in the Registry for process discovery
-    # Use a unique key combining master PID and resource reference
-    domain_name = Process.get(:"$initial_call") |> elem(1) |> List.first()
-
-    Registry.register(EtherCAT.Registry, {:domain, master, domain_name}, %{
+    # Use a unique key combining master PID and domain name
+    Registry.register(EtherCAT.Registry, {:domain, master, name}, %{
       master: master,
       interval: interval
     })
@@ -222,14 +219,17 @@ defmodule EtherCAT.Domain do
      }}
   end
 
+  @impl true
   def handle_call(:get_ref, _from, state) do
     {:reply, state.resource, state}
   end
 
+  @impl true
   def handle_call(:get_interval, _from, state) do
     {:reply, state.interval, state}
   end
 
+  @impl true
   def handle_call({:register_pdo_entry, slave_config, name, entry}, _from, state) do
     if state.locked? do
       {:reply, {:error, :domain_locked}, state}
@@ -259,6 +259,7 @@ defmodule EtherCAT.Domain do
     end
   end
 
+  @impl true
   def handle_call({:subscribe, pid, name}, _from, state) do
     # Monitor the subscribing process so we clean up when it dies
     Process.monitor(pid)
@@ -278,15 +279,18 @@ defmodule EtherCAT.Domain do
     {:reply, :ok, %{state | subscribers: subscribers}}
   end
 
+  @impl true
   def handle_call(:get_pdo_entries, _from, state) do
     {:reply, state.entries, state}
   end
 
+  @impl true
   def handle_call({:store_and_lock_entries, entries}, _from, state) do
     {:reply, :ok, %{state | entries: entries, locked?: true}}
   end
 
   # Receives cyclic data changes from the NIF with entry names and values
+  @impl true
   def handle_info({:data_changed, changes}, state) do
     Logger.debug("Domain received data_changed with #{length(changes)} changed entries")
 
@@ -309,6 +313,7 @@ defmodule EtherCAT.Domain do
   end
 
   # Handles subscriber process termination - remove from all subscriptions
+  @impl true
   def handle_info({:DOWN, _monitor_ref, :process, pid, _reason}, state) do
     subscribers =
       state.subscribers
@@ -329,6 +334,7 @@ defmodule EtherCAT.Domain do
   end
 
   # Receives working counter changes from the NIF during cyclic operation
+  @impl true
   def handle_info({:wc_changed, _wc}, state) do
     # Working counter changed - could be used for diagnostics
     {:noreply, state}
@@ -336,12 +342,14 @@ defmodule EtherCAT.Domain do
 
   # Receives working counter state changes from the NIF
   # wc_state values: 0 = EC_WC_ZERO, 1 = EC_WC_INCOMPLETE, 2 = EC_WC_COMPLETE
+  @impl true
   def handle_info({:state_changed, _wc_state}, state) do
     # State changed - could be used for diagnostics or error detection
     {:noreply, state}
   end
 
   # Catch-all for unexpected messages
+  @impl true
   def handle_info(msg, state) do
     Logger.debug("Domain received unexpected message: #{inspect(msg)}")
     {:noreply, state}

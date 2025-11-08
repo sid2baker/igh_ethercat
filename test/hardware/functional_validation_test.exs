@@ -94,9 +94,7 @@ defmodule Hardware.FunctionalValidationTest do
     assert actual_value == expected_value,
            "Loopback failed: expected #{inspect(expected_value)}, got #{inspect(actual_value)}"
 
-    Logger.debug(
-      "Loopback verified: #{output_pdo} -> #{input_pdo} = #{inspect(expected_value)}"
-    )
+    Logger.debug("Loopback verified: #{output_pdo} -> #{input_pdo} = #{inspect(expected_value)}")
 
     :ok
   end
@@ -405,9 +403,6 @@ defmodule Hardware.FunctionalValidationTest do
         Logger.warning(
           "Timeout collecting notifications, received #{length(acc)}/#{count + length(acc)}"
         )
-
-
-
 
         acc
     end
