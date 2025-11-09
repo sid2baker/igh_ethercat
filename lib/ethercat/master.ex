@@ -313,7 +313,7 @@ defmodule EtherCAT.Master do
         domain_ref = Nif.master_create_domain(ref, self(), 1)
 
         # Start default domain as linked process (dies with Master)
-        case Domain.start_link(:default_domain, self(), domain_ref, 1) do
+        case Domain.start_link(name: :default_domain, master: self(), resource: domain_ref, interval: 1) do
           {:ok, domain_pid} ->
             # Update the domain accessor with the Domain process PID
             Nif.domain_set_pid(domain_ref, domain_pid)
@@ -465,7 +465,13 @@ defmodule EtherCAT.Master do
 
           # Start slave as linked process (dies with Master)
           {:ok, slave} =
-            Slave.start_link(self(), slave_position, driver, slave_config, slave_info.sync_count)
+            Slave.start_link(
+              master: self(),
+              position: slave_position,
+              driver: driver,
+              slave_config: slave_config,
+              sync_count: slave_info.sync_count
+            )
 
           slave
         end
@@ -534,7 +540,7 @@ defmodule EtherCAT.Master do
       # Register all pending PDO entries via NIF and build the registered entries map
       registered_entries =
         for {slave_config, pdo_entries} <- pending_entries,
-            {name, {entry_type, entry_index, entry_subindex, entry_size}} <- pdo_entries do
+            {name, {entry_type, entry_index, entry_subindex, entry_size, direction}} <- pdo_entries do
           offset =
             Nif.slave_config_reg_pdo_entry(
               slave_config,
@@ -543,11 +549,12 @@ defmodule EtherCAT.Master do
               entry_index,
               entry_subindex,
               entry_size,
-              domain_ref
+              domain_ref,
+              direction
             )
 
           Logger.debug(
-            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, type=#{entry_type}"
+            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, type=#{entry_type}, direction=#{direction}"
           )
 
           {name, {offset, entry_size}}
@@ -573,7 +580,7 @@ defmodule EtherCAT.Master do
     domain_ref = Nif.master_create_domain(data.master_ref, self(), interval)
 
     # Start domain as linked process (dies with Master)
-    case Domain.start_link(name, self(), domain_ref, interval) do
+    case Domain.start_link(name: name, master: self(), resource: domain_ref, interval: interval) do
       {:ok, domain_pid} ->
         # Update the domain accessor with the Domain process PID
         Nif.domain_set_pid(domain_ref, domain_pid)

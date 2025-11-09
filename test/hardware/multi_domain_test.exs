@@ -57,7 +57,7 @@ defmodule Hardware.MultiDomainTest do
   def run do
     Logger.info("Starting Multi-Domain Test...")
 
-    {:ok, master} = EtherCAT.start_link()
+    {:ok, master} = EtherCAT.open()
     :ok = EtherCAT.connect(master)
     {:ok, [_slave1, slave2]} = EtherCAT.list_slaves(master)
 
@@ -91,7 +91,7 @@ defmodule Hardware.MultiDomainTest do
   test "multi-domain with different update rates" do
     Logger.info("Starting multi-domain test...")
 
-    {:ok, master} = EtherCAT.start_link()
+    {:ok, master} = EtherCAT.open()
     :ok = EtherCAT.connect(master)
     {:ok, [_coupler, io_slave]} = EtherCAT.list_slaves(master)
 
@@ -149,7 +149,7 @@ defmodule Hardware.MultiDomainTest do
     # Read some values to verify operation
     if length(all_pdos) > 0 do
       pdo = hd(all_pdos)
-      assert {:ok, _value} = EtherCAT.get_pdo(io_slave, pdo)
+      assert {:ok, _value} = EtherCAT.read(io_slave, pdo)
       Logger.info("Successfully read PDO value from multi-domain setup")
     end
 

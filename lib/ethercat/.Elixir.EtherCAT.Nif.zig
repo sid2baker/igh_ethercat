@@ -76,12 +76,20 @@ pub const PdoEntryType = enum {
     uint64,
 };
 
+/// PDO direction
+pub const PdoDirection = enum {
+    input,
+    output,
+};
+
 /// PDO entry descriptor - runtime description of a field in domain data
 pub const PdoEntry = struct {
     name: []const u8,
     entry_type: PdoEntryType,
     bit_offset: usize,
     bit_length: usize,
+    direction: PdoDirection,
+    current_value: [8]u8,  // Raw bytes storing the current value
 };
 
 /// Domain layout - collection of PDO entry descriptors
@@ -102,7 +110,7 @@ pub const DomainLayout = struct {
         self.entries.deinit(beam.allocator);
     }
 
-    pub fn addEntry(self: *DomainLayout, name: []const u8, entry_type: PdoEntryType, bit_offset: usize, bit_length: usize) !void {
+    pub fn addEntry(self: *DomainLayout, name: []const u8, entry_type: PdoEntryType, bit_offset: usize, bit_length: usize, direction: PdoDirection) !void {
         // Duplicate name string so we own the memory
         const owned_name = try beam.allocator.dupe(u8, name);
         try self.entries.append(beam.allocator, .{
@@ -110,6 +118,8 @@ pub const DomainLayout = struct {
             .entry_type = entry_type,
             .bit_offset = bit_offset,
             .bit_length = bit_length,
+            .direction = direction,
+            .current_value = [_]u8{0} ** 8,  // Initialize to zero
         });
     }
 
@@ -132,6 +142,16 @@ pub const DomainLayout = struct {
         }
         return null;
     }
+
+    /// Update the current_value field for an entry
+    pub fn updateEntryValue(self: *DomainLayout, bit_offset: usize, value: [8]u8) void {
+        for (self.entries.items) |*entry| {
+            if (entry.bit_offset == bit_offset) {
+                entry.current_value = value;
+                return;
+            }
+        }
+    }
 };
 
 /// Domain accessor - combines EtherCAT domain with runtime layout and cyclic configuration
@@ -140,7 +160,6 @@ pub const DomainAccessor = struct {
     layout: DomainLayout,
     pid: beam.pid,
     interval: u32,  // Interval multiplier for cyclic task
-    prev_data: []u8,  // Previous cycle data for change detection
     data: []u8,       // Current cycle data (points to ecrt-managed memory)
     state: ecrt.ec_domain_state_t,  // Domain state for change detection
 
@@ -150,7 +169,6 @@ pub const DomainAccessor = struct {
             .layout = DomainLayout.init(),
             .pid = pid,
             .interval = interval,
-            .prev_data = &[_]u8{},  // Will be allocated in cyclic_task
             .data = &[_]u8{},       // Will be set in cyclic_task
             .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
         };
@@ -158,9 +176,6 @@ pub const DomainAccessor = struct {
 
     pub fn deinit(self: *DomainAccessor) void {
         self.layout.deinit();
-        if (self.prev_data.len > 0) {
-            beam.allocator.free(self.prev_data);
-        }
     }
 
     pub fn setPid(self: *DomainAccessor, pid: beam.pid) void {
@@ -172,8 +187,8 @@ pub const DomainAccessor = struct {
         return @ptrFromInt(self.domain_ptr);
     }
 
-    /// Initialize change tracking buffers (called once during cyclic_task setup)
-    pub fn initChangeTracking(self: *DomainAccessor) !void {
+    /// Initialize domain data pointer (called once during cyclic_task setup)
+    pub fn initDomainData(self: *DomainAccessor) !void {
         const domain = self.getDomain();
         const size = ecrt.ecrt_domain_size(domain);
         const data_ptr = ecrt.ecrt_domain_data(domain);
@@ -184,10 +199,6 @@ pub const DomainAccessor = struct {
 
         // Memory for data is managed by ecrt.h
         self.data = data_ptr[0..size];
-
-        // Allocate our own buffer for tracking previous data
-        self.prev_data = try beam.allocator.alloc(u8, size);
-        @memcpy(self.prev_data, self.data);
     }
 };
 
@@ -488,6 +499,30 @@ pub fn domain_set_pid(domain_accessor: DomainAccessorResource, pid: beam.pid) !v
 // TYPED ACCESSOR FUNCTIONS (Name-based access using layout)
 // ============================================================================
 
+/// Helper function to extract bits from domain data into a buffer
+fn extractBitsToBuffer(buffer: []u8, data: []const u8, bit_offset: usize, bit_length: usize) void {
+    @memset(buffer, 0);
+    var bits_read: usize = 0;
+    var byte_idx = bit_offset / 8;
+    var bit_idx = bit_offset % 8;
+    var out_byte_idx: usize = 0;
+
+    while (bits_read < bit_length and byte_idx < data.len and out_byte_idx < buffer.len) {
+        const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
+        const mask = (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
+        const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
+
+        buffer[out_byte_idx] |= bits << @intCast(bits_read % 8);
+
+        bits_read += bits_in_byte;
+        byte_idx += 1;
+        bit_idx = 0;
+        if (bits_read % 8 == 0 and bits_read > 0) {
+            out_byte_idx += 1;
+        }
+    }
+}
+
 /// Helper function to extract bits from domain data
 fn extractBits(comptime T: type, data: []const u8, bit_offset: usize, bit_length: usize) T {
     var result: T = 0;
@@ -664,7 +699,8 @@ pub fn slave_config_reg_pdo_entry(
     entry_index: u16,
     entry_subindex: u8,
     bit_length: usize,
-    domain_accessor: DomainAccessorResource
+    domain_accessor: DomainAccessorResource,
+    direction: beam.term
 ) !usize {
     const accessor = domain_accessor.unpack();
     var bit_position: c_uint = 0;
@@ -679,8 +715,19 @@ pub fn slave_config_reg_pdo_entry(
     if (result >= 0) {
         const bit_offset = @as(usize, @intCast(result)) * 8 + bit_position;
 
+        // Parse direction from Elixir atom by comparing with known atoms
+        const input_atom = beam.make(.input, .{});
+        const output_atom = beam.make(.output, .{});
+
+        const pdo_direction = if (beam.compare(direction, input_atom) == .eq)
+            PdoDirection.input
+        else if (beam.compare(direction, output_atom) == .eq)
+            PdoDirection.output
+        else
+            return error.InvalidDirection;
+
         // Add entry to domain layout
-        try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length);
+        try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length, pdo_direction);
 
         return bit_offset;
     } else {
@@ -698,7 +745,8 @@ pub fn slave_config_reg_pdo_entry_pos(
     pdo_pos: c_uint,
     entry_pos: c_uint,
     bit_length: usize,
-    domain_accessor: DomainAccessorResource
+    domain_accessor: DomainAccessorResource,
+    direction: beam.term
 ) !usize {
     const accessor = domain_accessor.unpack();
     var bit_position: c_uint = 0;
@@ -714,8 +762,19 @@ pub fn slave_config_reg_pdo_entry_pos(
     if (result >= 0) {
         const bit_offset = @as(usize, @intCast(result)) * 8 + bit_position;
 
+        // Parse direction from Elixir atom by comparing with known atoms
+        const input_atom = beam.make(.input, .{});
+        const output_atom = beam.make(.output, .{});
+
+        const pdo_direction = if (beam.compare(direction, input_atom) == .eq)
+            PdoDirection.input
+        else if (beam.compare(direction, output_atom) == .eq)
+            PdoDirection.output
+        else
+            return error.InvalidDirection;
+
         // Add entry to domain layout
-        try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length);
+        try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length, pdo_direction);
 
         return bit_offset;
     } else {
@@ -759,10 +818,10 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     var prev_master_state: master_state_t = undefined;
     const yield_interval = @divTrunc(100_000, interval); // Yield every 100ms
 
-    // Initialize change tracking for all domain accessors
+    // Initialize domain data pointers for all domain accessors
     for (domain_accessors) |domain_accessor_resource| {
         const accessor = domain_accessor_resource.unpack();
-        try accessor.initChangeTracking();
+        try accessor.initDomainData();
     }
 
     defer {
@@ -770,10 +829,6 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     }
 
     var counter: u32 = 0;
-
-    // Track changed entries by name to avoid duplicates
-    var changed_entries = std.StringHashMap(void).init(beam.allocator);
-    defer changed_entries.deinit();
 
     // Main cyclic loop with deterministic timing
     var next_cycle_time: i128 = std.time.nanoTimestamp();
@@ -808,48 +863,51 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                 _ = try beam.send(accessor.pid, .{ .state_changed, new_state.wc_state }, .{});
             }
 
-            // Detect data changes at bit level and map to PDO entries
-            changed_entries.clearRetainingCapacity();
+            // Check each PDO entry for changes - simpler approach
+            // Compare current domain value with stored value for each entry
+            var input_changes = std.ArrayList(beam.term){};
+            defer input_changes.deinit(beam.allocator);
 
-            for (accessor.data, accessor.prev_data, 0..) |byte_a, byte_b, byte_i| {
-                const diff = byte_a ^ byte_b; // XOR to find differing bits
+            for (accessor.layout.entries.items) |*entry| {
+                // Extract current value from domain data into temp buffer
+                var domain_value: [8]u8 = [_]u8{0} ** 8;
+                extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
-                if (diff != 0) {
-                    var bit_mask = diff;
+                // Compare with stored current_value
+                const byte_count = (entry.bit_length + 7) / 8;
+                var changed = false;
+                var i: usize = 0;
+                while (i < byte_count and i < 8) : (i += 1) {
+                    if (domain_value[i] != entry.current_value[i]) {
+                        changed = true;
+                        break;
+                    }
+                }
 
-                    while (bit_mask != 0) {
-                        const bit_pos = @ctz(bit_mask); // Count trailing zeros
-                        const bit_offset = byte_i * 8 + bit_pos;
+                if (changed) {
+                    if (entry.direction == .input) {
+                        // Input changed: notify and update stored value
+                        const value = try extractEntryValue(entry.*, accessor.data);
+                        const change = beam.make(.{ entry.name, value }, .{});
+                        try input_changes.append(beam.allocator, change);
 
-                          // Find the PDO entry that contains this bit
-                        if (accessor.layout.findEntryByOffset(bit_offset)) |entry| {
-                            // Add to changed entries set (deduplicates automatically)
-                            try changed_entries.put(entry.name, {});
-                        }
+                        // Update stored value
+                        entry.current_value = domain_value;
+                    } else {
+                        // Output mismatch: notify (stored value is the expected value set by set_value)
+                        const expected_val = try extractEntryValue(entry.*, &entry.current_value);
+                        const actual_val = try extractEntryValue(entry.*, accessor.data);
+                        _ = try beam.send(accessor.pid, .{ .output_mismatch, entry.name, expected_val, actual_val }, .{});
 
-                        bit_mask &= bit_mask - 1; // Clear least significant set bit
+                        // Update domain data to expected value (re-apply output)
+                        write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
                     }
                 }
             }
 
-            // Notify entry changes if any detected
-              if (changed_entries.count() > 0) {
-                @memcpy(accessor.prev_data, accessor.data);
-
-                // Build list of {name, value} tuples for changed entries
-                var changes = std.ArrayList(beam.term){};
-                defer changes.deinit(beam.allocator);
-
-                var iter = changed_entries.keyIterator();
-                while (iter.next()) |entry_name| {
-                    if (accessor.layout.findEntry(entry_name.*)) |entry| {
-                        const value = try extractEntryValue(entry, accessor.data);
-                        const change = beam.make(.{ entry.name, value }, .{});
-                        try changes.append(beam.allocator, change);
-                    }
-                }
-
-                _ = try beam.send(accessor.pid, .{ .data_changed, changes.items }, .{});
+            // Send input change notifications if any
+            if (input_changes.items.len > 0) {
+                _ = try beam.send(accessor.pid, .{ .data_changed, input_changes.items }, .{});
             }
 
             // Update state for next iteration
@@ -869,6 +927,9 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                     if (accessor.domain_ptr == event.domain_ptr) {
                         // Apply event to domain buffer
                         write_bits_to_domain(accessor.data, event.bit_offset, &event.data, event.bit_length);
+
+                        // Store expected value in the entry for verification in next cycle
+                        accessor.layout.updateEntryValue(event.bit_offset, event.data);
                         break;
                     }
                 }

@@ -31,9 +31,9 @@ defmodule Hardware.BasicIOTest do
 
       iex> {m, input, output} = Hardware.BasicIOTest.run()
       # Subscribe to input changes
-      iex> EtherCAT.watch_pdo(input, "pdo_6000:1")
+      iex> EtherCAT.watch(input, "pdo_6000:1")
       # Toggle output (if looped back, you'll receive a notification)
-      iex> EtherCAT.set_pdo(output, "pdo_7000:1", true)
+      iex> EtherCAT.write(output, "pdo_7000:1", true)
       iex> flush()
       {:data_changed, "pdo_6000:1", true}
   """
@@ -47,7 +47,7 @@ defmodule Hardware.BasicIOTest do
   def run do
     Logger.info("Starting Basic I/O Test...")
 
-    {:ok, master} = EtherCAT.start_link(update_interval: 1000)
+    {:ok, master} = EtherCAT.open(update_interval: 1000)
     :ok = EtherCAT.connect(master)
     {:ok, [_coupler, di1, do1]} = EtherCAT.list_slaves(master)
 
@@ -66,17 +66,17 @@ defmodule Hardware.BasicIOTest do
     :timer.sleep(1000)
 
     # Subscribe to input changes (assumes output 1 is connected to input 1)
-    EtherCAT.watch_pdo(di1, "pdo_6000:1")
+    EtherCAT.watch(di1, "pdo_6000:1")
     :timer.sleep(500)
 
     # Toggle the output to demonstrate I/O
-    EtherCAT.set_pdo(do1, "pdo_7000:1", true)
+    EtherCAT.write(do1, "pdo_7000:1", true)
     :timer.sleep(500)
 
-    EtherCAT.set_pdo(do1, "pdo_7000:1", false)
+    EtherCAT.write(do1, "pdo_7000:1", false)
     :timer.sleep(500)
 
-    EtherCAT.set_pdo(do1, "pdo_7000:1", true)
+    EtherCAT.write(do1, "pdo_7000:1", true)
 
     Logger.info("Test complete! Returning PIDs for interactive use.")
     {master, di1, do1}
@@ -92,21 +92,21 @@ defmodule Hardware.BasicIOTest do
 
     # Test write/read cycle
     Logger.info("Setting output HIGH...")
-    assert :ok = EtherCAT.set_pdo(output, "pdo_7000:1", true)
+    assert :ok = EtherCAT.write(output, "pdo_7000:1", true)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input...")
-    assert {:ok, value} = EtherCAT.get_pdo(input, "pdo_6000:1")
+    assert {:ok, value} = EtherCAT.read(input, "pdo_6000:1")
     Logger.info("Input value: #{inspect(value)}")
 
     Logger.info("Setting output LOW...")
-    assert :ok = EtherCAT.set_pdo(output, "pdo_7000:1", false)
+    assert :ok = EtherCAT.write(output, "pdo_7000:1", false)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input again...")
-    assert {:ok, value2} = EtherCAT.get_pdo(input, "pdo_6000:1")
+    assert {:ok, value2} = EtherCAT.read(input, "pdo_6000:1")
     Logger.info("Input value: #{inspect(value2)}")
 
     # Cleanup

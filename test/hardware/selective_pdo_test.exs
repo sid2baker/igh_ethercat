@@ -34,7 +34,7 @@ defmodule Hardware.SelectivePDOTest do
       # The slave is already configured and operational
       iex> EtherCAT.list_pdos(slave)
       ["pdo_6000:1", "pdo_6010:1", ...]
-      iex> {:ok, value} = EtherCAT.get_pdo(slave, "pdo_6000:1")
+      iex> {:ok, value} = EtherCAT.read(slave, "pdo_6000:1")
   """
 
   @doc """
@@ -45,7 +45,7 @@ defmodule Hardware.SelectivePDOTest do
   def run do
     Logger.info("Starting Selective PDO Test...")
 
-    {:ok, master} = EtherCAT.start_link()
+    {:ok, master} = EtherCAT.open()
     :ok = EtherCAT.connect(master)
     {:ok, [_slave1, slave2]} = EtherCAT.list_slaves(master)
 
@@ -74,7 +74,7 @@ defmodule Hardware.SelectivePDOTest do
   test "selective PDO registration" do
     Logger.info("Starting selective PDO registration test...")
 
-    {:ok, master} = EtherCAT.start_link()
+    {:ok, master} = EtherCAT.open()
     :ok = EtherCAT.connect(master)
     {:ok, [_coupler, input_slave]} = EtherCAT.list_slaves(master)
 
@@ -102,7 +102,7 @@ defmodule Hardware.SelectivePDOTest do
     # Verify we can read from registered PDOs
     for pdo <- selected_pdos do
       Logger.info("Reading PDO: #{inspect(pdo)}")
-      assert {:ok, _value} = EtherCAT.get_pdo(input_slave, pdo)
+      assert {:ok, _value} = EtherCAT.read(input_slave, pdo)
     end
 
     # Cleanup

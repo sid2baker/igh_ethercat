@@ -76,7 +76,7 @@ defmodule EtherCAT.Domain do
   or regular Supervisor with custom parameters.
 
   ## Parameters
-  - Map with keys:
+  - Keyword list with keys:
     - `:name` - Registered name for the domain (atom)
     - `:master` - Master process PID
     - `:resource` - Domain reference from the NIF
@@ -84,14 +84,15 @@ defmodule EtherCAT.Domain do
     - `:id` - Optional child spec identifier (default: name)
     - `:restart` - Restart strategy (default: `:permanent`)
   """
-  @spec child_spec(map()) :: Supervisor.child_spec()
-  def child_spec(%{name: name, master: master, resource: resource, interval: interval} = opts) do
-    id = Map.get(opts, :id, name)
-    restart = Map.get(opts, :restart, :permanent)
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) when is_list(opts) do
+    name = Keyword.fetch!(opts, :name)
+    id = Keyword.get(opts, :id, name)
+    restart = Keyword.get(opts, :restart, :permanent)
 
     %{
       id: id,
-      start: {__MODULE__, :start_link, [name, master, resource, interval]},
+      start: {__MODULE__, :start_link, [opts]},
       restart: restart,
       shutdown: 5000,
       type: :worker
@@ -102,17 +103,32 @@ defmodule EtherCAT.Domain do
   Starts a domain process.
 
   ## Parameters
-  - `name` - Registered name for the domain (atom)
-  - `master` - Master process PID
-  - `resource` - Domain reference from the NIF
-  - `interval` - Update interval in microseconds
+  - `opts` - Keyword list with:
+    - `:name` - Registered name for the domain (atom)
+    - `:master` - Master process PID
+    - `:resource` - Domain reference from the NIF
+    - `:interval` - Update interval in microseconds
 
   ## Returns
   - `{:ok, pid}` on success
   - `{:error, reason}` on failure
+
+  ## Examples
+
+      Domain.start_link(
+        name: :default_domain,
+        master: master_pid,
+        resource: domain_ref,
+        interval: 1
+      )
   """
-  @spec start_link(atom(), pid(), reference(), pos_integer()) :: GenServer.on_start()
-  def start_link(name, master, resource, interval) do
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) when is_list(opts) do
+    name = Keyword.fetch!(opts, :name)
+    master = Keyword.fetch!(opts, :master)
+    resource = Keyword.fetch!(opts, :resource)
+    interval = Keyword.fetch!(opts, :interval)
+
     GenServer.start_link(__MODULE__, {name, master, resource, interval}, name: name)
   end
 
@@ -163,6 +179,13 @@ defmodule EtherCAT.Domain do
   Entries are queued during configuration and actually registered when the
   master enters operational mode.
 
+  ## Parameters
+  - `domain` - Domain process
+  - `slave_config` - Slave configuration reference
+  - `name` - PDO entry name
+  - `entry` - Entry tuple (see Entry Format below)
+  - `direction` - `:input` or `:output` (for change detection and verification)
+
   ## Entry Format
 
   The entry parameter can be:
@@ -171,16 +194,18 @@ defmodule EtherCAT.Domain do
 
   ## Example
 
-      # Register with explicit type
-      Domain.register_pdo_entry(domain, slave_config, "temperature", {:uint16, 0x6000, 1, 16})
+      # Register input with explicit type
+      Domain.register_pdo_entry(domain, slave_config, "temperature",
+        {:uint16, 0x6000, 1, 16}, :input)
 
-      # Register with inferred type (uint16 from 16 bits)
-      Domain.register_pdo_entry(domain, slave_config, "pressure", {0x6010, 1, 16})
+      # Register output with inferred type
+      Domain.register_pdo_entry(domain, slave_config, "motor_command",
+        {0x7010, 1, 16}, :output)
   """
-  @spec register_pdo_entry(GenServer.server(), reference(), name(), tuple()) ::
+  @spec register_pdo_entry(GenServer.server(), reference(), name(), tuple(), atom()) ::
           :ok | {:error, term()}
-  def register_pdo_entry(domain, slave_config, name, entry) do
-    GenServer.call(domain, {:register_pdo_entry, slave_config, name, entry})
+  def register_pdo_entry(domain, slave_config, name, entry, direction) do
+    GenServer.call(domain, {:register_pdo_entry, slave_config, name, entry, direction})
   end
 
   # Infer PDO entry type from bit size
@@ -230,21 +255,21 @@ defmodule EtherCAT.Domain do
   end
 
   @impl true
-  def handle_call({:register_pdo_entry, slave_config, name, entry}, _from, state) do
+  def handle_call({:register_pdo_entry, slave_config, name, entry, direction}, _from, state) do
     if state.locked? do
       {:reply, {:error, :domain_locked}, state}
     else
-      # Normalize entry to include type
+      # Normalize entry to include type and direction
       normalized_entry =
         case entry do
           {entry_type, entry_index, entry_subindex, entry_size} when is_atom(entry_type) ->
             # Already has explicit type
-            {entry_type, entry_index, entry_subindex, entry_size}
+            {entry_type, entry_index, entry_subindex, entry_size, direction}
 
           {entry_index, entry_subindex, entry_size} ->
             # Infer type from size
             entry_type = infer_entry_type(entry_size)
-            {entry_type, entry_index, entry_subindex, entry_size}
+            {entry_type, entry_index, entry_subindex, entry_size, direction}
         end
 
       result =

@@ -101,7 +101,7 @@ defmodule EtherCAT.Slave do
   Returns a child specification for starting this module under a supervisor.
 
   ## Parameters
-  - Map with keys:
+  - Keyword list with keys:
     - `:master` - The master process PID
     - `:position` - The slave's position on the bus (0-based)
     - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
@@ -110,22 +110,15 @@ defmodule EtherCAT.Slave do
     - `:id` - Optional child spec identifier (default: `{__MODULE__, position}`)
     - `:restart` - Restart strategy (default: `:permanent`)
   """
-  @spec child_spec(map()) :: Supervisor.child_spec()
-  def child_spec(
-        %{
-          master: master,
-          position: position,
-          driver: driver,
-          slave_config: slave_config,
-          sync_count: sync_count
-        } = opts
-      ) do
-    id = Map.get(opts, :id, {__MODULE__, position})
-    restart = Map.get(opts, :restart, :permanent)
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) when is_list(opts) do
+    position = Keyword.fetch!(opts, :position)
+    id = Keyword.get(opts, :id, {__MODULE__, position})
+    restart = Keyword.get(opts, :restart, :permanent)
 
     %{
       id: id,
-      start: {__MODULE__, :start_link, [master, position, driver, slave_config, sync_count]},
+      start: {__MODULE__, :start_link, [opts]},
       restart: restart,
       shutdown: 5000,
       type: :worker
@@ -140,22 +133,34 @@ defmodule EtherCAT.Slave do
   the Generic driver.
 
   ## Parameters
-  - `master` - The master process PID
-  - `position` - The slave's position on the bus (0-based)
-  - `driver` - The driver module implementing `EtherCAT.Slave.Driver`
-  - `slave_config` - The slave configuration reference from the NIF
-  - `sync_count` - Number of sync managers available on the device
+  - `opts` - Keyword list with:
+    - `:master` - The master process PID
+    - `:position` - The slave's position on the bus (0-based)
+    - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
+    - `:slave_config` - The slave configuration reference from the NIF
+    - `:sync_count` - Number of sync managers available on the device
 
   ## Returns
   - `{:ok, pid}` - The slave process PID
 
   ## Example
 
-      {:ok, slave} = Slave.start_link(master, 1, EtherCAT.Drivers.Generic, config, 4)
+      {:ok, slave} = Slave.start_link(
+        master: master_pid,
+        position: 1,
+        driver: EtherCAT.Drivers.Generic,
+        slave_config: config_ref,
+        sync_count: 4
+      )
   """
-  @spec start_link(pid(), non_neg_integer(), module(), reference(), non_neg_integer()) ::
-          GenServer.on_start()
-  def start_link(master, position, driver, slave_config, sync_count) do
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) when is_list(opts) do
+    master = Keyword.fetch!(opts, :master)
+    position = Keyword.fetch!(opts, :position)
+    driver = Keyword.fetch!(opts, :driver)
+    slave_config = Keyword.fetch!(opts, :slave_config)
+    sync_count = Keyword.fetch!(opts, :sync_count)
+
     GenServer.start_link(__MODULE__, {master, position, driver, slave_config, sync_count})
   end
 
@@ -183,7 +188,13 @@ defmodule EtherCAT.Slave do
           {:ok, pid()}
   def create(master, position, driver, slave_config, sync_count) do
     # Use start_link for proper supervision
-    case start_link(master, position, driver, slave_config, sync_count) do
+    case start_link(
+           master: master,
+           position: position,
+           driver: driver,
+           slave_config: slave_config,
+           sync_count: sync_count
+         ) do
       {:ok, pid} ->
         Process.monitor(pid)
         {:ok, pid}
@@ -656,7 +667,7 @@ defmodule EtherCAT.Slave do
     # Map unique names to domain for tracking registrations
     pdo_registrations =
       configured_entries
-      |> Enum.map(fn {name, _entry} ->
+      |> Enum.map(fn {name, _entry, _direction} ->
         unique_name = "slave_#{state.position}:#{name}"
         {unique_name, domain}
       end)
@@ -755,9 +766,14 @@ defmodule EtherCAT.Slave do
   # Configures sync managers and PDOs, then registers them with the domain
   defp configure_and_register_pdos(sync_managers, state, domain) do
     configured_entries =
-      for {sync_index, {direction, watchdog, pdos}} <- sync_managers do
-        config_sync_manager_internal(state, sync_index, direction, watchdog)
+      for {sync_index, {sm_direction, watchdog, pdos}} <- sync_managers do
+        config_sync_manager_internal(state, sync_index, sm_direction, watchdog)
         config_pdo_assign_clear_internal(state, sync_index)
+
+        # Convert EtherCAT sync manager direction to atom
+        # 1 = EC_DIR_OUTPUT (master writes, slave reads - outputs from master's perspective)
+        # 2 = EC_DIR_INPUT (master reads, slave writes - inputs from master's perspective)
+        pdo_direction = if sm_direction == 2, do: :input, else: :output
 
         for {pdo_index, entries} <- pdos do
           config_pdo_assign_add_internal(state, sync_index, pdo_index)
@@ -772,17 +788,18 @@ defmodule EtherCAT.Slave do
               entry_size
             )
 
-            {name, {entry_index, entry_subindex, entry_size}}
+            # Include direction as atom in the entry tuple
+            {name, {entry_index, entry_subindex, entry_size}, pdo_direction}
           end
         end
       end
       |> List.flatten()
 
     # Register all entries with domain, using globally unique names
-    for {name, entry} <- configured_entries do
+    for {name, entry, direction} <- configured_entries do
       # Prefix with slave position to ensure uniqueness across slaves
       unique_name = "slave_#{state.position}:#{name}"
-      Domain.register_pdo_entry(domain, state.slave_config, unique_name, entry)
+      Domain.register_pdo_entry(domain, state.slave_config, unique_name, entry, direction)
     end
 
     configured_entries

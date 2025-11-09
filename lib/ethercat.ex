@@ -32,8 +32,8 @@ defmodule EtherCAT do
 
   ## Quick Start
 
-      # Start a master and connect to the network
-      {:ok, master} = EtherCAT.start_link(update_interval: 1000)
+      # Open a connection to the EtherCAT master
+      {:ok, master} = EtherCAT.open(update_interval: 1000)
       :ok = EtherCAT.connect(master)
 
       # Discover slaves on the bus
@@ -50,8 +50,15 @@ defmodule EtherCAT do
       EtherCAT.start_cyclic(master)
 
       # Read/write process data
-      EtherCAT.set_pdo(output, :output1, true)
-      {:ok, value} = EtherCAT.get_pdo(input, :input1)
+      EtherCAT.write(output, :output1, true)
+      {:ok, value} = EtherCAT.read(input, :input1)
+
+      # Watch for changes
+      EtherCAT.watch(input, :input1)
+      receive do
+        {:data_changed, :input1, new_value} ->
+          IO.inspect(new_value, label: "Input changed")
+      end
 
   ## Requirements
 
@@ -71,10 +78,11 @@ defmodule EtherCAT do
   # Master Operations
 
   @doc """
-  Starts the EtherCAT master process.
+  Opens a connection to the EtherCAT master.
 
   Initializes a master instance and creates the default domain. The master
-  begins in the `:offline` state and must be connected via `connect/1` before use.
+  begins in the `:offline` state and must be connected to the network via
+  `connect/1` before use.
 
   ## Options
   - `:master_index` - The EtherCAT master index (default: 0) - maps to /dev/EtherCATX
@@ -87,14 +95,14 @@ defmodule EtherCAT do
 
   ## Example
 
-      # Start with default settings (10ms cycle)
-      {:ok, master} = EtherCAT.start_link()
+      # Open with default settings (10ms cycle)
+      {:ok, master} = EtherCAT.open()
 
-      # Start with 1ms cycle for faster control loops
-      {:ok, master} = EtherCAT.start_link(update_interval: 1_000)
+      # Open with 1ms cycle for faster control loops
+      {:ok, master} = EtherCAT.open(update_interval: 1_000)
   """
-  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
-  defdelegate start_link(opts \\ []), to: Master
+  @spec open(keyword()) :: {:ok, pid()} | {:error, term()}
+  def open(opts \\ []), do: Master.start_link(opts)
 
   @doc """
   Connects to the EtherCAT network and verifies link status.
@@ -261,7 +269,7 @@ defmodule EtherCAT do
     do: Slave.register_all_pdos(slave, domain)
 
   @doc """
-  Sets the value of a PDO output.
+  Writes a value to a PDO output.
 
   Writes a value to an output PDO that will be sent to the slave during the
   next cyclic exchange. The PDO must have been registered before the master
@@ -269,7 +277,7 @@ defmodule EtherCAT do
 
   ## Parameters
   - `slave` - The slave process PID
-  - `name` - PDO name (as returned by `list_pdos/1`)
+  - `pdo` - PDO name (as returned by `list_pdos/1`)
   - `value` - Value to write (type depends on PDO configuration)
 
   ## Returns
@@ -278,24 +286,24 @@ defmodule EtherCAT do
 
   ## Example
 
-      # Set a boolean output
-      EtherCAT.set_pdo(slave, :output1, true)
+      # Write a boolean output
+      EtherCAT.write(slave, :output1, true)
 
-      # Set an integer output
-      EtherCAT.set_pdo(slave, "pdo_7010:1", 42)
+      # Write an integer output
+      EtherCAT.write(slave, "pdo_7010:1", 42)
   """
-  @spec set_pdo(pid(), Slave.name(), term()) :: :ok | {:error, term()}
-  def set_pdo(slave, name, value), do: Slave.set_pdo_value(slave, name, value)
+  @spec write(pid(), Slave.name(), term()) :: :ok | {:error, term()}
+  def write(slave, pdo, value), do: Slave.set_pdo_value(slave, pdo, value)
 
   @doc """
-  Gets the current value of a PDO input.
+  Reads the current value of a PDO input.
 
   Reads the most recent value received from the slave during cyclic exchange.
   The PDO must have been registered before the master entered operational mode.
 
   ## Parameters
   - `slave` - The slave process PID
-  - `name` - PDO name (as returned by `list_pdos/1`)
+  - `pdo` - PDO name (as returned by `list_pdos/1`)
 
   ## Returns
   - `{:ok, value}` on success
@@ -303,21 +311,22 @@ defmodule EtherCAT do
 
   ## Example
 
-      {:ok, temperature} = EtherCAT.get_pdo(slave, :temperature)
-      {:ok, input_state} = EtherCAT.get_pdo(slave, "pdo_6000:1")
+      {:ok, temperature} = EtherCAT.read(slave, :temperature)
+      {:ok, input_state} = EtherCAT.read(slave, "pdo_6000:1")
   """
-  @spec get_pdo(pid(), Slave.name()) :: {:ok, term()} | {:error, term()}
-  def get_pdo(slave, name), do: Slave.get_pdo_value(slave, name)
+  @spec read(pid(), Slave.name()) :: {:ok, term()} | {:error, term()}
+  def read(slave, pdo), do: Slave.get_pdo_value(slave, pdo)
 
   @doc """
-  Subscribes a process to receive notifications when a PDO value changes.
+  Watches a PDO for changes.
 
-  The subscriber will receive `{:data_changed, name, value}` messages whenever
+  Subscribes a process to receive notifications when a PDO value changes.
+  The subscriber will receive `{:data_changed, pdo, value}` messages whenever
   the PDO value changes during cyclic operation.
 
   ## Parameters
   - `slave` - The slave process PID
-  - `name` - PDO name to watch
+  - `pdo` - PDO name to watch
   - `pid` - Process to receive notifications (default: calling process)
 
   ## Returns
@@ -327,7 +336,7 @@ defmodule EtherCAT do
   ## Example
 
       # Watch from the calling process
-      EtherCAT.watch_pdo(slave, :temperature)
+      EtherCAT.watch(slave, :temperature)
 
       receive do
         {:data_changed, :temperature, value} ->
@@ -335,10 +344,10 @@ defmodule EtherCAT do
       end
 
       # Watch from another process
-      EtherCAT.watch_pdo(slave, :pressure, monitor_pid)
+      EtherCAT.watch(slave, :pressure, monitor_pid)
   """
-  @spec watch_pdo(pid(), Slave.name(), pid()) :: :ok | {:error, term()}
-  def watch_pdo(slave, name, pid \\ self()), do: Slave.watch_pdo(slave, name, pid)
+  @spec watch(pid(), Slave.name(), pid()) :: :ok | {:error, term()}
+  def watch(slave, pdo, pid \\ self()), do: Slave.watch_pdo(slave, pdo, pid)
 
   # Domain Operations
 

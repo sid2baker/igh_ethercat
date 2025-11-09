@@ -122,10 +122,21 @@ end
 
 ```elixir
 # Domains are started by Master using simple linking
-{:ok, domain_pid} = Domain.start_link(name, master_pid, domain_ref, interval)
+{:ok, domain_pid} = Domain.start_link(
+  name: name,
+  master: master_pid,
+  resource: domain_ref,
+  interval: interval
+)
 
 # Slaves are started by Master during sync_slaves using simple linking
-{:ok, slave_pid} = Slave.start_link(master_pid, position, driver, slave_config, sync_count)
+{:ok, slave_pid} = Slave.start_link(
+  master: master_pid,
+  position: position,
+  driver: driver,
+  slave_config: slave_config,
+  sync_count: sync_count
+)
 
 # Both are linked to Master - when Master dies, they die automatically
 # When they die, Master receives EXIT message and can handle it

@@ -45,7 +45,7 @@ defmodule Hardware.FunctionalValidationTest do
   # Helper functions
 
   defp setup_master_and_slaves do
-    {:ok, master} = EtherCAT.start_link(update_interval: @cycle_interval)
+    {:ok, master} = EtherCAT.open(update_interval: @cycle_interval)
     :ok = EtherCAT.connect(master)
     {:ok, [_coupler, di, do_slave]} = EtherCAT.list_slaves(master)
 
@@ -82,13 +82,13 @@ defmodule Hardware.FunctionalValidationTest do
 
   defp assert_loopback(input_slave, input_pdo, output_slave, output_pdo, expected_value) do
     # Set output value
-    assert :ok = EtherCAT.set_pdo(output_slave, output_pdo, expected_value)
+    assert :ok = EtherCAT.write(output_slave, output_pdo, expected_value)
 
     # Wait for propagation
     :timer.sleep(@stabilization_delay)
 
     # Read input value
-    assert {:ok, actual_value} = EtherCAT.get_pdo(input_slave, input_pdo)
+    assert {:ok, actual_value} = EtherCAT.read(input_slave, input_pdo)
 
     # Verify loopback
     assert actual_value == expected_value,
@@ -180,20 +180,20 @@ defmodule Hardware.FunctionalValidationTest do
       # Rapid toggle sequence with minimal delay
       for i <- 1..100 do
         value = rem(i, 2) == 1
-        assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, value)
+        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
         :timer.sleep(@fast_toggle_delay)
 
         # Periodically verify loopback
         if rem(i, 10) == 0 do
-          assert {:ok, actual} = EtherCAT.get_pdo(di, input_pdo)
+          assert {:ok, actual} = EtherCAT.read(di, input_pdo)
           Logger.debug("Toggle #{i}: set=#{value}, read=#{actual}")
         end
       end
 
       # Final verification
-      assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, true)
+      assert :ok = EtherCAT.write(do_slave, output_pdo, true)
       :timer.sleep(@stabilization_delay)
-      assert {:ok, true} = EtherCAT.get_pdo(di, input_pdo)
+      assert {:ok, true} = EtherCAT.read(di, input_pdo)
 
       Logger.info("✓ Rapid state changes test passed (100 toggles)")
     after
@@ -213,7 +213,7 @@ defmodule Hardware.FunctionalValidationTest do
 
       # Subscribe to input changes
       Logger.info("Subscribing to PDO: #{input_pdo}")
-      assert :ok = EtherCAT.watch_pdo(di, input_pdo)
+      assert :ok = EtherCAT.watch(di, input_pdo)
 
       # Flush any existing messages
       flush_mailbox()
@@ -225,7 +225,7 @@ defmodule Hardware.FunctionalValidationTest do
         Logger.info("Step #{idx + 1}: Setting output to #{value}")
 
         # Set output
-        assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, value)
+        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
 
         # Wait for notification (note: notifications use unique names with slave position)
         receive do
@@ -275,7 +275,7 @@ defmodule Hardware.FunctionalValidationTest do
       Logger.info("  Input: #{input_pdo}")
 
       # Subscribe to input changes
-      assert :ok = EtherCAT.watch_pdo(di, input_pdo)
+      assert :ok = EtherCAT.watch(di, input_pdo)
       flush_mailbox()
 
       # Test rapid concurrent write/read cycles
@@ -285,10 +285,10 @@ defmodule Hardware.FunctionalValidationTest do
         Logger.debug("Concurrent operation #{idx + 1}: setting #{value}")
 
         # Write
-        assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, value)
+        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
 
         # Immediate read (concurrent with cyclic task)
-        assert {:ok, _} = EtherCAT.get_pdo(di, input_pdo)
+        assert {:ok, _} = EtherCAT.read(di, input_pdo)
 
         # Wait briefly
         :timer.sleep(100)
@@ -298,7 +298,7 @@ defmodule Hardware.FunctionalValidationTest do
       :timer.sleep(@stabilization_delay)
 
       # Verify final state
-      assert {:ok, final_value} = EtherCAT.get_pdo(di, input_pdo)
+      assert {:ok, final_value} = EtherCAT.read(di, input_pdo)
       Logger.info("✓ Final value: #{final_value}")
 
       # Verify we received notifications during the sequence
@@ -328,23 +328,23 @@ defmodule Hardware.FunctionalValidationTest do
       Logger.info("Test 6.1: Repeated writes to same value")
 
       for _i <- 1..5 do
-        assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, true)
+        assert :ok = EtherCAT.write(do_slave, output_pdo, true)
         :timer.sleep(100)
       end
 
       :timer.sleep(@stabilization_delay)
-      assert {:ok, true} = EtherCAT.get_pdo(di, input_pdo)
+      assert {:ok, true} = EtherCAT.read(di, input_pdo)
       Logger.info("✓ Idempotency verified")
 
       # Test 6.2: Read before write
       Logger.info("Test 6.2: Read initial state before any writes")
 
       # Reset to known state
-      assert :ok = EtherCAT.set_pdo(do_slave, output_pdo, false)
+      assert :ok = EtherCAT.write(do_slave, output_pdo, false)
       :timer.sleep(@stabilization_delay)
 
       # Read should succeed even before explicit write
-      assert {:ok, _value} = EtherCAT.get_pdo(di, input_pdo)
+      assert {:ok, _value} = EtherCAT.read(di, input_pdo)
       Logger.info("✓ Read before write succeeded")
 
       # Test 6.3: Rapid alternation stress
@@ -358,7 +358,7 @@ defmodule Hardware.FunctionalValidationTest do
         |> Enum.reduce_while(iterations, fn i, _acc ->
           if System.monotonic_time(:millisecond) - start_time < 5000 do
             value = rem(i, 2) == 0
-            :ok = EtherCAT.set_pdo(do_slave, output_pdo, value)
+            :ok = EtherCAT.write(do_slave, output_pdo, value)
             :timer.sleep(100)
             {:cont, i}
           else
@@ -370,7 +370,7 @@ defmodule Hardware.FunctionalValidationTest do
 
       # Final state verification
       :timer.sleep(@stabilization_delay)
-      assert {:ok, _final_value} = EtherCAT.get_pdo(di, input_pdo)
+      assert {:ok, _final_value} = EtherCAT.read(di, input_pdo)
 
       Logger.info("✓ Edge cases test passed")
     after
