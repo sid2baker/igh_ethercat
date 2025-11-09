@@ -45,21 +45,22 @@ defmodule Hardware.FunctionalValidationTest do
   # Helper functions
 
   defp setup_master_and_slaves do
-    {:ok, master} = EtherCAT.open(update_interval: @cycle_interval)
-    :ok = EtherCAT.connect(master)
-    {:ok, [_coupler, di, do_slave]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, di, do_slave]} = EtherCAT.open(update_interval: @cycle_interval)
 
-    # Configure input slave
-    EtherCAT.configure_slave(di, [])
-    input_pdos = EtherCAT.list_pdos(di)
+    # Configure input slave and get available PDOs
+    {:ok, input_pdos} = EtherCAT.configure_slave(master, di, %{})
     Logger.info("Input PDOs: #{inspect(input_pdos)}")
-    EtherCAT.register_all_pdos(di, :default_domain)
 
-    # Configure output slave
-    EtherCAT.configure_slave(do_slave, [])
-    output_pdos = EtherCAT.list_pdos(do_slave)
+    # Register all input PDOs and get unique names
+    {:ok, input_names} = EtherCAT.register_pdos(master, di, input_pdos)
+
+    # Configure output slave and get available PDOs
+    {:ok, output_pdos} = EtherCAT.configure_slave(master, do_slave, %{})
     Logger.info("Output PDOs: #{inspect(output_pdos)}")
-    EtherCAT.register_all_pdos(do_slave, :default_domain)
+
+    # Register all output PDOs and get unique names
+    {:ok, output_names} = EtherCAT.register_pdos(master, do_slave, output_pdos)
 
     # Start cyclic operation
     EtherCAT.start_cyclic(master)
@@ -67,11 +68,11 @@ defmodule Hardware.FunctionalValidationTest do
     # Wait for system stabilization
     :timer.sleep(@stabilization_delay)
 
-    {master, di, do_slave, input_pdos, output_pdos}
+    {master, di, do_slave, input_names, output_names}
   end
 
   defp cleanup(master) do
-    GenServer.stop(master, :normal)
+    EtherCAT.close(master)
     # Wait for master to fully release resources
     :timer.sleep(500)
   end
@@ -80,15 +81,15 @@ defmodule Hardware.FunctionalValidationTest do
     Enum.at(pdos, index)
   end
 
-  defp assert_loopback(input_slave, input_pdo, output_slave, output_pdo, expected_value) do
-    # Set output value
-    assert :ok = EtherCAT.write(output_slave, output_pdo, expected_value)
+  defp assert_loopback(master, input_pdo, output_pdo, expected_value) do
+    # Set output value using unique PDO name
+    assert :ok = EtherCAT.write(master, output_pdo, expected_value)
 
     # Wait for propagation
     :timer.sleep(@stabilization_delay)
 
-    # Read input value
-    assert {:ok, actual_value} = EtherCAT.read(input_slave, input_pdo)
+    # Read input value using unique PDO name
+    assert {:ok, actual_value} = EtherCAT.read(master, input_pdo)
 
     # Verify loopback
     assert actual_value == expected_value,
@@ -105,24 +106,24 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "1. bit-level operations - single bit toggle" do
     Logger.info("=== Test 1: Bit-level Operations ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
-      # Use the first available PDO (typically pdo_6000:1 for input, pdo_7000:1 for output)
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      # Use the first available PDO (unique names already include slave position)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
       Logger.info("Testing PDO pair: #{output_pdo} -> #{input_pdo}")
 
       # Test sequence: false -> true -> false
       Logger.info("Step 1: Setting output to FALSE")
-      assert_loopback(di, input_pdo, do_slave, output_pdo, false)
+      assert_loopback(master, input_pdo, output_pdo, false)
 
       Logger.info("Step 2: Setting output to TRUE")
-      assert_loopback(di, input_pdo, do_slave, output_pdo, true)
+      assert_loopback(master, input_pdo, output_pdo, true)
 
       Logger.info("Step 3: Setting output back to FALSE")
-      assert_loopback(di, input_pdo, do_slave, output_pdo, false)
+      assert_loopback(master, input_pdo, output_pdo, false)
 
       Logger.info("✓ Bit-level operations test passed")
     after
@@ -134,13 +135,13 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "2. byte-level operations - pattern validation" do
     Logger.info("=== Test 2: Byte-level Operations ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
       # NOTE: Only the first PDO pair (DI1 ↔ DO1) is physically connected
       # This test validates different bit patterns on the looped-back channel
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
       Logger.info("Testing PDO pair: #{output_pdo} -> #{input_pdo}")
 
@@ -155,7 +156,7 @@ defmodule Hardware.FunctionalValidationTest do
 
       for {value, description} <- test_patterns do
         Logger.info("Testing #{description}")
-        assert_loopback(di, input_pdo, do_slave, output_pdo, value)
+        assert_loopback(master, input_pdo, output_pdo, value)
         Logger.info("✓ #{description} verified")
       end
 
@@ -169,31 +170,31 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "3. rapid state changes - stress timing" do
     Logger.info("=== Test 3: Rapid State Changes ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
       Logger.info("Performing rapid toggle sequence (100 iterations)...")
 
       # Rapid toggle sequence with minimal delay
       for i <- 1..100 do
         value = rem(i, 2) == 1
-        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
+        assert :ok = EtherCAT.write(master, output_pdo, value)
         :timer.sleep(@fast_toggle_delay)
 
         # Periodically verify loopback
         if rem(i, 10) == 0 do
-          assert {:ok, actual} = EtherCAT.read(di, input_pdo)
+          assert {:ok, actual} = EtherCAT.read(master, input_pdo)
           Logger.debug("Toggle #{i}: set=#{value}, read=#{actual}")
         end
       end
 
       # Final verification
-      assert :ok = EtherCAT.write(do_slave, output_pdo, true)
+      assert :ok = EtherCAT.write(master, output_pdo, true)
       :timer.sleep(@stabilization_delay)
-      assert {:ok, true} = EtherCAT.read(di, input_pdo)
+      assert {:ok, true} = EtherCAT.read(master, input_pdo)
 
       Logger.info("✓ Rapid state changes test passed (100 toggles)")
     after
@@ -205,15 +206,15 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "4. PDO subscriptions - notification delivery" do
     Logger.info("=== Test 4: PDO Subscriptions ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
-      # Subscribe to input changes
+      # Subscribe to input changes using unique name
       Logger.info("Subscribing to PDO: #{input_pdo}")
-      assert :ok = EtherCAT.watch(di, input_pdo)
+      assert :ok = EtherCAT.watch(master, input_pdo)
 
       # Flush any existing messages
       flush_mailbox()
@@ -224,20 +225,13 @@ defmodule Hardware.FunctionalValidationTest do
       for {value, idx} <- Enum.with_index(test_values) do
         Logger.info("Step #{idx + 1}: Setting output to #{value}")
 
-        # Set output
-        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
+        # Set output using unique name
+        assert :ok = EtherCAT.write(master, output_pdo, value)
 
-        # Wait for notification (note: notifications use unique names with slave position)
+        # Wait for notification (notifications use the full unique name)
         receive do
-          {:data_changed, pdo_name, ^value} when is_binary(pdo_name) ->
-            # Accept either "pdo_6000:1" or "slave_1:pdo_6000:1" format
-            if String.ends_with?(pdo_name, input_pdo) or pdo_name == input_pdo do
-              Logger.debug("✓ Notification received: #{pdo_name} = #{value}")
-            else
-              flunk(
-                "Unexpected PDO notification: #{pdo_name} = #{value}, expected #{input_pdo} = #{value}"
-              )
-            end
+          {:data_changed, ^input_pdo, ^value} ->
+            Logger.debug("✓ Notification received: #{input_pdo} = #{value}")
 
           {:data_changed, pdo, other_value} ->
             flunk(
@@ -262,20 +256,20 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "5. multi-PDO concurrent operations" do
     Logger.info("=== Test 5: Multi-PDO Concurrent Operations ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
       # NOTE: Only the first PDO pair (DI1 ↔ DO1) is physically connected
       # This test validates concurrent write/read operations on the loopback channel
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
       Logger.info("Testing concurrent operations on looped-back PDO pair")
       Logger.info("  Output: #{output_pdo}")
       Logger.info("  Input: #{input_pdo}")
 
       # Subscribe to input changes
-      assert :ok = EtherCAT.watch(di, input_pdo)
+      assert :ok = EtherCAT.watch(master, input_pdo)
       flush_mailbox()
 
       # Test rapid concurrent write/read cycles
@@ -284,11 +278,11 @@ defmodule Hardware.FunctionalValidationTest do
       for {value, idx} <- Enum.with_index(test_sequence) do
         Logger.debug("Concurrent operation #{idx + 1}: setting #{value}")
 
-        # Write
-        assert :ok = EtherCAT.write(do_slave, output_pdo, value)
+        # Write using unique name
+        assert :ok = EtherCAT.write(master, output_pdo, value)
 
         # Immediate read (concurrent with cyclic task)
-        assert {:ok, _} = EtherCAT.read(di, input_pdo)
+        assert {:ok, _} = EtherCAT.read(master, input_pdo)
 
         # Wait briefly
         :timer.sleep(100)
@@ -298,7 +292,7 @@ defmodule Hardware.FunctionalValidationTest do
       :timer.sleep(@stabilization_delay)
 
       # Verify final state
-      assert {:ok, final_value} = EtherCAT.read(di, input_pdo)
+      assert {:ok, final_value} = EtherCAT.read(master, input_pdo)
       Logger.info("✓ Final value: #{final_value}")
 
       # Verify we received notifications during the sequence
@@ -318,33 +312,33 @@ defmodule Hardware.FunctionalValidationTest do
   @tag timeout: 60_000
   test "6. edge cases - idempotency and boundaries" do
     Logger.info("=== Test 6: Edge Cases ===")
-    {master, di, do_slave, input_pdos, output_pdos} = setup_master_and_slaves()
+    {master, _di, _do_slave, input_names, output_names} = setup_master_and_slaves()
 
     try do
-      input_pdo = get_pdo_name(input_pdos, 0)
-      output_pdo = get_pdo_name(output_pdos, 0)
+      input_pdo = get_pdo_name(input_names, 0)
+      output_pdo = get_pdo_name(output_names, 0)
 
       # Test 6.1: Repeated writes (idempotency)
       Logger.info("Test 6.1: Repeated writes to same value")
 
       for _i <- 1..5 do
-        assert :ok = EtherCAT.write(do_slave, output_pdo, true)
+        assert :ok = EtherCAT.write(master, output_pdo, true)
         :timer.sleep(100)
       end
 
       :timer.sleep(@stabilization_delay)
-      assert {:ok, true} = EtherCAT.read(di, input_pdo)
+      assert {:ok, true} = EtherCAT.read(master, input_pdo)
       Logger.info("✓ Idempotency verified")
 
       # Test 6.2: Read before write
       Logger.info("Test 6.2: Read initial state before any writes")
 
       # Reset to known state
-      assert :ok = EtherCAT.write(do_slave, output_pdo, false)
+      assert :ok = EtherCAT.write(master, output_pdo, false)
       :timer.sleep(@stabilization_delay)
 
       # Read should succeed even before explicit write
-      assert {:ok, _value} = EtherCAT.read(di, input_pdo)
+      assert {:ok, _value} = EtherCAT.read(master, input_pdo)
       Logger.info("✓ Read before write succeeded")
 
       # Test 6.3: Rapid alternation stress
@@ -358,7 +352,7 @@ defmodule Hardware.FunctionalValidationTest do
         |> Enum.reduce_while(iterations, fn i, _acc ->
           if System.monotonic_time(:millisecond) - start_time < 5000 do
             value = rem(i, 2) == 0
-            :ok = EtherCAT.write(do_slave, output_pdo, value)
+            :ok = EtherCAT.write(master, output_pdo, value)
             :timer.sleep(100)
             {:cont, i}
           else
@@ -370,7 +364,7 @@ defmodule Hardware.FunctionalValidationTest do
 
       # Final state verification
       :timer.sleep(@stabilization_delay)
-      assert {:ok, _final_value} = EtherCAT.read(di, input_pdo)
+      assert {:ok, _final_value} = EtherCAT.read(master, input_pdo)
 
       Logger.info("✓ Edge cases test passed")
     after
