@@ -14,7 +14,7 @@ defmodule EtherCATTest do
     assert function_exported?(EtherCAT, :create_domain, 3)
 
     # Slave operations
-    assert function_exported?(EtherCAT, :configure_slave, 3)
+    assert function_exported?(EtherCAT, :configure_slave, 2)
     assert function_exported?(EtherCAT, :register_pdos, 3)
     assert function_exported?(EtherCAT, :register_pdos, 4)
 

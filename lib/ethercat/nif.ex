@@ -38,9 +38,6 @@ defmodule EtherCAT.Nif do
       slave_config_reg_pdo_entry: [],
       slave_config_reg_pdo_entry_pos: [],
       slave_config_sdo: [],
-      slave_config_sdo8: [],
-      slave_config_sdo16: [],
-      slave_config_sdo32: [],
       master_get_sync_manager: [],
       master_get_pdo: [],
       master_get_pdo_entry: [],
@@ -829,69 +826,6 @@ defmodule EtherCAT.Nif do
           sdo_subindex,
           binary.ptr,
           binary.len
-      );
-
-      if (result < 0) {
-          return MasterError.SlaveConfigError;
-      }
-  }
-
-  /// Configure an 8-bit SDO value (pre-activation only).
-  ///
-  /// Convenience wrapper with automatic endianness handling.
-  pub fn slave_config_sdo8(
-      slave_config: SlaveConfigResource,
-      sdo_index: u16,
-      sdo_subindex: u8,
-      value: u8
-  ) !void {
-      const result = ecrt.ecrt_slave_config_sdo8(
-          slave_config.unpack(),
-          sdo_index,
-          sdo_subindex,
-          value
-      );
-
-      if (result < 0) {
-          return MasterError.SlaveConfigError;
-      }
-  }
-
-  /// Configure a 16-bit SDO value (pre-activation only).
-  ///
-  /// Convenience wrapper with automatic endianness handling.
-  pub fn slave_config_sdo16(
-      slave_config: SlaveConfigResource,
-      sdo_index: u16,
-      sdo_subindex: u8,
-      value: u16
-  ) !void {
-      const result = ecrt.ecrt_slave_config_sdo16(
-          slave_config.unpack(),
-          sdo_index,
-          sdo_subindex,
-          value
-      );
-
-      if (result < 0) {
-          return MasterError.SlaveConfigError;
-      }
-  }
-
-  /// Configure a 32-bit SDO value (pre-activation only).
-  ///
-  /// Convenience wrapper with automatic endianness handling.
-  pub fn slave_config_sdo32(
-      slave_config: SlaveConfigResource,
-      sdo_index: u16,
-      sdo_subindex: u8,
-      value: u32
-  ) !void {
-      const result = ecrt.ecrt_slave_config_sdo32(
-          slave_config.unpack(),
-          sdo_index,
-          sdo_subindex,
-          value
       );
 
       if (result < 0) {

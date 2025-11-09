@@ -474,7 +474,15 @@ defmodule EtherCAT.Slave do
 
   @impl true
   def handle_call({:configure, config}, _from, state) do
-    {:ok, driver_state} = state.driver.configure(state.driver_state, config)
+    # Pass context needed for SDO configuration
+    context = %{
+      master: state.master,
+      position: state.position,
+      slave_config: state.slave_config
+    }
+
+    config_with_context = Map.merge(config, context)
+    {:ok, driver_state} = state.driver.configure(state.driver_state, config_with_context)
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 

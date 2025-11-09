@@ -109,8 +109,8 @@ defmodule EtherCAT do
   def create_domain(master, name, interval), do: Master.create_domain(master, name, interval)
 
   @doc "Configures slave and returns available PDO names."
-  @spec configure_slave(pid(), pid(), map()) :: {:ok, list()}
-  def configure_slave(_master, slave, config) do
+  @spec configure_slave(pid(), map()) :: {:ok, list()}
+  def configure_slave(slave, config) do
     :ok = Slave.configure(slave, config)
     {:ok, Slave.list_pdos(slave)}
   end

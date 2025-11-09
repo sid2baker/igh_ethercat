@@ -828,6 +828,11 @@ defmodule EtherCAT.Master do
           entry_size
         )
 
+      # SDO configuration operation (must be called before activation)
+      :config_sdo ->
+        [slave_config, sdo_index, sdo_subindex, data] = args
+        Nif.slave_config_sdo(slave_config, sdo_index, sdo_subindex, data)
+
       _ ->
         {:error, {:unknown_operation, operation}}
     end
@@ -836,7 +841,6 @@ defmodule EtherCAT.Master do
   # Determines which driver to use for a slave based on vendor ID and product code.
   # Currently returns Generic driver for all devices. In the future, this can be
   # extended to support device-specific drivers.
-  defp driver_for_slave(_vendor_id, _product_code) do
-    EtherCAT.Drivers.Generic
-  end
+  defp driver_for_slave(0x02, 0x0c823052), do: EtherCAT.Drivers.EL3202
+  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Drivers.Generic
 end
