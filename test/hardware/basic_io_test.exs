@@ -1,5 +1,5 @@
 defmodule Hardware.BasicIOTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   require Logger
 
   @moduledoc """
@@ -29,13 +29,15 @@ defmodule Hardware.BasicIOTest do
 
   Or run in IEx for interactive testing:
 
-      iex> {m, input, output} = Hardware.BasicIOTest.run()
+      iex> {m, input_handles, output_handles} = Hardware.BasicIOTest.run()
       # Subscribe to input changes
-      iex> EtherCAT.watch(input, "pdo_6000:1")
+      iex> first_input = List.first(input_handles)
+      iex> EtherCAT.watch(first_input)
       # Toggle output (if looped back, you'll receive a notification)
-      iex> EtherCAT.write(output, "pdo_7000:1", true)
+      iex> first_output = List.first(output_handles)
+      iex> EtherCAT.write(first_output, true)
       iex> flush()
-      {:data_changed, "pdo_6000:1", true}
+      {:data_changed, "slave_1:pdo_6000:1", true}
   """
 
   @doc """
@@ -57,9 +59,9 @@ defmodule Hardware.BasicIOTest do
     {:ok, output_pdos} = EtherCAT.configure_slave(master, do1, %{})
     output_pdos |> IO.inspect(label: "Output PDOs")
 
-    # Register PDOs and get unique names
-    {:ok, input_names} = EtherCAT.register_pdos(master, di1, input_pdos)
-    {:ok, output_names} = EtherCAT.register_pdos(master, do1, output_pdos)
+    # Register PDOs and get PDO handles
+    {:ok, input_handles} = EtherCAT.register_pdos(master, di1, input_pdos)
+    {:ok, output_handles} = EtherCAT.register_pdos(master, do1, output_pdos)
 
     # Start cyclic communication
     EtherCAT.start_cyclic(master)
@@ -67,61 +69,60 @@ defmodule Hardware.BasicIOTest do
     # Give the system time to stabilize
     :timer.sleep(1000)
 
-    # Subscribe to input changes using unique name
+    # Subscribe to input changes using PDO handle
     # (assumes output 1 is connected to input 1)
-    first_input = List.first(input_names)
-    EtherCAT.watch(master, first_input)
+    first_input = List.first(input_handles)
+    EtherCAT.watch(first_input)
     :timer.sleep(500)
 
-    # Toggle the output to demonstrate I/O using unique name
-    first_output = List.first(output_names)
-    EtherCAT.write(master, first_output, true)
+    # Toggle the output to demonstrate I/O using PDO handle
+    first_output = List.first(output_handles)
+    EtherCAT.write(first_output, true)
     :timer.sleep(500)
 
-    EtherCAT.write(master, first_output, false)
+    EtherCAT.write(first_output, false)
     :timer.sleep(500)
 
-    EtherCAT.write(master, first_output, true)
+    EtherCAT.write(first_output, true)
 
-    Logger.info("Test complete! Returning master and PDO names for interactive use.")
-    {master, input_names, output_names}
+    Logger.info("Test complete! Returning master and PDO handles for interactive use.")
+    {master, input_handles, output_handles}
   end
 
   @tag :hardware
   @tag timeout: 30_000
   test "basic I/O with loopback" do
-    {master, input_names, output_names} = run()
+    {master, input_handles, output_handles} = run()
 
     # Wait for stabilization
     :timer.sleep(2000)
 
-    # Get first input and output unique names
-    first_input = List.first(input_names)
-    first_output = List.first(output_names)
+    # Get first input and output PDO handles
+    first_input = List.first(input_handles)
+    first_output = List.first(output_handles)
 
     # Test write/read cycle
     Logger.info("Setting output HIGH...")
-    assert :ok = EtherCAT.write(master, first_output, true)
+    assert :ok = EtherCAT.write(first_output, true)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input...")
-    assert {:ok, value} = EtherCAT.read(master, first_input)
+    assert {:ok, value} = EtherCAT.read(first_input)
     Logger.info("Input value: #{inspect(value)}")
 
     Logger.info("Setting output LOW...")
-    assert :ok = EtherCAT.write(master, first_output, false)
+    assert :ok = EtherCAT.write(first_output, false)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input again...")
-    assert {:ok, value2} = EtherCAT.read(master, first_input)
+    assert {:ok, value2} = EtherCAT.read(first_input)
     Logger.info("Input value: #{inspect(value2)}")
 
-    # Cleanup using new API
+    # Cleanup using new API (blocks until master is fully released)
     EtherCAT.close(master)
 
     Logger.info("Test passed!")
   end
 end
-

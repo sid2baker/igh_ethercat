@@ -1,5 +1,5 @@
 defmodule Hardware.SelectivePDOTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   require Logger
 
   @moduledoc """
@@ -18,7 +18,7 @@ defmodule Hardware.SelectivePDOTest do
 
   ## Demonstrates
 
-  - Listing all available PDOs from a slave
+  - Listing all available PDOs from a slave via configure_slave
   - Selective registration of specific PDOs
   - Multiple registration calls to the same domain
 
@@ -30,43 +30,39 @@ defmodule Hardware.SelectivePDOTest do
 
   Or run in IEx for interactive testing:
 
-      iex> slave = Hardware.SelectivePDOTest.run()
+      iex> {master, pdo_handles} = Hardware.SelectivePDOTest.run()
       # The slave is already configured and operational
-      iex> EtherCAT.list_pdos(slave)
-      ["pdo_6000:1", "pdo_6010:1", ...]
-      iex> {:ok, value} = EtherCAT.read(slave, "pdo_6000:1")
+      iex> first_handle = List.first(pdo_handles)
+      iex> {:ok, value} = EtherCAT.read(first_handle)
   """
 
   @doc """
   Interactive test function for manual testing in IEx.
 
-  Returns the input slave PID for continued experimentation.
+  Returns the master PID and PDO handles for continued experimentation.
   """
   def run do
     Logger.info("Starting Selective PDO Test...")
 
-    {:ok, master} = EtherCAT.open()
-    :ok = EtherCAT.connect(master)
-    {:ok, [_slave1, slave2]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, _slave1, slave2]} = EtherCAT.open()
 
-    EtherCAT.configure_slave(slave2, [])
-    EtherCAT.list_pdos(slave2) |> IO.inspect(label: "Available PDOs")
+    # Configure slave and get available PDOs
+    {:ok, all_pdos} = EtherCAT.configure_slave(master, slave2, %{})
+    all_pdos |> IO.inspect(label: "Available PDOs")
 
-    # Register all PDOs first
-    EtherCAT.register_all_pdos(slave2, :default_domain)
+    # Select only the first 8 PDOs
+    selected_pdos = Enum.take(all_pdos, 8)
+    Logger.info("Registering selected PDOs: #{inspect(selected_pdos)}")
 
-    # Selective registration example (would typically be done instead of register_all_pdos)
-    # This demonstrates that you can register specific PDOs by name
-    EtherCAT.register_pdos(
-      slave2,
-      [:input1, :input2, :input3, :input4, :input5, :input6, :input7, :input9],
-      :default_domain
-    )
+    # Register only selected PDOs and get handles
+    {:ok, pdo_handles} = EtherCAT.register_pdos(master, slave2, selected_pdos, :default_domain)
 
+    # Start cyclic communication
     EtherCAT.start_cyclic(master)
 
-    Logger.info("Test complete! Returning slave PID for interactive use.")
-    slave2
+    Logger.info("Test complete! Returning master and PDO handles for interactive use.")
+    {master, pdo_handles}
   end
 
   @tag :hardware
@@ -74,15 +70,11 @@ defmodule Hardware.SelectivePDOTest do
   test "selective PDO registration" do
     Logger.info("Starting selective PDO registration test...")
 
-    {:ok, master} = EtherCAT.open()
-    :ok = EtherCAT.connect(master)
-    {:ok, [_coupler, input_slave]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, input_slave | _rest]} = EtherCAT.open()
 
-    # Configure the slave
-    EtherCAT.configure_slave(input_slave, [])
-
-    # List all available PDOs
-    all_pdos = EtherCAT.list_pdos(input_slave)
+    # Configure the slave and get available PDOs
+    {:ok, all_pdos} = EtherCAT.configure_slave(master, input_slave, %{})
     Logger.info("Available PDOs: #{inspect(all_pdos)}")
     assert length(all_pdos) > 0
 
@@ -90,8 +82,8 @@ defmodule Hardware.SelectivePDOTest do
     selected_pdos = Enum.take(all_pdos, 4)
     Logger.info("Registering selected PDOs: #{inspect(selected_pdos)}")
 
-    # Register only selected PDOs
-    assert :ok = EtherCAT.register_pdos(input_slave, selected_pdos, :default_domain)
+    # Register only selected PDOs and get handles
+    {:ok, pdo_handles} = EtherCAT.register_pdos(master, input_slave, selected_pdos, :default_domain)
 
     # Activate cyclic mode
     EtherCAT.start_cyclic(master)
@@ -99,14 +91,14 @@ defmodule Hardware.SelectivePDOTest do
     # Wait for stabilization
     :timer.sleep(2000)
 
-    # Verify we can read from registered PDOs
-    for pdo <- selected_pdos do
-      Logger.info("Reading PDO: #{inspect(pdo)}")
-      assert {:ok, _value} = EtherCAT.read(input_slave, pdo)
+    # Verify we can read from registered PDOs using handles
+    for pdo_handle <- pdo_handles do
+      Logger.info("Reading PDO: #{inspect(pdo_handle)}")
+      assert {:ok, _value} = EtherCAT.read(pdo_handle)
     end
 
-    # Cleanup
-    GenServer.stop(master, :normal)
+    # Cleanup (blocks until master is fully released)
+    EtherCAT.close(master)
 
     Logger.info("Test passed!")
   end

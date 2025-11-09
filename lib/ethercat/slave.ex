@@ -98,34 +98,6 @@ defmodule EtherCAT.Slave do
   # Client API
 
   @doc """
-  Returns a child specification for starting this module under a supervisor.
-
-  ## Parameters
-  - Keyword list with keys:
-    - `:master` - The master process PID
-    - `:position` - The slave's position on the bus (0-based)
-    - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
-    - `:slave_config` - The slave configuration reference from the NIF
-    - `:sync_count` - Number of sync managers available on the device
-    - `:id` - Optional child spec identifier (default: `{__MODULE__, position}`)
-    - `:restart` - Restart strategy (default: `:permanent`)
-  """
-  @spec child_spec(keyword()) :: Supervisor.child_spec()
-  def child_spec(opts) when is_list(opts) do
-    position = Keyword.fetch!(opts, :position)
-    id = Keyword.get(opts, :id, {__MODULE__, position})
-    restart = Keyword.get(opts, :restart, :permanent)
-
-    %{
-      id: id,
-      start: {__MODULE__, :start_link, [opts]},
-      restart: restart,
-      shutdown: 5000,
-      type: :worker
-    }
-  end
-
-  @doc """
   Starts a slave process linked to the calling process.
 
   This function is typically called by the Master during slave synchronization.
@@ -162,22 +134,6 @@ defmodule EtherCAT.Slave do
     sync_count = Keyword.fetch!(opts, :sync_count)
 
     GenServer.start_link(__MODULE__, {master, position, driver, slave_config, sync_count})
-  end
-
-  @doc """
-  Changes the driver for an existing slave.
-
-  This recreates the slave configuration with the new driver. Should only be
-  used before the master enters operational mode.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `driver` - The new driver module
-  - `timeout` - Call timeout in milliseconds (default: 5000)
-  """
-  @spec set_driver(pid(), module(), timeout()) :: :ok
-  def set_driver(slave, driver, timeout \\ 5000) do
-    GenServer.call(slave, {:set_driver, driver}, timeout)
   end
 
   @doc """
@@ -316,119 +272,6 @@ defmodule EtherCAT.Slave do
     register_pdos(slave, all_pdos, domain)
   end
 
-  # Operational API (called after Master activation)
-
-  @doc """
-  Sets the value of a PDO output.
-
-  Writes a value to an output PDO that will be sent to the slave during the
-  next cyclic exchange. The PDO must have been registered before the master
-  entered operational mode.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `name` - PDO name (as returned by `list_pdos/1`)
-  - `value` - Value to write (type depends on PDO configuration)
-
-  ## Returns
-  - `:ok` on success
-  - `{:error, reason}` if PDO not found or not registered
-
-  ## Example
-
-      # Set a boolean output
-      Slave.set_pdo_value(slave, :output1, true)
-
-      # Set an integer output
-      Slave.set_pdo_value(slave, "pdo_7010:1", 42)
-  """
-  @spec set_pdo_value(pid(), name(), term()) :: :ok | {:error, term()}
-  def set_pdo_value(slave, name, value) do
-    GenServer.call(slave, {:set_pdo_value, name, value})
-  end
-
-  @doc """
-  Gets the current value of a PDO input.
-
-  Reads the most recent value received from the slave during cyclic exchange.
-  The PDO must have been registered before the master entered operational mode.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `name` - PDO name (as returned by `list_pdos/1`)
-
-  ## Returns
-  - `{:ok, value}` on success
-  - `{:error, reason}` if PDO not found or not registered
-
-  ## Example
-
-      {:ok, temperature} = Slave.get_pdo_value(slave, :temperature)
-      {:ok, input_state} = Slave.get_pdo_value(slave, "pdo_6000:1")
-  """
-  @spec get_pdo_value(pid(), name()) :: {:ok, term()} | {:error, term()}
-  def get_pdo_value(slave, name) do
-    GenServer.call(slave, {:get_pdo_value, name})
-  end
-
-  @doc """
-  Subscribes a process to receive notifications when a PDO value changes.
-
-  The subscriber will receive `{:data_changed, name, value}` messages whenever
-  the PDO value changes during cyclic operation.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `name` - PDO name to watch
-  - `pid` - Process to receive notifications (default: calling process)
-
-  ## Returns
-  - `:ok` on success
-  - `{:error, reason}` if PDO not found or not registered
-
-  ## Example
-
-      # Watch from the calling process
-      Slave.watch_pdo(slave, :temperature)
-
-      receive do
-        {:data_changed, :temperature, value} ->
-          IO.puts("Temperature changed to: ")
-      end
-
-      # Watch from another process
-      Slave.watch_pdo(slave, :pressure, monitor_pid)
-  """
-  @spec watch_pdo(pid(), name(), pid()) :: :ok | {:error, term()}
-  def watch_pdo(slave, name, pid \\ self()) do
-    GenServer.call(slave, {:watch_pdo, name, pid})
-  end
-
-  @doc """
-  Unsubscribes a process from receiving notifications when a PDO value changes.
-
-  Removes the subscription previously created with `watch_pdo/3`.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `name` - PDO name to stop watching
-  - `pid` - Process to remove from notifications (default: calling process)
-
-  ## Returns
-  - `:ok` on success
-  - `{:error, reason}` if PDO not found or not registered
-
-  ## Example
-
-      Slave.watch_pdo(slave, :temperature)
-      # ... receive some notifications ...
-      Slave.unwatch_pdo(slave, :temperature)
-  """
-  @spec unwatch_pdo(pid(), name(), pid()) :: :ok | {:error, term()}
-  def unwatch_pdo(slave, name, pid \\ self()) do
-    GenServer.call(slave, {:unwatch_pdo, name, pid})
-  end
-
   # Internal/Advanced API
 
   @doc """
@@ -497,7 +340,6 @@ defmodule EtherCAT.Slave do
       end)
       |> Map.new()
 
-    require Logger
     Logger.debug("Generic driver discovered PDOs: #{inspect(pdos)}")
 
     {:noreply, %{state | driver_state: %{pdos: pdos}}}
@@ -566,22 +408,11 @@ defmodule EtherCAT.Slave do
   end
 
   @impl true
-  def handle_call({:set_driver, driver}, _from, state) do
-    sc =
-      Master.slave_operation(
-        state.master,
-        state.position,
-        :slave_config,
-        [state.alias, state.vendor_id, state.product_code]
-      )
-
-    {:reply, :ok, %{state | driver: driver, slave_config: sc}}
-  end
-
   def handle_call({:get_slave_config}, _from, state) do
     {:reply, state.slave_config, state}
   end
 
+  @impl true
   def handle_call({:configure, config}, _from, state) do
     {:ok, driver_state} = state.driver.configure(state.driver_state, config)
     {:reply, :ok, %{state | driver_state: driver_state}}
@@ -607,7 +438,6 @@ defmodule EtherCAT.Slave do
     {:reply, result, state}
   end
 
-  # New API handlers - configuration
   def handle_call({:configure_sync_manager, sync_index, direction, watchdog}, _from, state) do
     config_sync_manager_internal(state, sync_index, direction, watchdog)
     {:reply, :ok, state}
@@ -676,67 +506,6 @@ defmodule EtherCAT.Slave do
     end
   end
 
-  # Operational API handlers
-  def handle_call({:set_pdo_value, name, value}, _from, state) do
-    unique_name = "slave_#{state.position}:#{name}"
-
-    case state.pdo_registrations[unique_name] do
-      domain_name when is_atom(domain_name) ->
-        # Get domain reference
-        domain_ref = Domain.get_ref(domain_name)
-        # Call Master as the single NIF gateway
-        result = Master.domain_set_value(state.master, domain_ref, unique_name, value)
-        {:reply, result, state}
-
-      nil ->
-        {:reply, {:error, {:pdo_not_registered, name}}, state}
-    end
-  end
-
-  def handle_call({:get_pdo_value, name}, _from, state) do
-    unique_name = "slave_#{state.position}:#{name}"
-
-    case state.pdo_registrations[unique_name] do
-      domain_name when is_atom(domain_name) ->
-        # Get domain reference
-        domain_ref = Domain.get_ref(domain_name)
-        # Call Master as the single NIF gateway
-        result = Master.domain_get_value(state.master, domain_ref, unique_name)
-        {:reply, result, state}
-
-      nil ->
-        {:reply, {:error, {:pdo_not_registered, name}}, state}
-    end
-  end
-
-  def handle_call({:watch_pdo, name, pid}, _from, state) do
-    unique_name = "slave_#{state.position}:#{name}"
-
-    case state.pdo_registrations[unique_name] do
-      domain_name when is_atom(domain_name) ->
-        # Call Master to subscribe (Master routes to Domain)
-        result = Master.domain_subscribe(state.master, domain_name, pid, unique_name)
-        {:reply, result, state}
-
-      nil ->
-        {:reply, {:error, {:pdo_not_registered, name}}, state}
-    end
-  end
-
-  def handle_call({:unwatch_pdo, name, pid}, _from, state) do
-    unique_name = "slave_#{state.position}:#{name}"
-
-    case state.pdo_registrations[unique_name] do
-      domain_name when is_atom(domain_name) ->
-        # Call Master to unsubscribe (Master routes to Domain)
-        result = Master.domain_unsubscribe(state.master, domain_name, pid, unique_name)
-        {:reply, result, state}
-
-      nil ->
-        {:reply, {:error, {:pdo_not_registered, name}}, state}
-    end
-  end
-
   @impl true
   def terminate(reason, state) do
     Logger.info("Slave at position #{state.position} terminating: #{inspect(reason)}")
@@ -777,7 +546,7 @@ defmodule EtherCAT.Slave do
   end
 
   # Configures sync managers and PDOs, then registers them with the domain
-  defp configure_and_register_pdos(sync_managers, state, domain) do
+  defp configure_and_register_pdos(sync_managers, state, domain_name) do
     configured_entries =
       for {sync_index, {sm_direction, watchdog, pdos}} <- sync_managers do
         config_sync_manager_internal(state, sync_index, sm_direction, watchdog)
@@ -808,11 +577,14 @@ defmodule EtherCAT.Slave do
       end
       |> List.flatten()
 
+    # Look up domain PID from Registry
+    {:ok, domain_pid} = Domain.find_domain(state.master, domain_name)
+
     # Register all entries with domain, using globally unique names
     for {name, entry, direction} <- configured_entries do
       # Prefix with slave position to ensure uniqueness across slaves
       unique_name = "slave_#{state.position}:#{name}"
-      Domain.register_pdo_entry(domain, state.slave_config, unique_name, entry, direction)
+      Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, direction)
     end
 
     configured_entries

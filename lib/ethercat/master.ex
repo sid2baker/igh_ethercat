@@ -591,7 +591,7 @@ defmodule EtherCAT.Master do
         Nif.domain_set_pid(domain_ref, domain_pid)
 
         {:keep_state, %{data | domains: [domain_pid | data.domains]},
-         [{:reply, from, domain_ref}]}
+         [{:reply, from, {:ok, domain_ref}}]}
 
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}

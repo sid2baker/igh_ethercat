@@ -815,39 +815,38 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             }
 
             // Check each PDO entry for changes (protected by mutex)
-            // For inputs: detect changes and notify immediately
-            // For outputs: always write expected value from set_value
             accessor.mutex.lock();
             defer accessor.mutex.unlock();
 
             for (accessor.layout.entries.items) |*entry| {
-                if (entry.direction == .input) {
-                    // Extract current value from domain data into temp buffer
-                    var domain_value: [8]u8 = [_]u8{0} ** 8;
-                    extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
+                // Extract current value from domain data into temp buffer
+                var domain_value: [8]u8 = [_]u8{0} ** 8;
+                extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
-                    // Compare with stored current_value
-                    const byte_count = (entry.bit_length + 7) / 8;
-                    var changed = false;
-                    var i: usize = 0;
-                    while (i < byte_count and i < 8) : (i += 1) {
-                        if (domain_value[i] != entry.current_value[i]) {
-                            changed = true;
-                            break;
-                        }
+                // Compare with stored current_value
+                const byte_count = (entry.bit_length + 7) / 8;
+                var changed = false;
+                var i: usize = 0;
+                while (i < byte_count and i < 8) : (i += 1) {
+                    if (domain_value[i] != entry.current_value[i]) {
+                        changed = true;
+                        break;
                     }
+                }
 
-                    if (changed) {
+                if (changed) {
+                    if (entry.direction == .input) {
                         // Input changed: notify immediately and update stored value
                         const value = try extractEntryValue(entry.*, accessor.data);
                         _ = try beam.send(accessor.pid, .{ .data_changed, entry.name, value }, .{});
 
                         // Update stored value
                         entry.current_value = domain_value;
+                    } else {
+                        // Output changed: notify immediately and update domain value
+                        write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
+                        _ = try beam.send(accessor.pid, .{ .output_changed, entry.name, entry.current_value }, .{});
                     }
-                } else {
-                    // Output: always write expected value from current_value to domain
-                    write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
                 }
             }
 

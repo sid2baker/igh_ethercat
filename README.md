@@ -57,6 +57,12 @@ A real-time EtherCAT master implementation for Elixir/Erlang, wrapping the IgH E
 - Selective notifications to subscribing processes (offset-based)
 - Efficient for high-speed I/O with sparse updates
 
+**Multi-Master Support**
+- Multiple independent EtherCAT masters in the same application
+- Domains scoped per master using Registry with composite keys `{:domain, master, name}`
+- Each master can have its own `:default_domain` without conflicts
+- Ideal for systems managing separate EtherCAT networks or redundant configurations
+
 ## Quick Start
 
 ```elixir
@@ -142,6 +148,34 @@ defmodule MyDriver do
 
   def terminate(_state), do: :ok
 end
+```
+
+## Multi-Master Example
+
+```elixir
+# Open two independent EtherCAT masters
+{:ok, master1, slaves1} = EtherCAT.open(index: 0)
+{:ok, master2, slaves2} = EtherCAT.open(index: 1)
+
+# Each master can create domains with the same name
+EtherCAT.create_domain(master1, :default_domain, 1)
+EtherCAT.create_domain(master2, :default_domain, 1)
+
+# Configure slaves on each network independently
+{:ok, pdos1} = EtherCAT.configure_slave(master1, hd(slaves1), %{})
+{:ok, pdos2} = EtherCAT.configure_slave(master2, hd(slaves2), %{})
+
+# Register PDOs to respective domains
+{:ok, handles1} = EtherCAT.register_pdos(master1, hd(slaves1), pdos1)
+{:ok, handles2} = EtherCAT.register_pdos(master2, hd(slaves2), pdos2)
+
+# Start both masters for cyclic I/O
+EtherCAT.start_cyclic(master1)
+EtherCAT.start_cyclic(master2)
+
+# PDO handles are scoped to their master
+EtherCAT.write(hd(handles1), true)  # Writes to master1's network
+EtherCAT.write(hd(handles2), false) # Writes to master2's network
 ```
 
 ## Known Limitations

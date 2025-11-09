@@ -33,6 +33,24 @@ defmodule EtherCAT.Domain do
   All NIF communication is routed through the Master process to prevent race conditions.
   The domain never calls NIFs directly, ensuring thread-safe operation.
 
+  ## Multi-Master Support
+
+  Domains are registered in the `EtherCAT.Registry` with a composite key `{:domain, master, name}`,
+  allowing multiple masters to each have domains with the same name without conflicts.
+
+      # Two masters can each have their own :default_domain
+      {:ok, master1, _} = EtherCAT.open(index: 0)
+      {:ok, master2, _} = EtherCAT.open(index: 1)
+
+      # Both create :default_domain - no conflict
+      Master.create_domain(master1, :default_domain, 1)
+      Master.create_domain(master2, :default_domain, 1)
+
+      # Lookup uses both master and name
+      {:ok, domain1} = Domain.find_domain(master1, :default_domain)
+      {:ok, domain2} = Domain.find_domain(master2, :default_domain)
+      # domain1 and domain2 are different processes
+
   ## Example
 
       # Create a domain with 100µs update interval
@@ -70,33 +88,22 @@ defmodule EtherCAT.Domain do
   # Client API
 
   @doc """
-  Returns a child specification for starting this module under a supervisor.
-
-  This is useful when you want to start a domain under a DynamicSupervisor
-  or regular Supervisor with custom parameters.
+  Finds a domain process by master and domain name.
 
   ## Parameters
-  - Keyword list with keys:
-    - `:name` - Registered name for the domain (atom)
-    - `:master` - Master process PID
-    - `:resource` - Domain reference from the NIF
-    - `:interval` - Update interval in microseconds
-    - `:id` - Optional child spec identifier (default: name)
-    - `:restart` - Restart strategy (default: `:permanent`)
-  """
-  @spec child_spec(keyword()) :: Supervisor.child_spec()
-  def child_spec(opts) when is_list(opts) do
-    name = Keyword.fetch!(opts, :name)
-    id = Keyword.get(opts, :id, name)
-    restart = Keyword.get(opts, :restart, :permanent)
+  - `master` - Master process PID
+  - `name` - Domain name (atom)
 
-    %{
-      id: id,
-      start: {__MODULE__, :start_link, [opts]},
-      restart: restart,
-      shutdown: 5000,
-      type: :worker
-    }
+  ## Returns
+  - `{:ok, pid}` if found
+  - `{:error, :not_found}` if domain doesn't exist
+  """
+  @spec find_domain(pid(), atom()) :: {:ok, pid()} | {:error, :not_found}
+  def find_domain(master, name) do
+    case Registry.lookup(EtherCAT.Registry, {:domain, master, name}) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, :not_found}
+    end
   end
 
   @doc """
@@ -129,7 +136,7 @@ defmodule EtherCAT.Domain do
     resource = Keyword.fetch!(opts, :resource)
     interval = Keyword.fetch!(opts, :interval)
 
-    GenServer.start_link(__MODULE__, {name, master, resource, interval}, name: name)
+    GenServer.start_link(__MODULE__, {name, master, resource, interval})
   end
 
   @doc """
@@ -216,13 +223,99 @@ defmodule EtherCAT.Domain do
   defp infer_entry_type(64), do: :uint64
   defp infer_entry_type(size), do: {:unknown, size}
 
-  @doc false
+  @doc """
+  Sets a PDO value in this domain.
+
+  Writes a value to an output PDO. The write is deferred until the next cyclic
+  task iteration, where it will be detected and written to the domain buffer.
+
+  ## Parameters
+  - `domain` - Domain process (name or PID)
+  - `unique_name` - Unique PDO identifier (e.g., "slave_1:pdo_7010:1")
+  - `value` - Value to write (type depends on PDO configuration)
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if PDO not found or domain not operational
+
+  ## Example
+
+      Domain.set_pdo_value(:default_domain, "slave_1:output1", true)
+  """
+  @spec set_pdo_value(GenServer.server(), name(), term()) :: :ok | {:error, term()}
+  def set_pdo_value(domain, unique_name, value) do
+    GenServer.call(domain, {:set_pdo_value, unique_name, value})
+  end
+
+  @doc """
+  Gets a PDO value from this domain.
+
+  Reads the most recent value received during cyclic exchange.
+
+  ## Parameters
+  - `domain` - Domain process (name or PID)
+  - `unique_name` - Unique PDO identifier (e.g., "slave_1:pdo_6000:1")
+
+  ## Returns
+  - `{:ok, value}` on success
+  - `{:error, reason}` if PDO not found or domain not operational
+
+  ## Example
+
+      {:ok, temperature} = Domain.get_pdo_value(:default_domain, "slave_1:temp")
+  """
+  @spec get_pdo_value(GenServer.server(), name()) :: {:ok, term()} | {:error, term()}
+  def get_pdo_value(domain, unique_name) do
+    GenServer.call(domain, {:get_pdo_value, unique_name})
+  end
+
+  @doc """
+  Subscribes a process to receive notifications when a PDO value changes.
+
+  The subscriber will receive `{:data_changed, unique_name, value}` messages
+  whenever the PDO value changes during cyclic operation.
+
+  ## Parameters
+  - `domain` - Domain process (name or PID)
+  - `pid` - Process to receive notifications
+  - `unique_name` - Unique PDO identifier to watch
+
+  ## Returns
+  - `:ok` on success
+
+  ## Example
+
+      Domain.subscribe(:default_domain, self(), "slave_1:temperature")
+
+      receive do
+        {:data_changed, "slave_1:temperature", value} ->
+          IO.puts("Temperature changed to: \#{value}")
+      end
+  """
   @spec subscribe(GenServer.server(), pid(), name()) :: :ok
   def subscribe(domain, pid, name) do
     GenServer.call(domain, {:subscribe, pid, name})
   end
 
-  @doc false
+  @doc """
+  Unsubscribes a process from receiving PDO change notifications.
+
+  Removes the subscription previously created with `subscribe/3`.
+
+  ## Parameters
+  - `domain` - Domain process (name or PID)
+  - `pid` - Process to remove from notifications
+  - `unique_name` - Unique PDO identifier to stop watching
+
+  ## Returns
+  - `:ok` on success
+
+  ## Example
+
+      Domain.subscribe(:default_domain, self(), "slave_1:temperature")
+      # ... receive some notifications ...
+      Domain.unsubscribe(:default_domain, self(), "slave_1:temperature")
+  """
   @spec unsubscribe(GenServer.server(), pid(), name()) :: :ok
   def unsubscribe(domain, pid, name) do
     GenServer.call(domain, {:unsubscribe, pid, name})
@@ -258,6 +351,18 @@ defmodule EtherCAT.Domain do
   @impl true
   def handle_call(:get_interval, _from, state) do
     {:reply, state.interval, state}
+  end
+
+  @impl true
+  def handle_call({:set_pdo_value, unique_name, value}, _from, state) do
+    result = EtherCAT.Master.domain_set_value(state.master, state.resource, unique_name, value)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:get_pdo_value, unique_name}, _from, state) do
+    result = EtherCAT.Master.domain_get_value(state.master, state.resource, unique_name)
+    {:reply, result, state}
   end
 
   @impl true
@@ -355,6 +460,26 @@ defmodule EtherCAT.Domain do
       pids when is_struct(pids, MapSet) ->
         Logger.debug("  Notifying #{MapSet.size(pids)} subscribers for #{name}")
         Enum.each(pids, fn pid -> send(pid, {:data_changed, name, value}) end)
+
+      nil ->
+        # No subscribers for this entry
+        :ok
+    end
+
+    {:noreply, state}
+  end
+
+  # Receives output change confirmations from the NIF
+  # This is sent when an output PDO value has been successfully written to the domain
+  @impl true
+  def handle_info({:output_changed, name, value}, state) do
+    Logger.debug("Output confirmed: #{name} = #{inspect(value)}")
+
+    # Notify subscribers about output confirmation
+    case state.subscribers[name] do
+      pids when is_struct(pids, MapSet) ->
+        Logger.debug("  Notifying #{MapSet.size(pids)} subscribers for output #{name}")
+        Enum.each(pids, fn pid -> send(pid, {:output_changed, name, value}) end)
 
       nil ->
         # No subscribers for this entry

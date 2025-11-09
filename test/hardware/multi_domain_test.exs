@@ -1,5 +1,5 @@
 defmodule Hardware.MultiDomainTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   require Logger
 
   @moduledoc """
@@ -41,7 +41,7 @@ defmodule Hardware.MultiDomainTest do
 
   Or run in IEx for interactive testing:
 
-      iex> master = Hardware.MultiDomainTest.run()
+      iex> {master, handles} = Hardware.MultiDomainTest.run()
       # Monitor master state transitions
       iex> flush()
       {:master_state_changed, %{...}}
@@ -52,38 +52,46 @@ defmodule Hardware.MultiDomainTest do
   @doc """
   Interactive test function for manual testing in IEx.
 
-  Returns the master PID for continued experimentation and monitoring.
+  Returns the master PID and PDO handles for continued experimentation.
   """
   def run do
     Logger.info("Starting Multi-Domain Test...")
 
-    {:ok, master} = EtherCAT.open()
-    :ok = EtherCAT.connect(master)
-    {:ok, [_slave1, slave2]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, _slave1, slave2 | _rest]} = EtherCAT.open()
 
     # Create a second domain with a slower update rate
     EtherCAT.create_domain(master, :domain2, 100)
 
-    # Configure the slave
-    EtherCAT.configure_slave(slave2, [])
-    all_pdos = EtherCAT.list_pdos(slave2)
+    # Configure the slave and get available PDOs
+    {:ok, all_pdos} = EtherCAT.configure_slave(master, slave2, %{})
 
     # Register first PDO to fast domain
-    if length(all_pdos) > 0 do
-      fast_pdo = hd(all_pdos)
-      EtherCAT.register_pdos(slave2, [fast_pdo], :default_domain)
-      Logger.info("Registered #{inspect(fast_pdo)} to fast domain (default_domain)")
-    end
+    {fast_handles, remaining_pdos} =
+      if length(all_pdos) > 0 do
+        [fast_pdo | rest] = all_pdos
+        {:ok, handles} = EtherCAT.register_pdos(master, slave2, [fast_pdo], :default_domain)
+        Logger.info("Registered #{inspect(fast_pdo)} to fast domain (default_domain)")
+        {handles, rest}
+      else
+        {[], []}
+      end
 
-    # Register all PDOs to slow domain
-    EtherCAT.register_all_pdos(slave2, :domain2)
-    Logger.info("Registered all PDOs to slow domain (domain2)")
+    # Register remaining PDOs to slow domain
+    slow_handles =
+      if length(remaining_pdos) > 0 do
+        {:ok, handles} = EtherCAT.register_pdos(master, slave2, remaining_pdos, :domain2)
+        Logger.info("Registered #{length(remaining_pdos)} PDOs to slow domain (domain2)")
+        handles
+      else
+        []
+      end
 
     # Activate cyclic mode
     EtherCAT.start_cyclic(master)
 
-    Logger.info("Test complete! Returning master PID for interactive use.")
-    master
+    Logger.info("Test complete! Returning master and PDO handles for interactive use.")
+    {master, fast_handles ++ slow_handles}
   end
 
   @tag :hardware
@@ -91,9 +99,8 @@ defmodule Hardware.MultiDomainTest do
   test "multi-domain with different update rates" do
     Logger.info("Starting multi-domain test...")
 
-    {:ok, master} = EtherCAT.open()
-    :ok = EtherCAT.connect(master)
-    {:ok, [_coupler, io_slave]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, io_slave | _rest]} = EtherCAT.open()
 
     # Create additional domains with different update intervals
     assert {:ok, _ref} = EtherCAT.create_domain(master, :fast_domain, 1)
@@ -102,35 +109,38 @@ defmodule Hardware.MultiDomainTest do
 
     Logger.info("Created 3 additional domains with different update rates")
 
-    # Configure the slave
-    EtherCAT.configure_slave(io_slave, [])
-    all_pdos = EtherCAT.list_pdos(io_slave)
+    # Configure the slave and get available PDOs
+    {:ok, all_pdos} = EtherCAT.configure_slave(master, io_slave, %{})
     Logger.info("Available PDOs: #{inspect(all_pdos)}")
 
     # Distribute PDOs across domains based on criticality
     # (In a real application, you'd choose based on actual requirements)
-    case length(all_pdos) do
-      n when n >= 4 ->
-        # Split PDOs across domains
-        [p1 | rest] = all_pdos
-        [p2 | rest] = rest
-        [p3 | rest] = rest
+    pdo_handles =
+      case length(all_pdos) do
+        n when n >= 4 ->
+          # Split PDOs across domains
+          [p1 | rest] = all_pdos
+          [p2 | rest] = rest
+          [p3 | rest] = rest
 
-        EtherCAT.register_pdos(io_slave, [p1], :fast_domain)
-        EtherCAT.register_pdos(io_slave, [p2], :medium_domain)
-        EtherCAT.register_pdos(io_slave, [p3], :slow_domain)
-        EtherCAT.register_pdos(io_slave, rest, :default_domain)
+          {:ok, h1} = EtherCAT.register_pdos(master, io_slave, [p1], :fast_domain)
+          {:ok, h2} = EtherCAT.register_pdos(master, io_slave, [p2], :medium_domain)
+          {:ok, h3} = EtherCAT.register_pdos(master, io_slave, [p3], :slow_domain)
+          {:ok, h4} = EtherCAT.register_pdos(master, io_slave, rest, :default_domain)
 
-        Logger.info("Distributed PDOs across 4 domains")
+          Logger.info("Distributed PDOs across 4 domains")
+          h1 ++ h2 ++ h3 ++ h4
 
-      n when n > 0 ->
-        # Not enough PDOs, just use default domain
-        EtherCAT.register_all_pdos(io_slave, :default_domain)
-        Logger.info("Using default domain only (not enough PDOs to split)")
+        n when n > 0 ->
+          # Not enough PDOs, just use default domain
+          {:ok, handles} = EtherCAT.register_pdos(master, io_slave, all_pdos, :default_domain)
+          Logger.info("Using default domain only (not enough PDOs to split)")
+          handles
 
-      _ ->
-        Logger.warning("No PDOs available!")
-    end
+        _ ->
+          Logger.warning("No PDOs available!")
+          []
+      end
 
     # Activate cyclic mode
     EtherCAT.start_cyclic(master)
@@ -139,22 +149,22 @@ defmodule Hardware.MultiDomainTest do
     :timer.sleep(2000)
 
     # Verify domains are operational by checking intervals
-    assert 1 = EtherCAT.get_domain_interval(:default_domain)
-    assert 1 = EtherCAT.get_domain_interval(:fast_domain)
-    assert 10 = EtherCAT.get_domain_interval(:medium_domain)
-    assert 100 = EtherCAT.get_domain_interval(:slow_domain)
+    assert {:ok, 1} = EtherCAT.get_domain_interval(master, :default_domain)
+    assert {:ok, 1} = EtherCAT.get_domain_interval(master, :fast_domain)
+    assert {:ok, 10} = EtherCAT.get_domain_interval(master, :medium_domain)
+    assert {:ok, 100} = EtherCAT.get_domain_interval(master, :slow_domain)
 
     Logger.info("All domains configured correctly with expected intervals")
 
-    # Read some values to verify operation
-    if length(all_pdos) > 0 do
-      pdo = hd(all_pdos)
-      assert {:ok, _value} = EtherCAT.read(io_slave, pdo)
+    # Read some values to verify operation using PDO handles
+    if length(pdo_handles) > 0 do
+      first_handle = hd(pdo_handles)
+      assert {:ok, _value} = EtherCAT.read(first_handle)
       Logger.info("Successfully read PDO value from multi-domain setup")
     end
 
-    # Cleanup
-    GenServer.stop(master, :normal)
+    # Cleanup (blocks until master is fully released)
+    EtherCAT.close(master)
 
     Logger.info("Test passed!")
   end
