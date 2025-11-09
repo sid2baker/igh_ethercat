@@ -120,11 +120,11 @@ defmodule EtherCAT.Slave.Driver do
   @doc """
   Configure the driver with device-specific settings.
 
-  Called when a slave is being configured. The driver receives the slave PID
-  which can be used to call `EtherCAT.Slave.config_sdo/4` for SDO configuration.
+  Called when a slave is being configured. The driver receives a function
+  to call for SDO configuration.
 
   ## Parameters
-  - `slave` - The slave process PID (use for calling Slave.config_sdo/4)
+  - `config_sdo` - Function to configure SDOs: `(index, subindex, data) -> :ok | {:error, reason}`
   - `state` - Current driver state
   - `config` - Configuration map passed from user code
 
@@ -134,16 +134,21 @@ defmodule EtherCAT.Slave.Driver do
 
   ## Example
 
-      def configure(slave, state, config) do
+      def configure(config_sdo, state, config) do
         # Configure SDO parameters
         limit = Map.get(config, :temperature_limit, 1000)
         data = <<limit::little-signed-16>>
-        :ok = Slave.config_sdo(slave, 0x8000, 0x13, data)
+        :ok = config_sdo.(0x8000, 0x13, data)
 
         {:ok, Map.put(state, :configured, true)}
       end
   """
-  @callback configure(slave :: pid(), state :: state(), config :: map()) ::
+  @callback configure(
+              config_sdo :: (0x0000..0xFFFF, 0x00..0xFF, binary() ->
+                               :ok | {:error, term()}),
+              state :: state(),
+              config :: map()
+            ) ::
               {:ok, state()} | {:error, term()}
 
   @doc """

@@ -41,7 +41,7 @@ defmodule EtherCAT.Drivers.Generic do
   use EtherCAT.Slave.Driver
 
   @impl true
-  def configure(_slave, state, _config) when is_map(state) do
+  def configure(_config_sdo, state, _config) when is_map(state) do
     {:ok, state}
   end
 

@@ -507,8 +507,17 @@ defmodule EtherCAT.Slave do
 
   @impl true
   def handle_call({:configure, config}, _from, state) do
-    # Pass slave PID to driver so it can call Slave.config_sdo/4
-    {:ok, driver_state} = state.driver.configure(self(), state.driver_state, config)
+    # Create a config_sdo function that drivers can call
+    config_sdo_fn = fn sdo_index, sdo_subindex, data ->
+      Master.slave_operation(
+        state.master,
+        state.position,
+        :config_sdo,
+        [state.slave_config, sdo_index, sdo_subindex, data]
+      )
+    end
+
+    {:ok, driver_state} = state.driver.configure(config_sdo_fn, state.driver_state, config)
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 
