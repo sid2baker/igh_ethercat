@@ -311,6 +311,39 @@ defmodule EtherCAT.Slave do
     GenServer.call(slave, :lock)
   end
 
+  @doc """
+  Configure an SDO (Service Data Object) value on the slave.
+
+  This function should be called from within a driver's `configure/2` callback
+  to set SDO parameters before the master is activated.
+
+  ## Parameters
+  - `slave` - The slave process PID (passed to driver configure callback)
+  - `sdo_index` - SDO index (0x0000-0xFFFF)
+  - `sdo_subindex` - SDO subindex (0x00-0xFF)
+  - `data` - Binary data to write
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` on failure
+
+  ## Example
+
+      # In driver configure/2 callback
+      def configure(slave, config) do
+        # Configure temperature limit (int16 value)
+        limit = Map.get(config, :limit1, 1000)
+        data = <<limit::little-signed-16>>
+        :ok = Slave.config_sdo(slave, 0x8000, 0x13, data)
+
+        {:ok, %{configured: true}}
+      end
+  """
+  @spec config_sdo(pid(), 0x0000..0xFFFF, 0x00..0xFF, binary()) :: :ok | {:error, term()}
+  def config_sdo(slave, sdo_index, sdo_subindex, data) when is_binary(data) do
+    GenServer.call(slave, {:config_sdo, sdo_index, sdo_subindex, data})
+  end
+
   # Internal/Advanced API
 
   @doc """
@@ -474,15 +507,8 @@ defmodule EtherCAT.Slave do
 
   @impl true
   def handle_call({:configure, config}, _from, state) do
-    # Pass context needed for SDO configuration
-    context = %{
-      master: state.master,
-      position: state.position,
-      slave_config: state.slave_config
-    }
-
-    config_with_context = Map.merge(config, context)
-    {:ok, driver_state} = state.driver.configure(state.driver_state, config_with_context)
+    # Pass slave PID to driver so it can call Slave.config_sdo/4
+    {:ok, driver_state} = state.driver.configure(self(), state.driver_state, config)
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 
@@ -565,6 +591,31 @@ defmodule EtherCAT.Slave do
     end
 
     {:reply, :ok, state}
+  end
+
+  # SDO configuration - reject when locked
+  def handle_call(
+        {:config_sdo, _sdo_index, _sdo_subindex, _data},
+        _from,
+        %{locked?: true} = state
+      ) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot configure SDOs after master activation. " <>
+         "SDO configuration requires restarting the master."}}, state}
+  end
+
+  def handle_call({:config_sdo, sdo_index, sdo_subindex, data}, _from, state) do
+    result =
+      Master.slave_operation(
+        state.master,
+        state.position,
+        :config_sdo,
+        [state.slave_config, sdo_index, sdo_subindex, data]
+      )
+
+    {:reply, result, state}
   end
 
   # PDO registration - reject when locked

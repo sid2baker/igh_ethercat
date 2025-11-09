@@ -70,11 +70,11 @@ defmodule EtherCAT.Drivers.EL3202 do
   require Logger
 
   @impl true
-  def configure(state, config) do
+  def configure(slave, state, config) do
     Logger.info("Configuring EL3202 RTD input terminal")
 
-    with :ok <- configure_channel_1(state, config),
-         :ok <- configure_channel_2(state, config) do
+    with :ok <- configure_channel_1(slave, config),
+         :ok <- configure_channel_2(slave, config) do
       {:ok, Map.put(state, :configured, true)}
     end
   end
@@ -215,12 +215,10 @@ defmodule EtherCAT.Drivers.EL3202 do
   # Private Configuration Helpers
   # ============================================================================
 
-  defp configure_channel_1(_state, config) do
-    %{master: master, position: position, slave_config: slave_config} = config
-
-    with :ok <- maybe_configure_limit1_ch1(master, position, slave_config, config),
-         :ok <- maybe_configure_limit2_ch1(master, position, slave_config, config),
-         :ok <- maybe_configure_filter_ch1(master, position, slave_config, config) do
+  defp configure_channel_1(slave, config) do
+    with :ok <- maybe_configure_limit1_ch1(slave, config),
+         :ok <- maybe_configure_limit2_ch1(slave, config),
+         :ok <- maybe_configure_filter_ch1(slave, config) do
       Logger.debug("Channel 1 configured successfully")
       :ok
     else
@@ -230,12 +228,10 @@ defmodule EtherCAT.Drivers.EL3202 do
     end
   end
 
-  defp configure_channel_2(_state, config) do
-    %{master: master, position: position, slave_config: slave_config} = config
-
-    with :ok <- maybe_configure_limit1_ch2(master, position, slave_config, config),
-         :ok <- maybe_configure_limit2_ch2(master, position, slave_config, config),
-         :ok <- maybe_configure_filter_ch2(master, position, slave_config, config) do
+  defp configure_channel_2(slave, config) do
+    with :ok <- maybe_configure_limit1_ch2(slave, config),
+         :ok <- maybe_configure_limit2_ch2(slave, config),
+         :ok <- maybe_configure_filter_ch2(slave, config) do
       Logger.debug("Channel 2 configured successfully")
       :ok
     else
@@ -246,14 +242,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 limit 1 configuration (SDO 0x8000:0x13)
-  defp maybe_configure_limit1_ch1(master, position, slave_config, config) do
+  defp maybe_configure_limit1_ch1(slave, config) do
     case {Map.get(config, :ch1_limit1), Map.get(config, :ch1_enable_limit1, false)} do
       {nil, _} ->
         :ok
 
       {limit1, enable?} when is_integer(limit1) ->
-        with :ok <- configure_sdo16(master, position, slave_config, 0x8000, 0x13, limit1),
-             :ok <- configure_sdo_bit(master, position, slave_config, 0x8000, 0x07, enable?) do
+        with :ok <- EtherCAT.Slave.config_sdo(slave, 0x8000, 0x13, <<limit1::little-signed-16>>),
+             :ok <- config_sdo_bool(slave, 0x8000, 0x07, enable?) do
           Logger.debug("Ch1 Limit1 configured: #{limit1} (enabled: #{enable?})")
           :ok
         end
@@ -264,14 +260,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 limit 2 configuration (SDO 0x8000:0x14)
-  defp maybe_configure_limit2_ch1(master, position, slave_config, config) do
+  defp maybe_configure_limit2_ch1(slave, config) do
     case {Map.get(config, :ch1_limit2), Map.get(config, :ch1_enable_limit2, false)} do
       {nil, _} ->
         :ok
 
       {limit2, enable?} when is_integer(limit2) ->
-        with :ok <- configure_sdo16(master, position, slave_config, 0x8000, 0x14, limit2),
-             :ok <- configure_sdo_bit(master, position, slave_config, 0x8000, 0x08, enable?) do
+        with :ok <- EtherCAT.Slave.config_sdo(slave, 0x8000, 0x14, <<limit2::little-signed-16>>),
+             :ok <- config_sdo_bool(slave, 0x8000, 0x08, enable?) do
           Logger.debug("Ch1 Limit2 configured: #{limit2} (enabled: #{enable?})")
           :ok
         end
@@ -282,27 +278,26 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 filter configuration (SDO 0x8000:0x15)
-  defp maybe_configure_filter_ch1(master, position, slave_config, config) do
+  defp maybe_configure_filter_ch1(slave, config) do
     enable_filter = Map.get(config, :ch1_enable_filter, true)
     filter_settings = Map.get(config, :ch1_filter_settings, 10)
 
-    with :ok <- configure_sdo_bit(master, position, slave_config, 0x8000, 0x06, enable_filter),
-         :ok <-
-           configure_sdo16(master, position, slave_config, 0x8000, 0x15, filter_settings) do
+    with :ok <- config_sdo_bool(slave, 0x8000, 0x06, enable_filter),
+         :ok <- EtherCAT.Slave.config_sdo(slave, 0x8000, 0x15, <<filter_settings::little-16>>) do
       Logger.debug("Ch1 Filter configured: #{filter_settings} (enabled: #{enable_filter})")
       :ok
     end
   end
 
   # Channel 2 limit 1 configuration (SDO 0x8010:0x13)
-  defp maybe_configure_limit1_ch2(master, position, slave_config, config) do
+  defp maybe_configure_limit1_ch2(slave, config) do
     case {Map.get(config, :ch2_limit1), Map.get(config, :ch2_enable_limit1, false)} do
       {nil, _} ->
         :ok
 
       {limit1, enable?} when is_integer(limit1) ->
-        with :ok <- configure_sdo16(master, position, slave_config, 0x8010, 0x13, limit1),
-             :ok <- configure_sdo_bit(master, position, slave_config, 0x8010, 0x07, enable?) do
+        with :ok <- EtherCAT.Slave.config_sdo(slave, 0x8010, 0x13, <<limit1::little-signed-16>>),
+             :ok <- config_sdo_bool(slave, 0x8010, 0x07, enable?) do
           Logger.debug("Ch2 Limit1 configured: #{limit1} (enabled: #{enable?})")
           :ok
         end
@@ -313,14 +308,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 2 limit 2 configuration (SDO 0x8010:0x14)
-  defp maybe_configure_limit2_ch2(master, position, slave_config, config) do
+  defp maybe_configure_limit2_ch2(slave, config) do
     case {Map.get(config, :ch2_limit2), Map.get(config, :ch2_enable_limit2, false)} do
       {nil, _} ->
         :ok
 
       {limit2, enable?} when is_integer(limit2) ->
-        with :ok <- configure_sdo16(master, position, slave_config, 0x8010, 0x14, limit2),
-             :ok <- configure_sdo_bit(master, position, slave_config, 0x8010, 0x08, enable?) do
+        with :ok <- EtherCAT.Slave.config_sdo(slave, 0x8010, 0x14, <<limit2::little-signed-16>>),
+             :ok <- config_sdo_bool(slave, 0x8010, 0x08, enable?) do
           Logger.debug("Ch2 Limit2 configured: #{limit2} (enabled: #{enable?})")
           :ok
         end
@@ -331,43 +326,23 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 2 filter configuration (SDO 0x8010:0x15)
-  defp maybe_configure_filter_ch2(master, position, slave_config, config) do
+  defp maybe_configure_filter_ch2(slave, config) do
     enable_filter = Map.get(config, :ch2_enable_filter, true)
     filter_settings = Map.get(config, :ch2_filter_settings, 10)
 
-    with :ok <- configure_sdo_bit(master, position, slave_config, 0x8010, 0x06, enable_filter),
-         :ok <-
-           configure_sdo16(master, position, slave_config, 0x8010, 0x15, filter_settings) do
+    with :ok <- config_sdo_bool(slave, 0x8010, 0x06, enable_filter),
+         :ok <- EtherCAT.Slave.config_sdo(slave, 0x8010, 0x15, <<filter_settings::little-16>>) do
       Logger.debug("Ch2 Filter configured: #{filter_settings} (enabled: #{enable_filter})")
       :ok
     end
   end
 
   # ============================================================================
-  # SDO Configuration Wrappers (calling through Master)
+  # SDO Configuration Helpers
   # ============================================================================
 
-  defp configure_sdo16(master, position, slave_config, sdo_index, sdo_subindex, value)
-       when is_integer(value) do
-    data = <<value::little-signed-16>>
-
-    EtherCAT.Master.slave_operation(
-      master,
-      position,
-      :config_sdo,
-      [slave_config, sdo_index, sdo_subindex, data]
-    )
-  end
-
-  defp configure_sdo_bit(master, position, slave_config, sdo_index, sdo_subindex, value)
-       when is_boolean(value) do
+  defp config_sdo_bool(slave, sdo_index, sdo_subindex, value) when is_boolean(value) do
     data = if value, do: <<1::8>>, else: <<0::8>>
-
-    EtherCAT.Master.slave_operation(
-      master,
-      position,
-      :config_sdo,
-      [slave_config, sdo_index, sdo_subindex, data]
-    )
+    EtherCAT.Slave.config_sdo(slave, sdo_index, sdo_subindex, data)
   end
 end
