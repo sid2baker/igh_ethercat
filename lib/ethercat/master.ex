@@ -572,6 +572,11 @@ defmodule EtherCAT.Master do
       Domain.store_and_lock_entries(domain, registered_entries)
     end)
 
+    # Lock all slaves to prevent further configuration changes
+    Enum.each(data.slaves, fn slave ->
+      Slave.lock(slave)
+    end)
+
     {:next_state, :operational, data}
   end
 
