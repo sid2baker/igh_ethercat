@@ -1,5 +1,9 @@
 # SDO API Research & Slave.configure/2 Design
 
+> **⚠️ ARCHITECTURE UPDATED**: This design has been superseded by the driver-based approach documented in `SDO_IMPLEMENTATION_PLAN.md`.
+>
+> **Key Change**: Instead of core library schemas, SDO configuration now happens in device drivers via the existing `Driver.configure/2` callback. This document remains for reference on SDO API research and verification findings.
+
 ## Executive Summary
 
 This document presents research findings on the IgH EtherCAT Master SDO (Service Data Object) API and proposes a design for a high-level `Slave.configure/2` function that enables pre-activation configuration of EtherCAT slaves via SDO operations.
