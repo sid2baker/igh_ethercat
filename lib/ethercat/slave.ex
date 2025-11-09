@@ -165,46 +165,6 @@ defmodule EtherCAT.Slave do
   end
 
   @doc """
-  Creates a new slave process for managing an EtherCAT device.
-
-  This is a legacy function maintained for backward compatibility.
-  Prefer using `start_link/5` for proper supervision.
-
-  ## Parameters
-  - `master` - The master process PID
-  - `position` - The slave's position on the bus (0-based)
-  - `driver` - The driver module implementing `EtherCAT.Slave.Driver`
-  - `slave_config` - The slave configuration reference from the NIF
-  - `sync_count` - Number of sync managers available on the device
-
-  ## Returns
-  - `{:ok, pid}` - The slave process PID
-
-  ## Example
-
-      {:ok, slave} = Slave.create(master, 1, EtherCAT.Drivers.Generic, config, 4)
-  """
-  @spec create(pid(), non_neg_integer(), module(), reference(), non_neg_integer()) ::
-          {:ok, pid()}
-  def create(master, position, driver, slave_config, sync_count) do
-    # Use start_link for proper supervision
-    case start_link(
-           master: master,
-           position: position,
-           driver: driver,
-           slave_config: slave_config,
-           sync_count: sync_count
-         ) do
-      {:ok, pid} ->
-        Process.monitor(pid)
-        {:ok, pid}
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
   Changes the driver for an existing slave.
 
   This recreates the slave configuration with the new driver. Should only be
@@ -356,17 +316,6 @@ defmodule EtherCAT.Slave do
     register_pdos(slave, all_pdos, domain)
   end
 
-  @doc """
-  Registers PDO entries to a domain for cyclic data exchange.
-
-  Low-level function for registering specific PDO entries. Most users should
-  use `register_pdos/3` instead, which handles configuration automatically.
-  """
-  @spec register_pdo_entries(pid(), domain(), map()) :: :ok
-  def register_pdo_entries(slave, domain, entries) do
-    GenServer.call(slave, {:register_pdo_entries, domain, entries})
-  end
-
   # Operational API (called after Master activation)
 
   @doc """
@@ -455,14 +404,41 @@ defmodule EtherCAT.Slave do
     GenServer.call(slave, {:watch_pdo, name, pid})
   end
 
-  # Internal/Legacy API
+  @doc """
+  Unsubscribes a process from receiving notifications when a PDO value changes.
 
-  def get_slave_config(slave) do
-    GenServer.call(slave, {:get_slave_config})
+  Removes the subscription previously created with `watch_pdo/3`.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - PDO name to stop watching
+  - `pid` - Process to remove from notifications (default: calling process)
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if PDO not found or not registered
+
+  ## Example
+
+      Slave.watch_pdo(slave, :temperature)
+      # ... receive some notifications ...
+      Slave.unwatch_pdo(slave, :temperature)
+  """
+  @spec unwatch_pdo(pid(), name(), pid()) :: :ok | {:error, term()}
+  def unwatch_pdo(slave, name, pid \\ self()) do
+    GenServer.call(slave, {:unwatch_pdo, name, pid})
   end
 
-  def subscribe_all(slave, domain \\ :default_domain) do
-    GenServer.call(slave, {:subscribe_all, domain})
+  # Internal/Advanced API
+
+  @doc """
+  Returns the slave configuration NIF reference.
+
+  This is an advanced function used for direct NIF access. Most users
+  should not need to call this directly.
+  """
+  def get_slave_config(slave) do
+    GenServer.call(slave, {:get_slave_config})
   end
 
   @impl true
@@ -658,23 +634,46 @@ defmodule EtherCAT.Slave do
   end
 
   def handle_call({:register_pdos, names, domain}, _from, state) do
-    sync_managers = build_sync_manager_config(names, state)
-    Logger.debug("Sync managers to configure: #{inspect(sync_managers)}")
-
-    configured_entries = configure_and_register_pdos(sync_managers, state, domain)
-    Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
-
-    # Map unique names to domain for tracking registrations
-    pdo_registrations =
-      configured_entries
-      |> Enum.map(fn {name, _entry, _direction} ->
+    # Check if any PDO is already registered to a different domain
+    conflicts =
+      Enum.filter(names, fn name ->
         unique_name = "slave_#{state.position}:#{name}"
-        {unique_name, domain}
-      end)
-      |> Map.new()
-      |> Map.merge(state.pdo_registrations)
 
-    {:reply, :ok, %{state | pdo_registrations: pdo_registrations}}
+        case state.pdo_registrations[unique_name] do
+          nil -> false
+          ^domain -> false
+          other_domain -> {name, other_domain}
+        end
+      end)
+
+    if conflicts != [] do
+      # Return error with details about which PDOs are already registered
+      conflict_details =
+        Enum.map(conflicts, fn
+          {name, other_domain} -> {name, other_domain}
+          name -> {name, state.pdo_registrations["slave_#{state.position}:#{name}"]}
+        end)
+
+      {:reply, {:error, {:pdo_already_registered, conflict_details}}, state}
+    else
+      sync_managers = build_sync_manager_config(names, state)
+      Logger.debug("Sync managers to configure: #{inspect(sync_managers)}")
+
+      configured_entries = configure_and_register_pdos(sync_managers, state, domain)
+      Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
+
+      # Map unique names to domain for tracking registrations
+      pdo_registrations =
+        configured_entries
+        |> Enum.map(fn {name, _entry, _direction} ->
+          unique_name = "slave_#{state.position}:#{name}"
+          {unique_name, domain}
+        end)
+        |> Map.new()
+        |> Map.merge(state.pdo_registrations)
+
+      {:reply, :ok, %{state | pdo_registrations: pdo_registrations}}
+    end
   end
 
   # Operational API handlers
@@ -717,6 +716,20 @@ defmodule EtherCAT.Slave do
       domain_name when is_atom(domain_name) ->
         # Call Master to subscribe (Master routes to Domain)
         result = Master.domain_subscribe(state.master, domain_name, pid, unique_name)
+        {:reply, result, state}
+
+      nil ->
+        {:reply, {:error, {:pdo_not_registered, name}}, state}
+    end
+  end
+
+  def handle_call({:unwatch_pdo, name, pid}, _from, state) do
+    unique_name = "slave_#{state.position}:#{name}"
+
+    case state.pdo_registrations[unique_name] do
+      domain_name when is_atom(domain_name) ->
+        # Call Master to unsubscribe (Master routes to Domain)
+        result = Master.domain_unsubscribe(state.master, domain_name, pid, unique_name)
         {:reply, result, state}
 
       nil ->

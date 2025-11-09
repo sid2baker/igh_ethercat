@@ -222,6 +222,12 @@ defmodule EtherCAT.Domain do
     GenServer.call(domain, {:subscribe, pid, name})
   end
 
+  @doc false
+  @spec unsubscribe(GenServer.server(), pid(), name()) :: :ok
+  def unsubscribe(domain, pid, name) do
+    GenServer.call(domain, {:unsubscribe, pid, name})
+  end
+
   # GenServer callbacks
 
   @impl true
@@ -300,6 +306,30 @@ defmodule EtherCAT.Domain do
 
     Logger.debug("Subscribed #{inspect(pid)} to #{name}")
     Logger.debug("Total subscribers: #{map_size(subscribers)}")
+
+    {:reply, :ok, %{state | subscribers: subscribers}}
+  end
+
+  @impl true
+  def handle_call({:unsubscribe, pid, name}, _from, state) do
+    # Remove from subscribers
+    subscribers =
+      case state.subscribers[name] do
+        nil ->
+          state.subscribers
+
+        pids ->
+          updated_pids = MapSet.delete(pids, pid)
+
+          # Remove entry entirely if no subscribers left
+          if MapSet.size(updated_pids) == 0 do
+            Map.delete(state.subscribers, name)
+          else
+            Map.put(state.subscribers, name, updated_pids)
+          end
+      end
+
+    Logger.debug("Unsubscribed #{inspect(pid)} from #{name}")
 
     {:reply, :ok, %{state | subscribers: subscribers}}
   end

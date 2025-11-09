@@ -1,64 +1,71 @@
 defmodule EtherCAT do
   @moduledoc """
-  EtherCAT master implementation using the IgH EtherCAT Master for Linux.
+  Simplified EtherCAT master implementation using the IgH EtherCAT Master for Linux.
 
   EtherCAT (Ethernet for Control Automation Technology) is a high-performance,
   deterministic industrial Ethernet protocol designed for real-time automation
   and motion control applications.
 
-  This library provides an idiomatic Elixir interface to the IgH EtherCAT Master,
+  This library provides a simplified, shallow Elixir interface to the IgH EtherCAT Master,
   enabling real-time industrial I/O from the BEAM VM.
 
-  ## Core Modules
+  ## Simplified API
 
-  - `EtherCAT.Master` - State machine managing network lifecycle and coordination
-  - `EtherCAT.Slave` - Individual slave device processes with driver-based configuration
-  - `EtherCAT.Domain` - Process data domains for multi-rate cyclic communication
-  - `EtherCAT.Slave.Driver` - Pluggable behavior for device-specific drivers
+  The API is designed to be straightforward with minimal concepts:
 
-  ## Architecture
-
-  All NIF communication is routed through the Master process to ensure thread-safe
-  access to the underlying C library. This design prevents race conditions while
-  maintaining OTP supervision and fault tolerance principles.
-
-  ```
-  EtherCAT.Master (GenStatem)
-    ├─ EtherCAT.Slave (GenServer) - per device
-    │   └─ Driver (behaviour implementation)
-    └─ EtherCAT.Domain (GenServer) - per data group
-        └─ Subscribers (GenServer) - change notifications
-  ```
+  1. **Connection** - Open connection to master, auto-connect, and discover slaves
+  2. **Configuration** - Configure slaves and register PDOs to domains
+  3. **Operation** - Start cyclic communication and perform I/O
+  4. **Cleanup** - Close and cleanup resources
 
   ## Quick Start
 
-      # Open a connection to the EtherCAT master
-      {:ok, master} = EtherCAT.open(update_interval: 1000)
-      :ok = EtherCAT.connect(master)
+      # Open connection - auto-connects and returns slaves
+      {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
 
-      # Discover slaves on the bus
-      {:ok, slaves} = EtherCAT.list_slaves(master)
-
-      # Configure and register PDOs
+      # Configure slaves and register PDOs
       [_coupler, input, output] = slaves
-      EtherCAT.configure_slave(input, [])
-      EtherCAT.register_all_pdos(input, :default_domain)
-      EtherCAT.configure_slave(output, [])
-      EtherCAT.register_all_pdos(output, :default_domain)
+      {:ok, input_pdos} = EtherCAT.configure_slave(master, input, %{})
+      {:ok, output_pdos} = EtherCAT.configure_slave(master, output, %{})
 
-      # Activate cyclic communication
-      EtherCAT.start_cyclic(master)
+      {:ok, input_names} = EtherCAT.register_pdos(master, input, input_pdos)
+      {:ok, output_names} = EtherCAT.register_pdos(master, output, output_pdos)
 
-      # Read/write process data
-      EtherCAT.write(output, :output1, true)
-      {:ok, value} = EtherCAT.read(input, :input1)
+      # Start cyclic communication
+      :ok = EtherCAT.start_cyclic(master)
+
+      # Perform I/O using unique PDO names
+      [first_output | _] = output_names
+      :ok = EtherCAT.write(master, first_output, true)
+
+      [first_input | _] = input_names
+      {:ok, value} = EtherCAT.read(master, first_input)
 
       # Watch for changes
-      EtherCAT.watch(input, :input1)
+      :ok = EtherCAT.watch(master, first_input)
       receive do
-        {:data_changed, :input1, new_value} ->
+        {:data_changed, ^first_input, new_value} ->
           IO.inspect(new_value, label: "Input changed")
       end
+
+      # Cleanup
+      EtherCAT.close(master)
+
+  ## Multi-Domain Support
+
+  For advanced use cases with different timing requirements:
+
+      {:ok, master, slaves} = EtherCAT.open()
+
+      # Create fast domain for critical control
+      {:ok, _fast_domain} = EtherCAT.create_domain(master, :fast_io, 1)
+
+      # Create slow domain for monitoring
+      {:ok, _slow_domain} = EtherCAT.create_domain(master, :monitoring, 100)
+
+      # Register PDOs to specific domains
+      {:ok, _} = EtherCAT.register_pdos(master, slave, [:input1], :fast_io)
+      {:ok, _} = EtherCAT.register_pdos(master, slave, [:input2], :monitoring)
 
   ## Requirements
 
@@ -74,15 +81,15 @@ defmodule EtherCAT do
   """
 
   alias EtherCAT.{Master, Slave, Domain}
+  require Logger
 
-  # Master Operations
+  # Connection Lifecycle
 
   @doc """
-  Opens a connection to the EtherCAT master.
+  Opens a connection to the EtherCAT master, connects to the network, and discovers slaves.
 
-  Initializes a master instance and creates the default domain. The master
-  begins in the `:offline` state and must be connected to the network via
-  `connect/1` before use.
+  This is a convenience function that combines master initialization, network connection,
+  and slave discovery into a single call.
 
   ## Options
   - `:master_index` - The EtherCAT master index (default: 0) - maps to /dev/EtherCATX
@@ -90,57 +97,49 @@ defmodule EtherCAT do
   - `:name` - Registration name (default: `EtherCAT.Master`)
 
   ## Returns
-  - `{:ok, pid}` on success
-  - `{:error, reason}` on failure (e.g., master device not found)
+  - `{:ok, master, [slave_pids]}` - Master PID and list of discovered slave PIDs
+  - `{:error, reason}` on failure
 
   ## Example
 
       # Open with default settings (10ms cycle)
-      {:ok, master} = EtherCAT.open()
+      {:ok, master, slaves} = EtherCAT.open()
 
       # Open with 1ms cycle for faster control loops
-      {:ok, master} = EtherCAT.open(update_interval: 1_000)
+      {:ok, master, slaves} = EtherCAT.open(update_interval: 1_000)
   """
-  @spec open(keyword()) :: {:ok, pid()} | {:error, term()}
-  def open(opts \\ []), do: Master.start_link(opts)
+  @spec open(keyword()) :: {:ok, pid(), [pid()]} | {:error, term()}
+  def open(opts \\ []) do
+    with {:ok, master} <- Master.start_link(opts),
+         :ok <- Master.connect(master),
+         {:ok, slaves} <- Master.sync_slaves(master) do
+      {:ok, master, slaves}
+    end
+  end
 
   @doc """
-  Connects to the EtherCAT network and verifies link status.
+  Closes the master connection and cleans up all resources.
 
-  Transitions the master from `:offline` to `:stale` state if the network
-  link is up. The master will then wait for slaves to respond.
+  This stops the cyclic task, terminates all slave and domain processes,
+  and releases the master resource.
+
+  ## Parameters
+  - `master` - The master process PID
 
   ## Returns
-  - `:ok` if connection successful and link is up
-  - `{:error, :link_down}` if physical link is not established
-  - `{:error, :offline}` if called from the wrong state
+  - `:ok`
 
   ## Example
 
-      :ok = EtherCAT.connect(master)
+      EtherCAT.close(master)
   """
-  @spec connect(GenServer.server()) :: :ok | {:error, term()}
-  defdelegate connect(master), to: Master
+  @spec close(pid()) :: :ok
+  def close(master) do
+    GenServer.stop(master, :normal)
+    :ok
+  end
 
-  @doc """
-  Discovers and synchronizes all slaves on the bus.
-
-  Queries the master for all responding slaves, creates a process for each,
-  and assigns appropriate drivers. The master transitions to `:synced` state.
-
-  Alias for `EtherCAT.Master.sync_slaves/1` with a more intuitive name.
-
-  ## Returns
-  - `{:ok, [slave_pids]}` - List of slave process PIDs in bus order
-  - `{:error, reason}` - If called from wrong state or slaves not responding
-
-  ## Example
-
-      {:ok, slaves} = EtherCAT.list_slaves(master)
-      [coupler, input_terminal, output_terminal] = slaves
-  """
-  @spec list_slaves(GenServer.server()) :: {:ok, [pid()]} | {:error, term()}
-  def list_slaves(master), do: Master.sync_slaves(master)
+  # Domain Management
 
   @doc """
   Creates a new process data domain with independent update interval.
@@ -149,7 +148,7 @@ defmodule EtherCAT do
   enabling efficient multi-rate control loops on a single master.
 
   ## Parameters
-  - `master` - The master process (PID or registered name)
+  - `master` - The master process PID
   - `name` - Unique identifier for the domain (atom)
   - `interval` - Update interval multiplier (in cycles)
 
@@ -165,71 +164,37 @@ defmodule EtherCAT do
       # Slow domain for monitoring (every 100 cycles)
       {:ok, slow} = EtherCAT.create_domain(master, :monitoring, 100)
   """
-  @spec create_domain(GenServer.server(), atom(), pos_integer()) ::
-          {:ok, reference()} | {:error, term()}
-  defdelegate create_domain(master, name, interval), to: Master
+  @spec create_domain(pid(), atom(), pos_integer()) :: {:ok, reference()} | {:error, term()}
+  def create_domain(master, name, interval) do
+    Master.create_domain(master, name, interval)
+  end
+
+  # Slave Configuration
 
   @doc """
-  Activates cyclic mode operation on the master.
-
-  Registers all pending PDO entries, activates the master, and starts the
-  real-time cyclic task. After activation, no further configuration changes
-  are allowed - slaves and domains become locked.
-
-  Alias for `EtherCAT.Master.start_cyclic_mode/1`.
-
-  ## Example
-
-      EtherCAT.start_cyclic(master)
-      # Master now running cyclic communication
-  """
-  @spec start_cyclic(GenServer.server()) :: :ok
-  def start_cyclic(master), do: Master.start_cyclic_mode(master)
-
-  @doc """
-  Alias for `start_cyclic/1`.
-
-  Activates the master and begins real-time cyclic operation.
-  """
-  @spec activate(GenServer.server()) :: :ok
-  def activate(master), do: start_cyclic(master)
-
-  # Slave Operations
-
-  @doc """
-  Applies driver-specific configuration to a slave.
+  Applies driver-specific configuration to a slave and returns available PDOs.
 
   The configuration map is passed to the driver's `configure/2` callback,
   allowing device-specific initialization and setup.
 
   ## Parameters
+  - `master` - The master process PID
   - `slave` - The slave process PID
   - `config` - Configuration map (driver-specific)
 
-  ## Example
-
-      EtherCAT.configure_slave(slave, %{sample_rate: 1000, mode: :continuous})
-  """
-  @spec configure_slave(pid(), map()) :: :ok
-  def configure_slave(slave, config), do: Slave.configure(slave, config)
-
-  @doc """
-  Lists all available PDO names from the slave's driver.
-
-  The returned list depends on the driver implementation:
-  - Generic driver: Auto-discovered names like "pdo_6000:1"
-  - Device-specific drivers: Semantic names like :temperature, :pressure
-
   ## Returns
-  List of PDO identifiers (atoms or strings)
+  - `{:ok, [pdo_names]}` - List of available PDO names from the driver
 
   ## Example
 
-      pdos = EtherCAT.list_pdos(slave)
-      #=> [:input1, :input2, :output1]
+      {:ok, pdos} = EtherCAT.configure_slave(master, slave, %{sample_rate: 1000})
+      # pdos => ["pdo_6000:1", "pdo_6010:1", "pdo_7000:1"]
   """
-  @spec list_pdos(pid()) :: [atom() | String.t()]
-  defdelegate list_pdos(slave), to: Slave
+  @spec configure_slave(pid(), pid(), map()) :: {:ok, list()}
+  def configure_slave(_master, slave, config) do
+    :ok = Slave.configure(slave, config)
+    {:ok, Slave.list_pdos(slave)}
+  end
 
   @doc """
   Registers named PDOs to a domain for cyclic data exchange.
@@ -238,35 +203,81 @@ defmodule EtherCAT do
   driver's configuration, then registers the PDO entries with the specified
   domain for real-time I/O.
 
+  **Important**: A PDO can only be registered to one domain. Attempting to
+  register a PDO to multiple domains will return an error.
+
   ## Parameters
+  - `master` - The master process PID
   - `slave` - The slave process PID
-  - `names` - List of PDO names (from `list_pdos/1`)
+  - `pdo_names` - List of PDO names (from `configure_slave/3`)
   - `domain` - Domain identifier (default: `:default_domain`)
 
+  ## Returns
+  - `{:ok, [unique_pdo_names]}` - List of globally unique PDO identifiers
+  - `{:error, {:pdo_already_registered, conflicts}}` - If PDOs are already registered
+
   ## Example
 
-      EtherCAT.register_pdos(slave, [:input1, :input2], :default_domain)
+      {:ok, unique_names} = EtherCAT.register_pdos(master, slave, ["pdo_6000:1", "pdo_6010:1"])
+      # unique_names => ["slave_1:pdo_6000:1", "slave_1:pdo_6010:1"]
+
+      # Register to custom domain
+      {:ok, names} = EtherCAT.register_pdos(master, slave, ["pdo_7000:1"], :fast_io)
+
+      # Error if trying to register same PDO to different domain
+      {:error, {:pdo_already_registered, _}} =
+        EtherCAT.register_pdos(master, slave, ["pdo_6000:1"], :other_domain)
   """
-  @spec register_pdos(pid(), [Slave.name()], Slave.domain()) :: :ok
-  def register_pdos(slave, names, domain \\ :default_domain),
-    do: Slave.register_pdos(slave, names, domain)
+  @spec register_pdos(pid(), pid(), [Slave.name()], Slave.domain()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def register_pdos(_master, slave, pdo_names, domain \\ :default_domain) do
+    case Slave.register_pdos(slave, pdo_names, domain) do
+      :ok ->
+        # Get the slave position to construct unique names
+        position = get_slave_position(slave)
+
+        unique_names =
+          Enum.map(pdo_names, fn name ->
+            "slave_#{position}:#{name}"
+          end)
+
+        {:ok, unique_names}
+
+      error ->
+        error
+    end
+  end
+
+  # Runtime I/O Operations
 
   @doc """
-  Convenience function to register all available PDOs to a domain.
+  Reads the current value of a PDO input.
 
-  Equivalent to calling `register_pdos(slave, list_pdos(slave), domain)`.
+  Reads the most recent value received from the slave during cyclic exchange.
+  The PDO must have been registered before the master entered operational mode.
+
+  ## Parameters
+  - `master` - The master process PID
+  - `unique_pdo` - Globally unique PDO name (from `register_pdos/4`)
+
+  ## Returns
+  - `{:ok, value}` on success
+  - `{:error, reason}` if PDO not found or not registered
 
   ## Example
 
-      # Register all PDOs to the default domain
-      EtherCAT.register_all_pdos(slave)
-
-      # Register all PDOs to a custom domain
-      EtherCAT.register_all_pdos(slave, :slow_domain)
+      {:ok, value} = EtherCAT.read(master, "slave_1:pdo_6000:1")
   """
-  @spec register_all_pdos(pid(), Slave.domain()) :: :ok
-  def register_all_pdos(slave, domain \\ :default_domain),
-    do: Slave.register_all_pdos(slave, domain)
+  @spec read(pid(), String.t()) :: {:ok, term()} | {:error, term()}
+  def read(master, unique_pdo) do
+    case parse_unique_pdo(master, unique_pdo) do
+      {:ok, slave, pdo_name} ->
+        Slave.get_pdo_value(slave, pdo_name)
+
+      error ->
+        error
+    end
+  end
 
   @doc """
   Writes a value to a PDO output.
@@ -276,8 +287,8 @@ defmodule EtherCAT do
   entered operational mode.
 
   ## Parameters
-  - `slave` - The slave process PID
-  - `pdo` - PDO name (as returned by `list_pdos/1`)
+  - `master` - The master process PID
+  - `unique_pdo` - Globally unique PDO name (from `register_pdos/4`)
   - `value` - Value to write (type depends on PDO configuration)
 
   ## Returns
@@ -286,48 +297,30 @@ defmodule EtherCAT do
 
   ## Example
 
-      # Write a boolean output
-      EtherCAT.write(slave, :output1, true)
-
-      # Write an integer output
-      EtherCAT.write(slave, "pdo_7010:1", 42)
+      :ok = EtherCAT.write(master, "slave_2:pdo_7000:1", true)
+      :ok = EtherCAT.write(master, "slave_2:pdo_7010:1", 42)
   """
-  @spec write(pid(), Slave.name(), term()) :: :ok | {:error, term()}
-  def write(slave, pdo, value), do: Slave.set_pdo_value(slave, pdo, value)
+  @spec write(pid(), String.t(), term()) :: :ok | {:error, term()}
+  def write(master, unique_pdo, value) do
+    case parse_unique_pdo(master, unique_pdo) do
+      {:ok, slave, pdo_name} ->
+        Slave.set_pdo_value(slave, pdo_name, value)
 
-  @doc """
-  Reads the current value of a PDO input.
-
-  Reads the most recent value received from the slave during cyclic exchange.
-  The PDO must have been registered before the master entered operational mode.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `pdo` - PDO name (as returned by `list_pdos/1`)
-
-  ## Returns
-  - `{:ok, value}` on success
-  - `{:error, reason}` if PDO not found or not registered
-
-  ## Example
-
-      {:ok, temperature} = EtherCAT.read(slave, :temperature)
-      {:ok, input_state} = EtherCAT.read(slave, "pdo_6000:1")
-  """
-  @spec read(pid(), Slave.name()) :: {:ok, term()} | {:error, term()}
-  def read(slave, pdo), do: Slave.get_pdo_value(slave, pdo)
+      error ->
+        error
+    end
+  end
 
   @doc """
   Watches a PDO for changes.
 
-  Subscribes a process to receive notifications when a PDO value changes.
-  The subscriber will receive `{:data_changed, pdo, value}` messages whenever
+  Subscribes the calling process to receive notifications when a PDO value changes.
+  The subscriber will receive `{:data_changed, unique_pdo, value}` messages whenever
   the PDO value changes during cyclic operation.
 
   ## Parameters
-  - `slave` - The slave process PID
-  - `pdo` - PDO name to watch
-  - `pid` - Process to receive notifications (default: calling process)
+  - `master` - The master process PID
+  - `unique_pdo` - Globally unique PDO name (from `register_pdos/4`)
 
   ## Returns
   - `:ok` on success
@@ -335,48 +328,115 @@ defmodule EtherCAT do
 
   ## Example
 
-      # Watch from the calling process
-      EtherCAT.watch(slave, :temperature)
+      :ok = EtherCAT.watch(master, "slave_1:pdo_6000:1")
 
       receive do
-        {:data_changed, :temperature, value} ->
-          IO.puts("Temperature changed to: \#{value}")
+        {:data_changed, "slave_1:pdo_6000:1", value} ->
+          IO.puts("PDO changed to: \#{value}")
       end
-
-      # Watch from another process
-      EtherCAT.watch(slave, :pressure, monitor_pid)
   """
-  @spec watch(pid(), Slave.name(), pid()) :: :ok | {:error, term()}
-  def watch(slave, pdo, pid \\ self()), do: Slave.watch_pdo(slave, pdo, pid)
+  @spec watch(pid(), String.t()) :: :ok | {:error, term()}
+  def watch(master, unique_pdo) do
+    case parse_unique_pdo(master, unique_pdo) do
+      {:ok, slave, pdo_name} ->
+        Slave.watch_pdo(slave, pdo_name, self())
 
-  # Domain Operations
+      error ->
+        error
+    end
+  end
 
   @doc """
-  Returns the domain's NIF reference.
+  Unwatches a PDO to stop receiving change notifications.
 
-  This reference is used internally for domain operations. Most users won't
-  need to call this directly.
-  """
-  @spec get_domain_ref(GenServer.server()) :: reference()
-  def get_domain_ref(domain), do: Domain.get_ref(domain)
+  Unsubscribes the calling process from notifications for the specified PDO.
 
-  @doc """
-  Returns the domain's update interval in microseconds.
+  ## Parameters
+  - `master` - The master process PID
+  - `unique_pdo` - Globally unique PDO name (from `register_pdos/4`)
 
-  The interval determines how often the domain's data is exchanged during
-  cyclic operation.
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if PDO not found or not registered
 
   ## Example
 
-      interval = EtherCAT.get_domain_interval(:default_domain)
-      #=> 1
+      :ok = EtherCAT.watch(master, "slave_1:pdo_6000:1")
+      # ... receive some notifications ...
+      :ok = EtherCAT.unwatch(master, "slave_1:pdo_6000:1")
   """
-  @spec get_domain_interval(GenServer.server()) :: pos_integer()
-  def get_domain_interval(domain), do: Domain.get_interval(domain)
+  @spec unwatch(pid(), String.t()) :: :ok | {:error, term()}
+  def unwatch(master, unique_pdo) do
+    case parse_unique_pdo(master, unique_pdo) do
+      {:ok, slave, pdo_name} ->
+        Slave.unwatch_pdo(slave, pdo_name, self())
 
-  # Advanced Operations
-  # For users who need direct access to the underlying modules:
-  # - EtherCAT.Master.*
-  # - EtherCAT.Slave.*
-  # - EtherCAT.Domain.*
+      error ->
+        error
+    end
+  end
+
+  # Operational Mode
+
+  @doc """
+  Activates cyclic mode operation on the master.
+
+  Registers all pending PDO entries, activates the master, and starts the
+  real-time cyclic task. After activation, no further configuration changes
+  are allowed - slaves and domains become locked.
+
+  ## Parameters
+  - `master` - The master process PID
+
+  ## Returns
+  - `:ok` (async operation)
+
+  ## Example
+
+      EtherCAT.start_cyclic(master)
+      # Master now running cyclic communication
+  """
+  @spec start_cyclic(pid()) :: :ok
+  def start_cyclic(master) do
+    Master.start_cyclic_mode(master)
+  end
+
+  # Private Helpers
+
+  # Parses a unique PDO name into slave PID and PDO name
+  # Format: "slave_<position>:<pdo_name>"
+  defp parse_unique_pdo(master, unique_pdo) do
+    case String.split(unique_pdo, ":", parts: 2) do
+      ["slave_" <> position_str, pdo_name] ->
+        case Integer.parse(position_str) do
+          {position, ""} ->
+            case find_slave_by_position(master, position) do
+              {:ok, slave} -> {:ok, slave, pdo_name}
+              error -> error
+            end
+
+          _ ->
+            {:error, {:invalid_unique_pdo, unique_pdo}}
+        end
+
+      _ ->
+        {:error, {:invalid_unique_pdo, unique_pdo}}
+    end
+  end
+
+  # Finds a slave process by its position using the Registry
+  defp find_slave_by_position(master, position) do
+    case Registry.lookup(EtherCAT.Registry, {:slave, master, position}) do
+      [{slave_pid, _}] -> {:ok, slave_pid}
+      [] -> {:error, {:slave_not_found, position}}
+    end
+  end
+
+  # Gets the position of a slave process using Registry
+  defp get_slave_position(slave_pid) do
+    case Registry.keys(EtherCAT.Registry, slave_pid) do
+      [{:slave, _master, position}] -> position
+      _ -> nil
+    end
+  end
 end

@@ -285,6 +285,11 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:domain_subscribe, domain, pid, name}, timeout)
   end
 
+  @doc false
+  def domain_unsubscribe(master, domain, pid, name, timeout \\ 5000) do
+    :gen_statem.call(master, {:domain_unsubscribe, domain, pid, name}, timeout)
+  end
+
   # Callbacks
   @impl true
   def callback_mode(), do: [:state_functions, :state_enter]
@@ -707,6 +712,11 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, {:domain_subscribe, domain, pid, name}, _data) do
     result = Domain.subscribe(domain, pid, name)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def operational({:call, from}, {:domain_unsubscribe, domain, pid, name}, _data) do
+    result = Domain.unsubscribe(domain, pid, name)
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
