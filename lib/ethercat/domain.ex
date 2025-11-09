@@ -315,23 +315,20 @@ defmodule EtherCAT.Domain do
   end
 
   # Receives cyclic data changes from the NIF with entry names and values
+  # Each notification is sent individually per entry change
   @impl true
-  def handle_info({:data_changed, changes}, state) do
-    Logger.debug("Domain received data_changed with #{length(changes)} changed entries")
+  def handle_info({:data_changed, name, value}, state) do
+    Logger.debug("Entry changed: #{name} = #{inspect(value)}")
 
-    for {name, value} <- changes do
-      Logger.debug("  Entry changed: #{name} = #{inspect(value)}")
+    # Find subscribers by entry name
+    case state.subscribers[name] do
+      pids when is_struct(pids, MapSet) ->
+        Logger.debug("  Notifying #{MapSet.size(pids)} subscribers for #{name}")
+        Enum.each(pids, fn pid -> send(pid, {:data_changed, name, value}) end)
 
-      # Find subscribers by entry name
-      case state.subscribers[name] do
-        pids when is_struct(pids, MapSet) ->
-          Logger.debug("  Notifying #{MapSet.size(pids)} subscribers for #{name}")
-          Enum.each(pids, fn pid -> send(pid, {:data_changed, name, value}) end)
-
-        nil ->
-          # No subscribers for this entry
-          :ok
-      end
+      nil ->
+        # No subscribers for this entry
+        :ok
     end
 
     {:noreply, state}

@@ -25,7 +25,6 @@ defmodule EtherCAT.Nif do
       domain_process: [],
       domain_queue: [],
       get_domain_value_bool: [],
-      set_domain_value_bool: [],
       get_value: [],
       set_value: [],
       domain_set_pid: [],
@@ -213,6 +212,7 @@ defmodule EtherCAT.Nif do
       interval: u32,  // Interval multiplier for cyclic task
       data: []u8,       // Current cycle data (points to ecrt-managed memory)
       state: ecrt.ec_domain_state_t,  // Domain state for change detection
+      mutex: std.Thread.Mutex,  // Protects current_value in entries
 
       pub fn init(domain: *ecrt.ec_domain_t, pid: beam.pid, interval: u32) DomainAccessor {
           return .{
@@ -222,6 +222,7 @@ defmodule EtherCAT.Nif do
               .interval = interval,
               .data = &[_]u8{},       // Will be set in cyclic_task
               .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
+              .mutex = .{},
           };
       }
 
@@ -276,22 +277,6 @@ defmodule EtherCAT.Nif do
 
 
 
-  /// Output event for queuing domain value changes
-  /// Handles arbitrary bit-aligned writes for all primitive types
-  const OutputEvent = struct {
-      domain_ptr: usize,      // Address of domain to match against DomainItem
-      bit_offset: usize,      // Bit offset in domain (same as used in get/set functions)
-      data: [8]u8,            // Raw value bytes (little-endian, right-aligned)
-      bit_length: u8,         // Number of bits (1 for bool, 32 for u32, etc.)
-  };
-
-  /// Global event queue for output writes (single-writer from Elixir, single-reader from cyclic_task)
-  /// Initialized in master_activate, before cyclic_task can run
-  var output_events_mutex: std.Thread.Mutex = .{};
-  var output_events: std.ArrayList(OutputEvent) = undefined;
-
-
-
   // ============================================================================
   // MASTER OPERATIONS
   // ============================================================================
@@ -317,9 +302,6 @@ defmodule EtherCAT.Nif do
   pub fn master_activate(master: MasterResource) !void {
       const result = ecrt.ecrt_master_activate(master.unpack());
       if (result != 0) return MasterError.ActivateError;
-
-      // Initialize output event queue (required before cyclic_task starts)
-      output_events = std.ArrayList(OutputEvent){};
   }
 
   /// Receive frames from the network
@@ -501,31 +483,6 @@ defmodule EtherCAT.Nif do
       }
   }
 
-  /// Set a boolean value in domain data at the specified bit offset
-  /// Appends an event to the queue; cyclic_task will apply it before queue_domains
-  pub fn set_domain_value_bool(domain_accessor: DomainAccessorResource, offset: usize, value: bool) !void {
-      const accessor = domain_accessor.unpack();
-      const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
-
-      if (offset >= domain_size * 8) return DomainError.OutOfBounds;
-
-      // Create event with bool value (1 bit)
-      var event_data: [8]u8 = [_]u8{0} ** 8;
-      event_data[0] = if (value) 1 else 0;
-
-      const event = OutputEvent{
-          .domain_ptr = accessor.domain_ptr,
-          .bit_offset = offset,
-          .data = event_data,
-          .bit_length = 1,
-      };
-
-      // Append to event queue (single writer, so lock is brief)
-      output_events_mutex.lock();
-      defer output_events_mutex.unlock();
-      try output_events.append(beam.allocator, event);
-  }
-
   /// Get the current state of the domain
   pub fn domain_state(domain_accessor: DomainAccessorResource) !beam.term {
       const accessor = domain_accessor.unpack();
@@ -645,8 +602,8 @@ defmodule EtherCAT.Nif do
       };
   }
 
-  /// Set a value in domain data by name
-  /// Appends an event to the queue; cyclic_task will apply it before queue_domains
+  /// Set a value - directly updates the entry's expected value
+  /// The cyclic task will write this value to the domain buffer every cycle
   pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, value: beam.term) !void {
       const accessor = domain_accessor.unpack();
       const entry = accessor.layout.findEntry(name) orelse
@@ -657,59 +614,52 @@ defmodule EtherCAT.Nif do
 
       if (entry.bit_offset >= max_bit_offset) return DomainError.OutOfBounds;
 
-      var event_data: [8]u8 = [_]u8{0} ** 8;
+      var value_data: [8]u8 = [_]u8{0} ** 8;
 
       // Convert the value based on type
       switch (entry.entry_type) {
           .bool => {
               const val = try beam.get(bool, value, .{});
-              event_data[0] = if (val) 1 else 0;
+              value_data[0] = if (val) 1 else 0;
           },
           .uint8 => {
               const val = try beam.get(u8, value, .{});
-              event_data[0] = val;
+              value_data[0] = val;
           },
           .int8 => {
               const val = try beam.get(i8, value, .{});
-              event_data[0] = @bitCast(val);
+              value_data[0] = @bitCast(val);
           },
           .uint16 => {
               const val = try beam.get(u16, value, .{});
-              @memcpy(event_data[0..2], std.mem.asBytes(&val));
+              @memcpy(value_data[0..2], std.mem.asBytes(&val));
           },
           .int16 => {
               const val = try beam.get(i16, value, .{});
-              @memcpy(event_data[0..2], std.mem.asBytes(&val));
+              @memcpy(value_data[0..2], std.mem.asBytes(&val));
           },
           .uint32 => {
               const val = try beam.get(u32, value, .{});
-              @memcpy(event_data[0..4], std.mem.asBytes(&val));
+              @memcpy(value_data[0..4], std.mem.asBytes(&val));
           },
           .int32 => {
               const val = try beam.get(i32, value, .{});
-              @memcpy(event_data[0..4], std.mem.asBytes(&val));
+              @memcpy(value_data[0..4], std.mem.asBytes(&val));
           },
           .uint64 => {
               const val = try beam.get(u64, value, .{});
-              @memcpy(event_data[0..8], std.mem.asBytes(&val));
+              @memcpy(value_data[0..8], std.mem.asBytes(&val));
           },
           .int64 => {
               const val = try beam.get(i64, value, .{});
-              @memcpy(event_data[0..8], std.mem.asBytes(&val));
+              @memcpy(value_data[0..8], std.mem.asBytes(&val));
           },
       }
 
-      const event = OutputEvent{
-          .domain_ptr = accessor.domain_ptr,
-          .bit_offset = entry.bit_offset,
-          .data = event_data,
-          .bit_length = @intCast(entry.bit_length),
-      };
-
-      // Append to event queue
-      output_events_mutex.lock();
-      defer output_events_mutex.unlock();
-      try output_events.append(beam.allocator, event);
+      // Update the expected value in the entry (thread-safe)
+      accessor.mutex.lock();
+      defer accessor.mutex.unlock();
+      accessor.layout.updateEntryValue(entry.bit_offset, value_data);
   }
 
   // ============================================================================
@@ -914,83 +864,48 @@ defmodule EtherCAT.Nif do
                   _ = try beam.send(accessor.pid, .{ .state_changed, new_state.wc_state }, .{});
               }
 
-              // Check each PDO entry for changes - simpler approach
-              // Compare current domain value with stored value for each entry
-              var input_changes = std.ArrayList(beam.term){};
-              defer input_changes.deinit(beam.allocator);
+              // Check each PDO entry for changes (protected by mutex)
+              // For inputs: detect changes and notify immediately
+              // For outputs: always write expected value from set_value
+              accessor.mutex.lock();
+              defer accessor.mutex.unlock();
 
               for (accessor.layout.entries.items) |*entry| {
-                  // Extract current value from domain data into temp buffer
-                  var domain_value: [8]u8 = [_]u8{0} ** 8;
-                  extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
+                  if (entry.direction == .input) {
+                      // Extract current value from domain data into temp buffer
+                      var domain_value: [8]u8 = [_]u8{0} ** 8;
+                      extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
-                  // Compare with stored current_value
-                  const byte_count = (entry.bit_length + 7) / 8;
-                  var changed = false;
-                  var i: usize = 0;
-                  while (i < byte_count and i < 8) : (i += 1) {
-                      if (domain_value[i] != entry.current_value[i]) {
-                          changed = true;
-                          break;
+                      // Compare with stored current_value
+                      const byte_count = (entry.bit_length + 7) / 8;
+                      var changed = false;
+                      var i: usize = 0;
+                      while (i < byte_count and i < 8) : (i += 1) {
+                          if (domain_value[i] != entry.current_value[i]) {
+                              changed = true;
+                              break;
+                          }
                       }
-                  }
 
-                  if (changed) {
-                      if (entry.direction == .input) {
-                          // Input changed: notify and update stored value
+                      if (changed) {
+                          // Input changed: notify immediately and update stored value
                           const value = try extractEntryValue(entry.*, accessor.data);
-                          const change = beam.make(.{ entry.name, value }, .{});
-                          try input_changes.append(beam.allocator, change);
+                          _ = try beam.send(accessor.pid, .{ .data_changed, entry.name, value }, .{});
 
                           // Update stored value
                           entry.current_value = domain_value;
-                      } else {
-                          // Output mismatch: notify (stored value is the expected value set by set_value)
-                          const expected_val = try extractEntryValue(entry.*, &entry.current_value);
-                          const actual_val = try extractEntryValue(entry.*, accessor.data);
-                          _ = try beam.send(accessor.pid, .{ .output_mismatch, entry.name, expected_val, actual_val }, .{});
-
-                          // Update domain data to expected value (re-apply output)
-                          write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
                       }
+                  } else {
+                      // Output: always write expected value from current_value to domain
+                      write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
                   }
-              }
-
-              // Send input change notifications if any
-              if (input_changes.items.len > 0) {
-                  _ = try beam.send(accessor.pid, .{ .data_changed, input_changes.items }, .{});
               }
 
               // Update state for next iteration
               accessor.state = new_state;
           }
 
-          // Step 4: Drain output event queue and apply to domain buffers
-          // This happens AFTER process (which updates inputs) and BEFORE queue (which sends outputs)
-          {
-              output_events_mutex.lock();
-              defer output_events_mutex.unlock();
-
-              for (output_events.items) |event| {
-                  // Find matching domain
-                  for (domain_accessors) |domain_accessor_resource| {
-                      const accessor = domain_accessor_resource.unpack();
-                      if (accessor.domain_ptr == event.domain_ptr) {
-                          // Apply event to domain buffer
-                          write_bits_to_domain(accessor.data, event.bit_offset, &event.data, event.bit_length);
-
-                          // Store expected value in the entry for verification in next cycle
-                          accessor.layout.updateEntryValue(event.bit_offset, event.data);
-                          break;
-                      }
-                  }
-              }
-
-              // Clear event queue after applying all events
-              output_events.clearRetainingCapacity();
-          }
-
-          // Step 5: Check and notify master state changes
+          // Step 4: Check and notify master state changes
           master_state = try do_get_master_state(master);
 
           if (!std.meta.eql(prev_master_state, master_state)) {
@@ -999,7 +914,7 @@ defmodule EtherCAT.Nif do
 
           prev_master_state = master_state;
 
-          // Step 6: Queue domain outputs at configured intervals (prepare outputs to send)
+          // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
           for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
               if (counter % accessor.interval == 0) {
@@ -1007,10 +922,10 @@ defmodule EtherCAT.Nif do
               }
           }
 
-          // Step 7: Send queued frames to network
+          // Step 6: Send queued frames to network
           _ = ecrt.ecrt_master_send(master);
 
-          // Step 8: Deterministic sleep to maintain exact cycle rate
+          // Step 7: Deterministic sleep to maintain exact cycle rate
           next_cycle_time += cycle_period_ns;
           const now = std.time.nanoTimestamp();
           const sleep_ns = next_cycle_time - now;
