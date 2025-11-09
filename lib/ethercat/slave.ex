@@ -266,7 +266,8 @@ defmodule EtherCAT.Slave do
       {:ok, unique_names} = Slave.register_pdos(slave, [:input1, :input2], :default_domain)
       #=> {:ok, ["slave_0:input1", "slave_0:input2"]}
   """
-  @spec register_pdos(pid(), [name()], domain(), timeout()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec register_pdos(pid(), [name()], domain(), timeout()) ::
+          {:ok, [String.t()]} | {:error, term()}
   def register_pdos(slave, names, domain \\ :default_domain, timeout \\ 10_000) do
     GenServer.call(slave, {:register_pdos, names, domain}, timeout)
   end

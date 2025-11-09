@@ -242,7 +242,8 @@ defmodule Hardware.FunctionalValidationTest do
     Logger.info("Resetting output to false...")
     assert :ok = EtherCAT.write(output_pdo, false)
     :timer.sleep(@stabilization_delay)
-    flush_mailbox()  # Flush any notifications from the reset
+    # Flush any notifications from the reset
+    flush_mailbox()
 
     # Test sequence with notification verification
     test_values = [true, false, true, false, true]

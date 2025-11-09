@@ -83,7 +83,8 @@ defmodule Hardware.SelectivePDOTest do
     Logger.info("Registering selected PDOs: #{inspect(selected_pdos)}")
 
     # Register only selected PDOs and get handles
-    {:ok, pdo_handles} = EtherCAT.register_pdos(master, input_slave, selected_pdos, :default_domain)
+    {:ok, pdo_handles} =
+      EtherCAT.register_pdos(master, input_slave, selected_pdos, :default_domain)
 
     # Activate cyclic mode
     EtherCAT.start_cyclic(master)

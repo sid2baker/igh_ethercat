@@ -139,9 +139,10 @@ defmodule EtherCAT do
   def register_pdos(master, slave, pdo_names, domain \\ :default_domain) do
     case Slave.register_pdos(slave, pdo_names, domain) do
       {:ok, unique_names} ->
-        handles = Enum.map(unique_names, fn unique_name ->
-          PDO.new(domain, unique_name, master)
-        end)
+        handles =
+          Enum.map(unique_names, fn unique_name ->
+            PDO.new(domain, unique_name, master)
+          end)
 
         {:ok, handles}
 
@@ -281,5 +282,4 @@ defmodule EtherCAT do
       error -> error
     end
   end
-
 end
