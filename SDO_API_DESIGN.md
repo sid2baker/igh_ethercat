@@ -949,6 +949,235 @@ defp validate_user_cal_gain(value),
 
 ---
 
+### 7.4 Asynchronous Error Handling ⚠️
+
+**Important**: SDO configuration errors are **asynchronous** and may not be detected immediately.
+
+#### Error Detection Timeline
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 1. Slave.configure/2 called                             │
+│    └─► Returns :ok if SDO queued (memory allocated)     │
+│                                                          │
+│ 2. Master.activate/1 called                             │
+│    └─► SDO download begins                              │
+│    └─► Transfer errors may occur here                   │
+│                                                          │
+│ 3. Cyclic operation                                     │
+│    └─► Slave reaches OP state if successful             │
+│    └─► Stays in PREOP/SAFEOP if SDO failed             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**From IgH API Documentation:**
+> "This method has to be called in non-realtime context before ecrt_master_activate(). It returns only allocation errors immediately; SDO transfer errors are reported asynchronously."
+
+#### Example with Error Checking
+
+```elixir
+defmodule MyApp.EthercatSetup do
+  require Logger
+
+  def setup_with_error_checking do
+    {:ok, master} = Master.request(0)
+
+    slave = Master.slave_config(master,
+      alias: 0, position: 0,
+      vendor_id: 0x02, product_code: 0x0C823052
+    )
+
+    # Step 1: Queue configuration (returns :ok if queued)
+    case Slave.configure(slave, ch1_limit1: 1000, ch1_limit2: 2000) do
+      :ok ->
+        Logger.info("SDO configuration queued")
+
+      {:error, reason} ->
+        Logger.error("Failed to queue SDO: #{inspect(reason)}")
+        return {:error, reason}
+    end
+
+    {:ok, domain} = Domain.create(master)
+    {:ok, _pdos} = Slave.register_pdos(slave, domain, [...])
+
+    # Step 2: Activate (SDO transfers happen here)
+    case Master.activate(master) do
+      :ok ->
+        Logger.info("Master activated")
+
+      {:error, reason} ->
+        # Could be SDO transfer failure
+        Logger.error("Activation failed: #{inspect(reason)}")
+        return {:error, reason}
+    end
+
+    # Step 3: Monitor slave state to verify configuration
+    # (Implementation depends on state monitoring API)
+    case wait_for_slave_operational(slave, timeout: 5000) do
+      :ok ->
+        Logger.info("Slave reached OP state - configuration successful")
+        {:ok, master}
+
+      {:error, :timeout} ->
+        state = get_slave_state(slave)
+        Logger.error("Slave stuck in #{state} - possible SDO config error")
+        {:error, :configuration_failed}
+    end
+  end
+end
+```
+
+#### Mitigation Strategies
+
+1. **Monitor slave state** after activation to detect configuration failures
+2. **Use verification mode** (future enhancement) to read back SDO values
+3. **Test configurations** on non-production hardware first
+4. **Log activation errors** and correlate with SDO configuration
+
+---
+
+## 7.5 Advanced Features
+
+### 7.5.1 Raw SDO Configuration (Bypass PDO Restrictions)
+
+While the high-level `Slave.configure/2` API blocks PDO mapping/assignment SDOs (0x1C10-0x1C2F, 0x1600-0x1BFF) to prevent conflicts, **real-world usage shows this is sometimes necessary** for:
+
+- Custom PDO mappings not available in ESI files
+- Dynamic PDO reconfiguration
+- Devices with incomplete/incorrect XML descriptions
+
+**New Low-Level API:**
+
+```elixir
+defmodule Ethercat.Slave.Configuration do
+  @doc """
+  Configure SDO with raw index/subindex (advanced users only).
+
+  ## WARNING
+
+  This function bypasses safety checks. Configuring PDO assignment
+  (0x1C10-0x1C2F) or PDO mapping (0x1600-0x1BFF) objects can conflict
+  with the master's PDO management and cause communication failures.
+
+  Only use this if you fully understand EtherCAT PDO configuration.
+
+  ## Options
+
+  - `allow_pdo_config: boolean` - Set to `true` to allow PDO SDO configuration
+    (default: `false`)
+
+  ## Examples
+
+      # Safe configuration (non-PDO SDO)
+      :ok = Slave.configure_sdo_raw(slave, 0x8000, 0x15, <<0x0A::16-little>>)
+
+      # Advanced: Custom PDO mapping (use with caution!)
+      :ok = Slave.configure_sdo_raw(slave, 0x1C12, 0x00, <<0x00>>,
+                                    allow_pdo_config: true)
+      :ok = Slave.configure_sdo_raw(slave, 0x1C12, 0x01, <<0x04, 0x16::16-little>>,
+                                    allow_pdo_config: true)
+  """
+  @spec configure_sdo_raw(reference(), sdo_index(), sdo_subindex(),
+                          binary(), keyword()) :: :ok | {:error, term()}
+  def configure_sdo_raw(slave_ref, index, subindex, data, opts \\ []) do
+    if is_pdo_sdo?(index) and not Keyword.get(opts, :allow_pdo_config, false) do
+      {:error, {:restricted_sdo, index,
+                "PDO configuration blocked. Use allow_pdo_config: true to override (not recommended). " <>
+                "Consider using Slave.register_pdos/3 instead."}}
+    else
+      NIF.slave_config_sdo(slave_ref, index, subindex, data)
+    end
+  end
+
+  @doc """
+  Configure SDO using type-specific helper (8-bit).
+  """
+  @spec configure_sdo8(reference(), sdo_index(), sdo_subindex(), 0..255, keyword()) ::
+          :ok | {:error, term()}
+  def configure_sdo8(slave_ref, index, subindex, value, opts \\ []) do
+    configure_sdo_raw(slave_ref, index, subindex, <<value::8>>, opts)
+  end
+
+  @doc """
+  Configure SDO using type-specific helper (16-bit, little-endian).
+  """
+  @spec configure_sdo16(reference(), sdo_index(), sdo_subindex(), 0..65535, keyword()) ::
+          :ok | {:error, term()}
+  def configure_sdo16(slave_ref, index, subindex, value, opts \\ []) do
+    configure_sdo_raw(slave_ref, index, subindex, <<value::little-16>>, opts)
+  end
+
+  @doc """
+  Configure SDO using type-specific helper (32-bit, little-endian).
+  """
+  @spec configure_sdo32(reference(), sdo_index(), sdo_subindex(), 0..4_294_967_295, keyword()) ::
+          :ok | {:error, term()}
+  def configure_sdo32(slave_ref, index, subindex, value, opts \\ []) do
+    configure_sdo_raw(slave_ref, index, subindex, <<value::little-32>>, opts)
+  end
+
+  defp is_pdo_sdo?(index) do
+    (index >= 0x1C10 and index <= 0x1C2F) or  # PDO assignment
+    (index >= 0x1600 and index <= 0x17FF) or  # RxPDO mapping
+    (index >= 0x1A00 and index <= 0x1BFF)     # TxPDO mapping
+  end
+end
+```
+
+**Usage Example:**
+
+```elixir
+# Custom PDO mapping for device with incomplete ESI
+slave = Master.slave_config(master, ...)
+
+# Clear existing PDO mapping
+:ok = Slave.configure_sdo8(slave, 0x1A00, 0x00, 0, allow_pdo_config: true)
+
+# Configure new PDO entries
+:ok = Slave.configure_sdo32(slave, 0x1A00, 0x01, 0x60410010, allow_pdo_config: true)
+:ok = Slave.configure_sdo32(slave, 0x1A00, 0x02, 0x60640020, allow_pdo_config: true)
+
+# Set entry count
+:ok = Slave.configure_sdo8(slave, 0x1A00, 0x00, 2, allow_pdo_config: true)
+
+# Assign to sync manager
+:ok = Slave.configure_sdo16(slave, 0x1C13, 0x01, 0x1A00, allow_pdo_config: true)
+```
+
+---
+
+### 7.5.2 Complete Access SDO Support (Future)
+
+Some devices support "Complete Access" mode where all subindices are written in one operation (more efficient).
+
+**Planned API:**
+
+```elixir
+# NIF addition
+@spec slave_config_complete_sdo(reference(), sdo_index(), binary()) ::
+        :ok | {:error, term()}
+def slave_config_complete_sdo(_ref, _index, _data) do
+  :erlang.nif_error(:nif_not_loaded)
+end
+
+# High-level wrapper
+@spec configure_complete(reference(), sdo_index(), map()) :: :ok | {:error, term()}
+def configure_complete(slave_ref, index, subindex_data) do
+  # Encode map of subindex => value into complete access format
+  data = encode_complete_access(subindex_data)
+  NIF.slave_config_complete_sdo(slave_ref, index, data)
+end
+
+# Example usage
+Slave.configure_complete(slave, 0x8000, %{
+  0x01 => <<1>>,        # Enable user scale
+  0x11 => <<100::16>>,  # Offset
+  0x12 => <<1000::32>>  # Gain
+})
+```
+
+---
+
 ## 8. Future Enhancements
 
 ### 8.1 Device Auto-Detection
