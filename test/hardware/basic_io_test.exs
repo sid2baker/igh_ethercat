@@ -41,77 +41,87 @@ defmodule Hardware.BasicIOTest do
   @doc """
   Interactive test function for manual testing in IEx.
 
-  Returns `{master_pid, input_slave_pid, output_slave_pid}` for continued
+  Returns `{master_pid, input_pdo_names, output_pdo_names}` for continued
   experimentation after the function completes.
   """
   def run do
     Logger.info("Starting Basic I/O Test...")
 
-    {:ok, master} = EtherCAT.open(update_interval: 1000)
-    :ok = EtherCAT.connect(master)
-    {:ok, [_coupler, di1, do1]} = EtherCAT.list_slaves(master)
+    # Simplified API: open auto-connects and discovers slaves
+    {:ok, master, [_coupler, di1, do1]} = EtherCAT.open(update_interval: 1000)
 
-    EtherCAT.configure_slave(di1, [])
-    EtherCAT.list_pdos(di1) |> IO.inspect(label: "Input PDOs")
+    # Configure slaves and get available PDOs
+    {:ok, input_pdos} = EtherCAT.configure_slave(master, di1, %{})
+    input_pdos |> IO.inspect(label: "Input PDOs")
 
-    EtherCAT.configure_slave(do1, [])
-    EtherCAT.list_pdos(do1) |> IO.inspect(label: "Output PDOs")
+    {:ok, output_pdos} = EtherCAT.configure_slave(master, do1, %{})
+    output_pdos |> IO.inspect(label: "Output PDOs")
 
-    EtherCAT.register_all_pdos(di1, :default_domain)
-    EtherCAT.register_all_pdos(do1, :default_domain)
+    # Register PDOs and get unique names
+    {:ok, input_names} = EtherCAT.register_pdos(master, di1, input_pdos)
+    {:ok, output_names} = EtherCAT.register_pdos(master, do1, output_pdos)
 
+    # Start cyclic communication
     EtherCAT.start_cyclic(master)
 
     # Give the system time to stabilize
     :timer.sleep(1000)
 
-    # Subscribe to input changes (assumes output 1 is connected to input 1)
-    EtherCAT.watch(di1, "pdo_6000:1")
+    # Subscribe to input changes using unique name
+    # (assumes output 1 is connected to input 1)
+    first_input = List.first(input_names)
+    EtherCAT.watch(master, first_input)
     :timer.sleep(500)
 
-    # Toggle the output to demonstrate I/O
-    EtherCAT.write(do1, "pdo_7000:1", true)
+    # Toggle the output to demonstrate I/O using unique name
+    first_output = List.first(output_names)
+    EtherCAT.write(master, first_output, true)
     :timer.sleep(500)
 
-    EtherCAT.write(do1, "pdo_7000:1", false)
+    EtherCAT.write(master, first_output, false)
     :timer.sleep(500)
 
-    EtherCAT.write(do1, "pdo_7000:1", true)
+    EtherCAT.write(master, first_output, true)
 
-    Logger.info("Test complete! Returning PIDs for interactive use.")
-    {master, di1, do1}
+    Logger.info("Test complete! Returning master and PDO names for interactive use.")
+    {master, input_names, output_names}
   end
 
   @tag :hardware
   @tag timeout: 30_000
   test "basic I/O with loopback" do
-    {master, input, output} = run()
+    {master, input_names, output_names} = run()
 
     # Wait for stabilization
     :timer.sleep(2000)
 
+    # Get first input and output unique names
+    first_input = List.first(input_names)
+    first_output = List.first(output_names)
+
     # Test write/read cycle
     Logger.info("Setting output HIGH...")
-    assert :ok = EtherCAT.write(output, "pdo_7000:1", true)
+    assert :ok = EtherCAT.write(master, first_output, true)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input...")
-    assert {:ok, value} = EtherCAT.read(input, "pdo_6000:1")
+    assert {:ok, value} = EtherCAT.read(master, first_input)
     Logger.info("Input value: #{inspect(value)}")
 
     Logger.info("Setting output LOW...")
-    assert :ok = EtherCAT.write(output, "pdo_7000:1", false)
+    assert :ok = EtherCAT.write(master, first_output, false)
 
     :timer.sleep(1000)
 
     Logger.info("Reading input again...")
-    assert {:ok, value2} = EtherCAT.read(input, "pdo_6000:1")
+    assert {:ok, value2} = EtherCAT.read(master, first_input)
     Logger.info("Input value: #{inspect(value2)}")
 
-    # Cleanup
-    GenServer.stop(master, :normal)
+    # Cleanup using new API
+    EtherCAT.close(master)
 
     Logger.info("Test passed!")
   end
 end
+
