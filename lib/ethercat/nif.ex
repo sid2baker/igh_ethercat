@@ -821,21 +821,18 @@ defmodule EtherCAT.Nif do
       sdo_subindex: u8,
       data: beam.term
   ) !void {
-      var binary: beam.Binary = undefined;
-      if (!beam.get_binary(data, &binary)) {
-          return beam.raise(.argument_error);
-      }
+      const binary = try beam.get([]u8, data, .{});
 
       const result = ecrt.ecrt_slave_config_sdo(
           slave_config.unpack(),
           sdo_index,
           sdo_subindex,
-          binary.data,
+          binary.ptr,
           binary.len
       );
 
       if (result < 0) {
-          return beam.raise_function_clause_error(.allocation_failed);
+          return MasterError.SlaveConfigError;
       }
   }
 
@@ -856,7 +853,7 @@ defmodule EtherCAT.Nif do
       );
 
       if (result < 0) {
-          return beam.raise_function_clause_error(.allocation_failed);
+          return MasterError.SlaveConfigError;
       }
   }
 
@@ -877,7 +874,7 @@ defmodule EtherCAT.Nif do
       );
 
       if (result < 0) {
-          return beam.raise_function_clause_error(.allocation_failed);
+          return MasterError.SlaveConfigError;
       }
   }
 
@@ -898,7 +895,7 @@ defmodule EtherCAT.Nif do
       );
 
       if (result < 0) {
-          return beam.raise_function_clause_error(.allocation_failed);
+          return MasterError.SlaveConfigError;
       }
   }
 

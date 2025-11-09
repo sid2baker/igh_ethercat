@@ -90,13 +90,13 @@ defmodule EtherCAT.SDOTest do
     test "validates range when validate_range option is provided" do
       slave_config = make_ref()
 
-      # Value in range (this will fail at NIF call, but validation passes)
-      result = SDO.configure(slave_config, 0x8000, 0x13, <<500::little-signed-16>>,
-                             validate_range: {0, 1000})
-      # Will get NIF error since we're not actually connected, but validation passed
-      assert match?({:error, _}, result) or result == :ok
+      # Value in range - validation passes, but NIF will raise ArgumentError for invalid resource
+      assert_raise ArgumentError, fn ->
+        SDO.configure(slave_config, 0x8000, 0x13, <<500::little-signed-16>>,
+                      validate_range: {0, 1000})
+      end
 
-      # Value out of range
+      # Value out of range - validation fails before reaching NIF
       assert {:error, {:out_of_range, 1500, 0, 1000}} =
                SDO.configure(slave_config, 0x8000, 0x13, <<1500::little-signed-16>>,
                              validate_range: {0, 1000})
