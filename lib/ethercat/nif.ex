@@ -37,6 +37,10 @@ defmodule EtherCAT.Nif do
       slave_config_pdo_mapping_clear: [],
       slave_config_reg_pdo_entry: [],
       slave_config_reg_pdo_entry_pos: [],
+      slave_config_sdo: [],
+      slave_config_sdo8: [],
+      slave_config_sdo16: [],
+      slave_config_sdo32: [],
       master_get_sync_manager: [],
       master_get_pdo: [],
       master_get_pdo_entry: [],
@@ -797,6 +801,104 @@ defmodule EtherCAT.Nif do
           return bit_offset;
       } else {
           return MasterError.PdoRegError;
+      }
+  }
+
+  // ============================================================================
+  // SDO CONFIGURATION OPERATIONS
+  // ============================================================================
+
+  /// Configure an SDO (Service Data Object) for a slave (pre-activation only).
+  ///
+  /// Queues an SDO download that will be executed during slave configuration
+  /// (typically at master activation). The configuration persists and is
+  /// automatically re-applied if the slave reboots.
+  ///
+  /// MUST be called BEFORE ecrt_master_activate(). Errors are asynchronous.
+  pub fn slave_config_sdo(
+      slave_config: SlaveConfigResource,
+      sdo_index: u16,
+      sdo_subindex: u8,
+      data: beam.term
+  ) !void {
+      var binary: beam.Binary = undefined;
+      if (!beam.get_binary(data, &binary)) {
+          return beam.raise(.argument_error);
+      }
+
+      const result = ecrt.ecrt_slave_config_sdo(
+          slave_config.unpack(),
+          sdo_index,
+          sdo_subindex,
+          binary.data,
+          binary.len
+      );
+
+      if (result < 0) {
+          return beam.raise_function_clause_error(.allocation_failed);
+      }
+  }
+
+  /// Configure an 8-bit SDO value (pre-activation only).
+  ///
+  /// Convenience wrapper with automatic endianness handling.
+  pub fn slave_config_sdo8(
+      slave_config: SlaveConfigResource,
+      sdo_index: u16,
+      sdo_subindex: u8,
+      value: u8
+  ) !void {
+      const result = ecrt.ecrt_slave_config_sdo8(
+          slave_config.unpack(),
+          sdo_index,
+          sdo_subindex,
+          value
+      );
+
+      if (result < 0) {
+          return beam.raise_function_clause_error(.allocation_failed);
+      }
+  }
+
+  /// Configure a 16-bit SDO value (pre-activation only).
+  ///
+  /// Convenience wrapper with automatic endianness handling.
+  pub fn slave_config_sdo16(
+      slave_config: SlaveConfigResource,
+      sdo_index: u16,
+      sdo_subindex: u8,
+      value: u16
+  ) !void {
+      const result = ecrt.ecrt_slave_config_sdo16(
+          slave_config.unpack(),
+          sdo_index,
+          sdo_subindex,
+          value
+      );
+
+      if (result < 0) {
+          return beam.raise_function_clause_error(.allocation_failed);
+      }
+  }
+
+  /// Configure a 32-bit SDO value (pre-activation only).
+  ///
+  /// Convenience wrapper with automatic endianness handling.
+  pub fn slave_config_sdo32(
+      slave_config: SlaveConfigResource,
+      sdo_index: u16,
+      sdo_subindex: u8,
+      value: u32
+  ) !void {
+      const result = ecrt.ecrt_slave_config_sdo32(
+          slave_config.unpack(),
+          sdo_index,
+          sdo_subindex,
+          value
+      );
+
+      if (result < 0) {
+          return beam.raise_function_clause_error(.allocation_failed);
       }
   }
 
