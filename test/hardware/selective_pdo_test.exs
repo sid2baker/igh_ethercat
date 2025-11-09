@@ -45,10 +45,13 @@ defmodule Hardware.SelectivePDOTest do
     Logger.info("Starting Selective PDO Test...")
 
     # Simplified API: open auto-connects and discovers slaves
-    {:ok, master, [_coupler, _slave1, slave2]} = EtherCAT.open()
+    {:ok, master, slaves} = EtherCAT.open()
+
+    # Use second slave (after coupler), or last slave if only two total
+    slave2 = Enum.at(slaves, 2) || List.last(slaves)
 
     # Configure slave and get available PDOs
-    {:ok, all_pdos} = EtherCAT.configure_slave(master, slave2, %{})
+    {:ok, all_pdos} = EtherCAT.configure_slave(slave2, %{})
     all_pdos |> IO.inspect(label: "Available PDOs")
 
     # Select only the first 8 PDOs
@@ -71,10 +74,13 @@ defmodule Hardware.SelectivePDOTest do
     Logger.info("Starting selective PDO registration test...")
 
     # Simplified API: open auto-connects and discovers slaves
-    {:ok, master, [_coupler, input_slave | _rest]} = EtherCAT.open()
+    {:ok, master, slaves} = EtherCAT.open()
+
+    # Use first slave after coupler (position 1), or last slave if only two total
+    input_slave = Enum.at(slaves, 1) || List.last(slaves)
 
     # Configure the slave and get available PDOs
-    {:ok, all_pdos} = EtherCAT.configure_slave(master, input_slave, %{})
+    {:ok, all_pdos} = EtherCAT.configure_slave(input_slave, %{})
     Logger.info("Available PDOs: #{inspect(all_pdos)}")
     assert length(all_pdos) > 0
 

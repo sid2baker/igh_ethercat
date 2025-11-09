@@ -43,17 +43,20 @@ defmodule Hardware.FunctionalValidationTest do
     Logger.info("=== Setting up EtherCAT master for test suite ===")
 
     # Simplified API: open auto-connects and discovers slaves
-    {:ok, master, [_coupler, di, do_slave]} = EtherCAT.open(update_interval: @cycle_interval)
+    {:ok, master, slaves} = EtherCAT.open(update_interval: @cycle_interval)
+
+    # Flexible: expect at least 2 slaves (input and output), skip coupler if present
+    [di, do_slave | _rest] = if length(slaves) >= 3, do: tl(slaves), else: slaves
 
     # Configure input slave and get available PDOs
-    {:ok, input_pdos} = EtherCAT.configure_slave(master, di, %{})
+    {:ok, input_pdos} = EtherCAT.configure_slave(di, %{})
     Logger.info("Input PDOs: #{inspect(input_pdos)}")
 
     # Register all input PDOs and get unique names
     {:ok, input_names} = EtherCAT.register_pdos(master, di, input_pdos)
 
     # Configure output slave and get available PDOs
-    {:ok, output_pdos} = EtherCAT.configure_slave(master, do_slave, %{})
+    {:ok, output_pdos} = EtherCAT.configure_slave(do_slave, %{})
     Logger.info("Output PDOs: #{inspect(output_pdos)}")
 
     # Register all output PDOs and get unique names

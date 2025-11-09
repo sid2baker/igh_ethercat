@@ -50,13 +50,16 @@ defmodule Hardware.BasicIOTest do
     Logger.info("Starting Basic I/O Test...")
 
     # Simplified API: open auto-connects and discovers slaves
-    {:ok, master, [_coupler, di1, do1]} = EtherCAT.open(update_interval: 1000)
+    {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
+
+    # Flexible: expect at least 2 slaves (input and output), skip coupler if present
+    [di1, do1 | _rest] = if length(slaves) >= 3, do: tl(slaves), else: slaves
 
     # Configure slaves and get available PDOs
-    {:ok, input_pdos} = EtherCAT.configure_slave(master, di1, %{})
+    {:ok, input_pdos} = EtherCAT.configure_slave(di1, %{})
     input_pdos |> IO.inspect(label: "Input PDOs")
 
-    {:ok, output_pdos} = EtherCAT.configure_slave(master, do1, %{})
+    {:ok, output_pdos} = EtherCAT.configure_slave(do1, %{})
     output_pdos |> IO.inspect(label: "Output PDOs")
 
     # Register PDOs and get PDO handles

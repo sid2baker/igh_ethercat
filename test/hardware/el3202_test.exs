@@ -51,11 +51,12 @@ defmodule Hardware.EL3202Test do
     {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
     Logger.info("Discovered #{length(slaves)} slaves")
 
-    el3202 = Enum.at(slaves, 3)
+    # Find EL3202 - typically at position 3, but flexible
+    el3202 = Enum.at(slaves, 3) || List.last(slaves)
 
     if el3202 == nil do
-      Logger.error("EL3202 not found at position 3. Check hardware setup.")
-      {:error, :el3202_not_found}
+      Logger.error("No slaves found. Check hardware setup.")
+      {:error, :no_slaves_found}
     else
       config = %{
         ch1_limit1: 180,

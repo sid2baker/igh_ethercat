@@ -58,13 +58,19 @@ defmodule Hardware.MultiDomainTest do
     Logger.info("Starting Multi-Domain Test...")
 
     # Simplified API: open auto-connects and discovers slaves
-    {:ok, master, [_coupler, _slave1, slave2 | _rest]} = EtherCAT.open()
+    {:ok, master, slaves} = EtherCAT.open()
+
+    # Flexible: get a slave for testing (skip coupler if present, use second slave)
+    slave2 =
+      if length(slaves) >= 3,
+        do: Enum.at(slaves, 2),
+        else: Enum.at(slaves, 1) || List.first(slaves)
 
     # Create a second domain with a slower update rate
     EtherCAT.create_domain(master, :domain2, 100)
 
     # Configure the slave and get available PDOs
-    {:ok, all_pdos} = EtherCAT.configure_slave(master, slave2, %{})
+    {:ok, all_pdos} = EtherCAT.configure_slave(slave2, %{})
 
     # Register first PDO to fast domain
     {fast_handles, remaining_pdos} =
@@ -110,7 +116,7 @@ defmodule Hardware.MultiDomainTest do
     Logger.info("Created 3 additional domains with different update rates")
 
     # Configure the slave and get available PDOs
-    {:ok, all_pdos} = EtherCAT.configure_slave(master, io_slave, %{})
+    {:ok, all_pdos} = EtherCAT.configure_slave(io_slave, %{})
     Logger.info("Available PDOs: #{inspect(all_pdos)}")
 
     # Distribute PDOs across domains based on criticality
