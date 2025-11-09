@@ -238,6 +238,8 @@ defmodule EtherCAT.Domain do
 
   # Infer PDO entry type from bit size
   defp infer_entry_type(1), do: :bool
+  # Sub-byte fields (2-7 bits) are treated as uint8
+  defp infer_entry_type(size) when size >= 2 and size < 8, do: :uint8
   defp infer_entry_type(8), do: :uint8
   defp infer_entry_type(16), do: :uint16
   defp infer_entry_type(32), do: :uint32

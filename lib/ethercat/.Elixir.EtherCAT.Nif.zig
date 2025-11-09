@@ -474,7 +474,7 @@ fn extractBitsToBuffer(buffer: []u8, data: []const u8, bit_offset: usize, bit_le
 
     while (bits_read < bit_length and byte_idx < data.len and out_byte_idx < buffer.len) {
         const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
-        const mask = (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
+        const mask: u8 = if (bits_in_byte >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
         const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
 
         buffer[out_byte_idx] |= bits << @intCast(bits_read % 8);
@@ -506,7 +506,7 @@ fn extractBits(comptime T: type, data: []const u8, bit_offset: usize, bit_length
     while (bits_read < bit_length and byte_idx < data.len) {
         // Read as many bits as possible from current byte
         const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
-        const mask = (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
+        const mask: u8 = if (bits_in_byte >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
         const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
 
         // Accumulate bits into result at correct position
