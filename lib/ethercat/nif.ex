@@ -450,32 +450,39 @@ defmodule EtherCAT.Nif do
 
   /// Write arbitrary bits to domain buffer at specified bit offset
   /// Used by cyclic_task to apply output events
+  ///
+  /// Handles bit-level writes that may span byte boundaries. PDO entries can be any bit size
+  /// (1-64 bits) and start at any bit offset, requiring careful masking and shifting.
+  ///
+  /// Example: Writing 12 bits starting at bit offset 5 spans 3 bytes:
+  ///   Byte 0: bits 5-7 (3 bits), Byte 1: bits 0-7 (8 bits), Byte 2: bits 0-0 (1 bit)
   fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, bit_length: u8) void {
       var bits_written: usize = 0;
 
       while (bits_written < bit_length) {
+          // Calculate target position in domain buffer
           const current_bit_offset = bit_offset + bits_written;
           const byte_index = current_bit_offset / 8;
           const bit_index_usize = current_bit_offset % 8;
             const bit_index = @as(u3, @intCast(bit_index_usize));
 
-          // How many bits can we write in this byte?
+          // Determine how many bits fit in current byte (may be partial)
           const bits_remaining_in_byte = 8 - bit_index_usize;
           const bits_to_write = @min(bit_length - bits_written, bits_remaining_in_byte);
 
-          // Extract bits from value_bytes
+          // Extract corresponding bits from source value
           const value_byte_index = bits_written / 8;
             const value_bit_index_usize = bits_written % 8;
           const value_bit_index = @as(u3, @intCast(value_bit_index_usize));
 
-          // Create mask for bits we're writing
+          // Create mask for the bits we're writing (e.g., 0b00000111 for 3 bits)
           const mask = (@as(u8, 1) << @intCast(bits_to_write)) - 1;
 
-          // Extract value bits and shift to target position
+          // Extract value bits and shift to target position in destination byte
           const value_bits = (value_bytes[value_byte_index] >> value_bit_index) & mask;
           const shifted_value = value_bits << bit_index;
 
-          // Clear target bits and write new value
+          // Clear target bits, then OR in new value (preserves other bits in byte)
           const clear_mask = ~(mask << bit_index);
           data[byte_index] = (data[byte_index] & clear_mask) | shifted_value;
 
@@ -531,7 +538,15 @@ defmodule EtherCAT.Nif do
       }
   }
 
-  /// Helper function to extract bits from domain data
+  /// Helper function to extract bits from domain data into typed result
+  ///
+  /// Reads bit_length bits starting at bit_offset and returns as type T.
+  /// Handles multi-byte reads across byte boundaries.
+  ///
+  /// Example: Reading 12 bits at offset 5 from domain data:
+  ///   Byte 0 bits 5-7 → result bits 0-2 (3 bits)
+  ///   Byte 1 bits 0-7 → result bits 3-10 (8 bits)
+  ///   Byte 2 bits 0-0 → result bits 11-11 (1 bit)
   fn extractBits(comptime T: type, data: []const u8, bit_offset: usize, bit_length: usize) T {
       var result: T = 0;
       var bits_read: usize = 0;
@@ -539,15 +554,17 @@ defmodule EtherCAT.Nif do
       var bit_idx = bit_offset % 8;
 
       while (bits_read < bit_length and byte_idx < data.len) {
+          // Read as many bits as possible from current byte
           const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
           const mask = (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
           const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
 
+          // Accumulate bits into result at correct position
           result |= @as(T, bits) << @intCast(bits_read);
 
           bits_read += bits_in_byte;
           byte_idx += 1;
-          bit_idx = 0;
+          bit_idx = 0;  // Subsequent bytes start at bit 0
       }
 
       return result;
@@ -811,8 +828,22 @@ defmodule EtherCAT.Nif do
   }
 
   /// Main cyclic task for EtherCAT communication
-  /// Handles master and domain processing, state monitoring, and data change detection
-  /// Runs in a separate thread and sends notifications to registered processes
+  ///
+  /// Runs in a separate OS thread with microsecond-precision timing.
+  ///
+  /// Cycle sequence (deterministic, repeats at `interval` µs):
+  ///   1. Sync application time
+  ///   2. Receive frames (slave → master)
+  ///   3. Process domains, detect changes, send notifications
+  ///   4. Check master state changes
+  ///   5. Queue domain outputs (if interval reached)
+  ///   6. Send frames (master → slave)
+  ///   7. Sleep to maintain precise cycle time
+  ///
+  /// Change detection: Compares domain buffer with stored values, notifies BEAM
+  /// processes for inputs. For outputs, writes stored values to domain buffer.
+  ///
+  /// BEAM integration: Yields every 100ms to prevent scheduler starvation.
   pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_accessors: []DomainAccessorResource, interval: u64) !void {
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;

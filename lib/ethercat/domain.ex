@@ -14,6 +14,17 @@ defmodule EtherCAT.Domain do
   4. **Operation** - Cyclic task processes and queues domain data at configured intervals
   5. **Notifications** - Subscribers receive messages when PDO values change
 
+  ## Configuration Lock
+
+  Domains are **locked** when the master enters operational mode. After locking:
+  - No new PDOs can be registered (returns `{:error, {:domain_locked, message}}`)
+  - Existing PDO values can still be read/written
+  - Subscriptions can still be added/removed
+  - Reconfiguration requires stopping and restarting the master
+
+  This matches EtherCAT protocol requirements where domain layout must be
+  fixed during cyclic operation
+
   ## Update Intervals
 
   Each domain has an interval multiplier (in microseconds) that determines how often
@@ -178,6 +189,16 @@ defmodule EtherCAT.Domain do
   @spec get_interval(GenServer.server()) :: pos_integer()
   def get_interval(domain) do
     GenServer.call(domain, :get_interval)
+  end
+
+  @doc """
+  Returns true if domain is locked (operational mode active).
+
+  Locked domains cannot accept new PDO registrations.
+  """
+  @spec locked?(GenServer.server()) :: boolean()
+  def locked?(domain) do
+    GenServer.call(domain, :locked?)
   end
 
   @doc """
@@ -354,6 +375,11 @@ defmodule EtherCAT.Domain do
   end
 
   @impl true
+  def handle_call(:locked?, _from, state) do
+    {:reply, state.locked?, state}
+  end
+
+  @impl true
   def handle_call({:set_pdo_value, unique_name, value}, _from, state) do
     result = EtherCAT.Master.domain_set_value(state.master, state.resource, unique_name, value)
     {:reply, result, state}
@@ -365,34 +391,45 @@ defmodule EtherCAT.Domain do
     {:reply, result, state}
   end
 
+  # Reject PDO registration when domain is locked (operational mode active)
+  @impl true
+  def handle_call(
+        {:register_pdo_entry, _slave_config, _name, _entry, _direction},
+        _from,
+        %{locked?: true} = state
+      ) do
+    {:reply,
+     {:error,
+      {:domain_locked,
+       "Cannot register PDOs after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
+  end
+
+  # Accept PDO registration when domain is unlocked (configuration phase)
   @impl true
   def handle_call({:register_pdo_entry, slave_config, name, entry, direction}, _from, state) do
-    if state.locked? do
-      {:reply, {:error, :domain_locked}, state}
-    else
-      # Normalize entry to include type and direction
-      normalized_entry =
-        case entry do
-          {entry_type, entry_index, entry_subindex, entry_size} when is_atom(entry_type) ->
-            # Already has explicit type
-            {entry_type, entry_index, entry_subindex, entry_size, direction}
+    # Normalize entry to include type and direction
+    normalized_entry =
+      case entry do
+        {entry_type, entry_index, entry_subindex, entry_size} when is_atom(entry_type) ->
+          # Already has explicit type
+          {entry_type, entry_index, entry_subindex, entry_size, direction}
 
-          {entry_index, entry_subindex, entry_size} ->
-            # Infer type from size
-            entry_type = infer_entry_type(entry_size)
-            {entry_type, entry_index, entry_subindex, entry_size, direction}
-        end
+        {entry_index, entry_subindex, entry_size} ->
+          # Infer type from size
+          entry_type = infer_entry_type(entry_size)
+          {entry_type, entry_index, entry_subindex, entry_size, direction}
+      end
 
-      result =
-        Map.update(
-          state.entries,
-          slave_config,
-          [{name, normalized_entry}],
-          &[{name, normalized_entry} | &1]
-        )
+    result =
+      Map.update(
+        state.entries,
+        slave_config,
+        [{name, normalized_entry}],
+        &[{name, normalized_entry} | &1]
+      )
 
-      {:reply, :ok, %{state | entries: result}}
-    end
+    {:reply, :ok, %{state | entries: result}}
   end
 
   @impl true
@@ -446,6 +483,7 @@ defmodule EtherCAT.Domain do
 
   @impl true
   def handle_call({:store_and_lock_entries, entries}, _from, state) do
+    Logger.info("Domain locked - #{map_size(entries)} slave configs registered")
     {:reply, :ok, %{state | entries: entries, locked?: true}}
   end
 

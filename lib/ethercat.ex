@@ -138,12 +138,10 @@ defmodule EtherCAT do
           {:ok, [PDO.t()]} | {:error, term()}
   def register_pdos(master, slave, pdo_names, domain \\ :default_domain) do
     case Slave.register_pdos(slave, pdo_names, domain) do
-      :ok ->
-        position = get_slave_position(slave)
-        handles =
-          Enum.map(pdo_names, fn pdo_name ->
-            PDO.new(domain, "slave_#{position}:#{pdo_name}", master)
-          end)
+      {:ok, unique_names} ->
+        handles = Enum.map(unique_names, fn unique_name ->
+          PDO.new(domain, unique_name, master)
+        end)
 
         {:ok, handles}
 
@@ -284,13 +282,4 @@ defmodule EtherCAT do
     end
   end
 
-  # Private Helpers
-
-  # Gets the position of a slave process using Registry
-  defp get_slave_position(slave_pid) do
-    case Registry.keys(EtherCAT.Registry, slave_pid) do
-      [{:slave, _master, position}] -> position
-      _ -> nil
-    end
-  end
 end

@@ -25,6 +25,17 @@ defmodule EtherCAT.Slave do
   4. **Activation** - Master activates all slaves for cyclic communication
   5. **Operation** - Slave provides read/write access to process data
 
+  ## Configuration Lock
+
+  Slaves are **locked** when the master enters operational mode. After locking:
+  - No configuration changes allowed (sync managers, PDO mappings)
+  - No new PDO registrations (returns `{:error, {:slave_locked, message}}`)
+  - Read operations and data I/O continue normally
+  - Reconfiguration requires stopping and restarting the master
+
+  This matches EtherCAT protocol requirements where slave configuration must be
+  fixed during cyclic operation
+
   ## PDO Management
 
   Process Data Objects (PDOs) are the primary mechanism for real-time data exchange:
@@ -75,7 +86,8 @@ defmodule EtherCAT.Slave do
     :vendor_id,
     :product_code,
     :slave_config,
-    :pdo_registrations
+    :pdo_registrations,
+    locked?: false
   ]
 
   @type t :: %__MODULE__{
@@ -87,7 +99,8 @@ defmodule EtherCAT.Slave do
           vendor_id: non_neg_integer(),
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
-          pdo_registrations: %{(unique_name :: String.t()) => domain()}
+          pdo_registrations: %{(unique_name :: String.t()) => domain()},
+          locked?: boolean()
         }
 
   @type name :: String.t()
@@ -244,11 +257,16 @@ defmodule EtherCAT.Slave do
   - `domain` - Domain identifier (default: `:default_domain`)
   - `timeout` - Call timeout in milliseconds (default: 10_000 for configuration)
 
+  ## Returns
+  - `{:ok, unique_names}` - List of unique PDO names (e.g., `["slave_0:pdo_6000:1"]`)
+  - `{:error, reason}` - Error if registration fails
+
   ## Example
 
-      Slave.register_pdos(slave, [:input1, :input2], :default_domain)
+      {:ok, unique_names} = Slave.register_pdos(slave, [:input1, :input2], :default_domain)
+      #=> {:ok, ["slave_0:input1", "slave_0:input2"]}
   """
-  @spec register_pdos(pid(), [name()], domain(), timeout()) :: :ok
+  @spec register_pdos(pid(), [name()], domain(), timeout()) :: {:ok, [String.t()]} | {:error, term()}
   def register_pdos(slave, names, domain \\ :default_domain, timeout \\ 10_000) do
     GenServer.call(slave, {:register_pdos, names, domain}, timeout)
   end
@@ -258,18 +276,38 @@ defmodule EtherCAT.Slave do
 
   Equivalent to calling `register_pdos(slave, list_pdos(slave), domain)`.
 
+  ## Returns
+  - `{:ok, unique_names}` - List of unique PDO names
+  - `{:error, reason}` - Error if registration fails
+
   ## Example
 
       # Register all PDOs to the default domain
-      Slave.register_all_pdos(slave)
+      {:ok, unique_names} = Slave.register_all_pdos(slave)
 
       # Register all PDOs to a custom domain
-      Slave.register_all_pdos(slave, :slow_domain)
+      {:ok, unique_names} = Slave.register_all_pdos(slave, :slow_domain)
   """
-  @spec register_all_pdos(pid(), domain()) :: :ok
+  @spec register_all_pdos(pid(), domain()) :: {:ok, [String.t()]} | {:error, term()}
   def register_all_pdos(slave, domain \\ :default_domain) do
     all_pdos = list_pdos(slave)
     register_pdos(slave, all_pdos, domain)
+  end
+
+  @doc """
+  Returns true if slave is locked (operational mode active).
+
+  Locked slaves cannot accept configuration changes.
+  """
+  @spec locked?(pid()) :: boolean()
+  def locked?(slave) do
+    GenServer.call(slave, :locked?)
+  end
+
+  @doc false
+  @spec lock(pid()) :: :ok
+  def lock(slave) do
+    GenServer.call(slave, :lock)
   end
 
   # Internal/Advanced API
@@ -408,8 +446,29 @@ defmodule EtherCAT.Slave do
   end
 
   @impl true
+  def handle_call(:locked?, _from, state) do
+    {:reply, state.locked?, state}
+  end
+
+  @impl true
+  def handle_call(:lock, _from, state) do
+    Logger.info("Slave at position #{state.position} locked")
+    {:reply, :ok, %{state | locked?: true}}
+  end
+
+  @impl true
   def handle_call({:get_slave_config}, _from, state) do
     {:reply, state.slave_config, state}
+  end
+
+  # Configuration - reject when locked
+  @impl true
+  def handle_call({:configure, _config}, _from, %{locked?: true} = state) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot reconfigure slave after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
   end
 
   @impl true
@@ -418,6 +477,7 @@ defmodule EtherCAT.Slave do
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 
+  # Read-only operations - allowed when locked
   def handle_call(:list_pdos, _from, state) do
     {:reply, state.driver.list_pdos(state.driver_state), state}
   end
@@ -438,9 +498,35 @@ defmodule EtherCAT.Slave do
     {:reply, result, state}
   end
 
+  # Sync manager configuration - reject when locked
+  def handle_call(
+        {:configure_sync_manager, _sync_index, _direction, _watchdog},
+        _from,
+        %{locked?: true} = state
+      ) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot configure sync managers after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
+  end
+
   def handle_call({:configure_sync_manager, sync_index, direction, watchdog}, _from, state) do
     config_sync_manager_internal(state, sync_index, direction, watchdog)
     {:reply, :ok, state}
+  end
+
+  # PDO assignment configuration - reject when locked
+  def handle_call(
+        {:configure_pdo_assignment, _sync_index, _pdo_indices},
+        _from,
+        %{locked?: true} = state
+      ) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot configure PDO assignments after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
   end
 
   def handle_call({:configure_pdo_assignment, sync_index, pdo_indices}, _from, state) do
@@ -453,6 +539,15 @@ defmodule EtherCAT.Slave do
     {:reply, :ok, state}
   end
 
+  # PDO mapping configuration - reject when locked
+  def handle_call({:configure_pdo_mapping, _pdo_index, _entries}, _from, %{locked?: true} = state) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot configure PDO mappings after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
+  end
+
   def handle_call({:configure_pdo_mapping, pdo_index, entries}, _from, state) do
     config_pdo_mapping_clear_internal(state, pdo_index)
 
@@ -461,6 +556,15 @@ defmodule EtherCAT.Slave do
     end
 
     {:reply, :ok, state}
+  end
+
+  # PDO registration - reject when locked
+  def handle_call({:register_pdos, _names, _domain}, _from, %{locked?: true} = state) do
+    {:reply,
+     {:error,
+      {:slave_locked,
+       "Cannot register PDOs after master activation. " <>
+         "Reconfiguration requires restarting the master."}}, state}
   end
 
   def handle_call({:register_pdos, names, domain}, _from, state) do
@@ -492,6 +596,12 @@ defmodule EtherCAT.Slave do
       configured_entries = configure_and_register_pdos(sync_managers, state, domain)
       Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
 
+      # Extract unique names from configured entries
+      unique_names =
+        Enum.map(configured_entries, fn {name, _entry, _direction} ->
+          "slave_#{state.position}:#{name}"
+        end)
+
       # Map unique names to domain for tracking registrations
       pdo_registrations =
         configured_entries
@@ -502,7 +612,7 @@ defmodule EtherCAT.Slave do
         |> Map.new()
         |> Map.merge(state.pdo_registrations)
 
-      {:reply, :ok, %{state | pdo_registrations: pdo_registrations}}
+      {:reply, {:ok, unique_names}, %{state | pdo_registrations: pdo_registrations}}
     end
   end
 
