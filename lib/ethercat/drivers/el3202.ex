@@ -70,11 +70,11 @@ defmodule EtherCAT.Drivers.EL3202 do
   require Logger
 
   @impl true
-  def configure(config_sdo, state, config) do
+  def configure(ctx, state, config) do
     Logger.info("Configuring EL3202 RTD input terminal")
 
-    with :ok <- configure_channel_1(config_sdo, config),
-         :ok <- configure_channel_2(config_sdo, config) do
+    with :ok <- configure_channel_1(ctx, config),
+         :ok <- configure_channel_2(ctx, config) do
       {:ok, Map.put(state, :configured, true)}
     end
   end
@@ -215,10 +215,10 @@ defmodule EtherCAT.Drivers.EL3202 do
   # Private Configuration Helpers
   # ============================================================================
 
-  defp configure_channel_1(config_sdo, config) do
-    with :ok <- maybe_configure_limit1_ch1(config_sdo, config),
-         :ok <- maybe_configure_limit2_ch1(config_sdo, config),
-         :ok <- maybe_configure_filter_ch1(config_sdo, config) do
+  defp configure_channel_1(ctx, config) do
+    with :ok <- maybe_configure_limit1_ch1(ctx, config),
+         :ok <- maybe_configure_limit2_ch1(ctx, config),
+         :ok <- maybe_configure_filter_ch1(ctx, config) do
       Logger.debug("Channel 1 configured successfully")
       :ok
     else
@@ -228,10 +228,10 @@ defmodule EtherCAT.Drivers.EL3202 do
     end
   end
 
-  defp configure_channel_2(config_sdo, config) do
-    with :ok <- maybe_configure_limit1_ch2(config_sdo, config),
-         :ok <- maybe_configure_limit2_ch2(config_sdo, config),
-         :ok <- maybe_configure_filter_ch2(config_sdo, config) do
+  defp configure_channel_2(ctx, config) do
+    with :ok <- maybe_configure_limit1_ch2(ctx, config),
+         :ok <- maybe_configure_limit2_ch2(ctx, config),
+         :ok <- maybe_configure_filter_ch2(ctx, config) do
       Logger.debug("Channel 2 configured successfully")
       :ok
     else
@@ -242,14 +242,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 limit 1 configuration (SDO 0x8000:0x13)
-  defp maybe_configure_limit1_ch1(config_sdo, config) do
+  defp maybe_configure_limit1_ch1(ctx, config) do
     case {Map.get(config, :ch1_limit1), Map.get(config, :ch1_enable_limit1, false)} do
       {nil, _} ->
         :ok
 
       {limit1, enable?} when is_integer(limit1) ->
-        with :ok <- config_sdo.(0x8000, 0x13, <<limit1::little-signed-16>>),
-             :ok <- config_sdo.(0x8000, 0x07, if(enable?, do: <<1::8>>, else: <<0::8>>)) do
+        with :ok <- write_sdo_value(ctx, 0x8000, 0x13, limit1, :int16),
+             :ok <- write_sdo_value(ctx, 0x8000, 0x07, enable?, :bool) do
           Logger.debug("Ch1 Limit1 configured: #{limit1} (enabled: #{enable?})")
           :ok
         end
@@ -260,14 +260,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 limit 2 configuration (SDO 0x8000:0x14)
-  defp maybe_configure_limit2_ch1(config_sdo, config) do
+  defp maybe_configure_limit2_ch1(ctx, config) do
     case {Map.get(config, :ch1_limit2), Map.get(config, :ch1_enable_limit2, false)} do
       {nil, _} ->
         :ok
 
       {limit2, enable?} when is_integer(limit2) ->
-        with :ok <- config_sdo.(0x8000, 0x14, <<limit2::little-signed-16>>),
-             :ok <- config_sdo.(0x8000, 0x08, if(enable?, do: <<1::8>>, else: <<0::8>>)) do
+        with :ok <- write_sdo_value(ctx, 0x8000, 0x14, limit2, :int16),
+             :ok <- write_sdo_value(ctx, 0x8000, 0x08, enable?, :bool) do
           Logger.debug("Ch1 Limit2 configured: #{limit2} (enabled: #{enable?})")
           :ok
         end
@@ -278,26 +278,26 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 1 filter configuration (SDO 0x8000:0x15)
-  defp maybe_configure_filter_ch1(config_sdo, config) do
+  defp maybe_configure_filter_ch1(ctx, config) do
     enable_filter = Map.get(config, :ch1_enable_filter, true)
     filter_settings = Map.get(config, :ch1_filter_settings, 10)
 
-    with :ok <- config_sdo.(0x8000, 0x06, if(enable_filter, do: <<1::8>>, else: <<0::8>>)),
-         :ok <- config_sdo.(0x8000, 0x15, <<filter_settings::little-16>>) do
+    with :ok <- write_sdo_value(ctx, 0x8000, 0x06, enable_filter, :bool),
+         :ok <- write_sdo_value(ctx, 0x8000, 0x15, filter_settings, :uint16) do
       Logger.debug("Ch1 Filter configured: #{filter_settings} (enabled: #{enable_filter})")
       :ok
     end
   end
 
   # Channel 2 limit 1 configuration (SDO 0x8010:0x13)
-  defp maybe_configure_limit1_ch2(config_sdo, config) do
+  defp maybe_configure_limit1_ch2(ctx, config) do
     case {Map.get(config, :ch2_limit1), Map.get(config, :ch2_enable_limit1, false)} do
       {nil, _} ->
         :ok
 
       {limit1, enable?} when is_integer(limit1) ->
-        with :ok <- config_sdo.(0x8010, 0x13, <<limit1::little-signed-16>>),
-             :ok <- config_sdo.(0x8010, 0x07, if(enable?, do: <<1::8>>, else: <<0::8>>)) do
+        with :ok <- write_sdo_value(ctx, 0x8010, 0x13, limit1, :int16),
+             :ok <- write_sdo_value(ctx, 0x8010, 0x07, enable?, :bool) do
           Logger.debug("Ch2 Limit1 configured: #{limit1} (enabled: #{enable?})")
           :ok
         end
@@ -308,14 +308,14 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 2 limit 2 configuration (SDO 0x8010:0x14)
-  defp maybe_configure_limit2_ch2(config_sdo, config) do
+  defp maybe_configure_limit2_ch2(ctx, config) do
     case {Map.get(config, :ch2_limit2), Map.get(config, :ch2_enable_limit2, false)} do
       {nil, _} ->
         :ok
 
       {limit2, enable?} when is_integer(limit2) ->
-        with :ok <- config_sdo.(0x8010, 0x14, <<limit2::little-signed-16>>),
-             :ok <- config_sdo.(0x8010, 0x08, if(enable?, do: <<1::8>>, else: <<0::8>>)) do
+        with :ok <- write_sdo_value(ctx, 0x8010, 0x14, limit2, :int16),
+             :ok <- write_sdo_value(ctx, 0x8010, 0x08, enable?, :bool) do
           Logger.debug("Ch2 Limit2 configured: #{limit2} (enabled: #{enable?})")
           :ok
         end
@@ -326,12 +326,12 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # Channel 2 filter configuration (SDO 0x8010:0x15)
-  defp maybe_configure_filter_ch2(config_sdo, config) do
+  defp maybe_configure_filter_ch2(ctx, config) do
     enable_filter = Map.get(config, :ch2_enable_filter, true)
     filter_settings = Map.get(config, :ch2_filter_settings, 10)
 
-    with :ok <- config_sdo.(0x8010, 0x06, if(enable_filter, do: <<1::8>>, else: <<0::8>>)),
-         :ok <- config_sdo.(0x8010, 0x15, <<filter_settings::little-16>>) do
+    with :ok <- write_sdo_value(ctx, 0x8010, 0x06, enable_filter, :bool),
+         :ok <- write_sdo_value(ctx, 0x8010, 0x15, filter_settings, :uint16) do
       Logger.debug("Ch2 Filter configured: #{filter_settings} (enabled: #{enable_filter})")
       :ok
     end

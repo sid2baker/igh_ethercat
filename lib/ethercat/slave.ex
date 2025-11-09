@@ -85,7 +85,10 @@ defmodule EtherCAT.Slave do
     :position,
     :vendor_id,
     :product_code,
+    :revision,
+    :serial,
     :slave_config,
+    :sync_count,
     :pdo_registrations,
     locked?: false
   ]
@@ -371,50 +374,16 @@ defmodule EtherCAT.Slave do
       master: master,
       alias: 0,
       position: position,
+      vendor_id: nil,
+      product_code: nil,
+      revision: 0,
+      serial: 0,
       slave_config: slave_config,
+      sync_count: sync_count,
       pdo_registrations: %{}
     }
 
-    if driver == EtherCAT.Drivers.Generic do
-      {:ok, state, {:continue, {:load_driver, sync_count}}}
-    else
-      {:ok, state}
-    end
-  end
-
-  @impl true
-  def handle_continue({:load_driver, sync_count}, state) do
-    pdos =
-      for sync_index <- create_range(sync_count) do
-        sync_manager = get_sync_manager_internal(state, sync_index)
-
-        for pos <- create_range(sync_manager.n_pdos) do
-          pdo = get_pdo_internal(state, sync_index, pos)
-
-          for entry_pos <- create_range(pdo.n_entries) do
-            entry = get_pdo_entry_internal(state, sync_index, pos, entry_pos)
-
-            %{
-              sync_manager: {sync_manager.index, sync_manager.dir, sync_manager.watchdog_mode},
-              pdo_index: pdo.index,
-              entry: {entry.index, entry.subindex, entry.bit_length}
-            }
-          end
-        end
-      end
-      |> List.flatten()
-      |> Enum.map(fn pdo ->
-        entry_index = elem(pdo.entry, 0)
-        entry_subindex = elem(pdo.entry, 1)
-
-        {"pdo_#{Integer.to_string(entry_index, 16)}:#{Integer.to_string(entry_subindex, 16)}",
-         pdo}
-      end)
-      |> Map.new()
-
-    Logger.debug("Generic driver discovered PDOs: #{inspect(pdos)}")
-
-    {:noreply, %{state | driver_state: %{pdos: pdos}}}
+    {:ok, state}
   end
 
   # Internal helpers that call Master
@@ -507,17 +476,20 @@ defmodule EtherCAT.Slave do
 
   @impl true
   def handle_call({:configure, config}, _from, state) do
-    # Create a config_sdo function that drivers can call
-    config_sdo_fn = fn sdo_index, sdo_subindex, data ->
-      Master.slave_operation(
-        state.master,
-        state.position,
-        :config_sdo,
-        [state.slave_config, sdo_index, sdo_subindex, data]
-      )
-    end
+    # Create context struct with slave information
+    ctx = %{
+      master: state.master,
+      slave_pid: self(),
+      position: state.position,
+      slave_config: state.slave_config,
+      vendor_id: state.vendor_id,
+      product_code: state.product_code,
+      revision: state.revision,
+      serial: state.serial,
+      sync_count: state.sync_count
+    }
 
-    {:ok, driver_state} = state.driver.configure(config_sdo_fn, state.driver_state, config)
+    {:ok, driver_state} = state.driver.configure(ctx, state.driver_state, config)
     {:reply, :ok, %{state | driver_state: driver_state}}
   end
 

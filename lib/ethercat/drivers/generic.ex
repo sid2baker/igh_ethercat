@@ -41,8 +41,11 @@ defmodule EtherCAT.Drivers.Generic do
   use EtherCAT.Slave.Driver
 
   @impl true
-  def configure(_config_sdo, state, _config) when is_map(state) do
-    {:ok, state}
+  def configure(ctx, _state, _config) do
+    # For Generic driver, configuration = discovering PDOs from EEPROM
+    pdos = discover_pdos_from_eeprom(ctx, ctx.sync_count)
+    Logger.debug("Generic driver discovered PDOs: #{inspect(pdos)}")
+    {:ok, %{pdos: pdos}}
   end
 
   @impl true
