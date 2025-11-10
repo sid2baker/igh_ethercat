@@ -1,29 +1,6 @@
 # EtherCAT
 
-Real-time EtherCAT master for Elixir/Erlang via Zig NIFs, wrapping [IgH EtherCAT Master](https://etherlab.org/en/ethercat/). Built for industrial automation, robotics, and distributed control.
-
-## Quick Start
-
-```elixir
-# Open master, auto-discover and configure slaves
-{:ok, master, slaves} = EtherCAT.open(index: 0)
-
-# Configure first slave with generic driver (auto-discovers PDOs)
-{:ok, pdos} = EtherCAT.configure_slave(master, hd(slaves), %{})
-
-# Register PDOs for I/O
-{:ok, handles} = EtherCAT.register_pdos(master, hd(slaves), pdos)
-
-# Start cyclic operation
-EtherCAT.start_cyclic(master)
-
-# Read/Write
-EtherCAT.read(hd(handles))        # => {:ok, false}
-EtherCAT.write(hd(handles), true) # => :ok
-
-# Subscribe to changes
-EtherCAT.watch(hd(handles))       # => {:data_changed, "pdo_name", true}
-```
+Real-time EtherCAT master for Elixir/Erlang via Zig NIFs, wrapping [IgH EtherCAT Master](https://etherlab.org/en/ethercat/).
 
 ## Installation
 
@@ -33,59 +10,98 @@ def deps do
 end
 ```
 
-**Requirements:** IgH EtherCAT Master (libethercat + kernel module), Zig 0.15.2, Elixir 1.19+
+**Requirements:** IgH EtherCAT Master (libethercat + kernel module), Zig 0.15.2, Elixir 1.19+, Linux
+
+## Quick Start
+
+```elixir
+# Open master and discover slaves
+{:ok, master, slaves} = EtherCAT.open(index: 0)
+
+# Configure slaves
+{:ok, pdos} = EtherCAT.configure_slave(master, hd(slaves), %{})
+
+# Register PDOs and get handles
+{:ok, handles} = EtherCAT.register_pdos(master, hd(slaves), pdos)
+
+# Start cyclic communication
+EtherCAT.start_cyclic(master)
+
+# Read/write
+EtherCAT.write(hd(handles), true)
+{:ok, value} = EtherCAT.read(hd(handles))
+
+# Subscribe to changes
+EtherCAT.watch(hd(handles))
+receive do
+  {:data_changed, _name, val} -> IO.puts("Changed: #{val}")
+end
+
+# Cleanup
+EtherCAT.close(master)
+```
 
 ## Architecture
 
 ```
-EtherCAT.Master (GenStatem)          Manages network lifecycle
-  ├─ State: offline → stale          Link detection
-  │        → synced → operational    Slave config → Cyclic I/O
-  ├─ Slave (GenServer)               Per-device configuration
-  └─ Domain (GenServer)              PDO grouping & updates
-
-Zig NIF Layer (22KB)                 30+ native functions
-  ├─ Cyclic task (µs timing)         Deterministic real-time loop
-  ├─ Bit-level change detection      XOR-based diffing
-  └─ Zero-copy domain access         Direct memory access
-
-IgH EtherCAT Master (C)              Linux kernel module
+┌─────────────────────────────────────────────┐
+│ Application Layer (Your Code)               │
+├─────────────────────────────────────────────┤
+│ EtherCAT.Master (GenStatem)                │
+│   ├─ State: offline → stale → synced       │
+│   │          → operational                  │
+│   ├─ Slave (GenServer) - per device        │
+│   └─ Domain (GenServer) - PDO grouping     │
+├─────────────────────────────────────────────┤
+│ Zig NIF Layer (22KB)                       │
+│   ├─ Cyclic task (µs timing)               │
+│   ├─ Bit-level change detection            │
+│   └─ Zero-copy domain access               │
+├─────────────────────────────────────────────┤
+│ IgH EtherCAT Master (C/Kernel)             │
+└─────────────────────────────────────────────┘
 ```
 
-## Key Features
+### State Machine
 
-**Real-Time**: Microsecond-precision cyclic tasks, zero-copy I/O, preemptable NIFs
-**OTP-Native**: GenStatem/GenServer architecture, Registry-based discovery, telemetry
-**Flexible**: Generic auto-discovery driver or custom device-specific drivers
-**Multi-Master**: Independent networks with scoped domains
+Master transitions through four states:
 
-## State Machine
-
-```
-:offline ──connect──▶ :stale ──sync_slaves──▶ :synced ──activate──▶ :operational
-    ▲                                                                      │
-    └──────────────────────────────── shutdown ─────────────────────────┘
-```
-
-**States:**
-- `:offline` - No link, NIF master created
+- `:offline` - Master created, not connected
 - `:stale` - Link up, waiting for enumeration
 - `:synced` - Slaves discovered, configuration allowed
-- `:operational` - Cyclic task running, real-time I/O active
+- `:operational` - Cyclic task running, I/O active
 
-## Multi-Master Example
+### OTP Supervision
 
-```elixir
-# Two independent networks
-{:ok, master1, _slaves1} = EtherCAT.open(index: 0)
-{:ok, master2, _slaves2} = EtherCAT.open(index: 1)
+```
+EtherCAT.Supervisor (one_for_one)
+  └─ EtherCAT.Registry (process discovery)
 
-# Same domain names, no collision
-EtherCAT.create_domain(master1, :default, 1)
-EtherCAT.create_domain(master2, :default, 1)
+EtherCAT.Master (standalone/supervised)
+  ├─ Domains (linked, not supervised)
+  └─ Slaves (linked, not supervised)
 ```
 
-## Custom Driver
+**Why linking instead of supervision?** Slaves and Domains are tightly coupled to Master's NIF resources. When Master dies, NIF resources become invalid, so children must die too. Restarting them independently would create orphaned processes with dead references.
+
+## Multi-Rate Domains
+
+Group PDOs by update frequency:
+
+```elixir
+# Fast I/O (every cycle)
+EtherCAT.create_domain(master, :fast_io, 1)
+
+# Slow sensors (every 100 cycles)
+EtherCAT.create_domain(master, :slow, 100)
+
+# Register PDOs to specific domains
+EtherCAT.register_pdos(master, slave, pdos, :fast_io)
+```
+
+## Custom Drivers
+
+Device-specific drivers encapsulate PDO mappings and configuration:
 
 ```elixir
 defmodule MyDriver do
@@ -95,25 +111,72 @@ defmodule MyDriver do
 
   def pdo_info(_state, :input_1) do
     {:ok, %{
-      sync_manager: {0, 2, 0},  # SM0, input, no watchdog
+      sync_manager: {0, 2, 0},
       pdo_index: 0x1A00,
-      entry: {0x6000, 0x01, 1}  # index, subindex, bits
+      entry: {0x6000, 0x01, 1}
     }}
   end
 end
 ```
 
-## Documentation
+**Generic driver** auto-discovers PDOs from EEPROM for devices without specific drivers.
 
-- **[OTP_PATTERNS.md](OTP_PATTERNS.md)** - Supervision, Registry, error handling
-- **[TELEMETRY.md](TELEMETRY.md)** - Monitoring events and metrics
+## Hardware Testing
 
-## Limitations
+Hardware tests require actual EtherCAT slaves connected to `/dev/EtherCAT0`.
 
-- Linux-only (IgH requirement)
-- Requires root or `CAP_NET_RAW`
-- Hard real-time needs RT kernel patches
-- Zig 0.15.2 specific
+### Typical Setup
+
+- **EK1100** - Bus coupler
+- **EL1809** - 16ch digital input
+- **EL2809** - 16ch digital output
+- Physical loopback wire (output 1 → input 1)
+
+### Running Tests
+
+```bash
+# Run all hardware tests
+mix test test/hardware/ --include hardware
+
+# Run specific test
+mix test test/hardware/basic_io_test.exs --include hardware
+```
+
+### Interactive Testing
+
+```elixir
+iex -S mix
+
+# Run hardware test interactively
+{master, input, output} = Hardware.BasicIOTest.run()
+
+# Experiment with devices
+EtherCAT.list_pdos(input)
+EtherCAT.set_pdo(output, "pdo_7000:1", true)
+
+# Cleanup
+GenServer.stop(master)
+```
+
+### Troubleshooting
+
+**Permission Denied:**
+```bash
+sudo chmod 666 /dev/EtherCAT0
+# or
+sudo usermod -a -G ethercat $USER
+```
+
+**No Slaves Found:**
+- Check physical connections and power
+- Verify kernel module: `lsmod | grep ec_`
+- Check master state: `ethercat master`
+
+**Link Down:**
+- Verify network cable connected
+- Ensure no other process using EtherCAT master
+
+See `test/hardware/README.md` for detailed hardware test documentation.
 
 ## License
 
