@@ -281,6 +281,23 @@ defmodule EtherCAT.Nif do
   // ============================================================================
   // MASTER OPERATIONS
   // ============================================================================
+  //
+  // ERROR HANDLING PHILOSOPHY (Elixir "Let It Crash"):
+  //
+  // 1. RECOVERABLE ERRORS → Return {:ok, result} | {:error, reason}
+  //    - Network issues (slave not responding, link down)
+  //    - Resource exhaustion (out of memory, no masters available)
+  //    - Business logic failures (activation failed, domain creation failed)
+  //    Examples: request_master, master_activate, get_master_state, master_get_slave
+  //
+  // 2. EXCEPTIONAL ERRORS → Raise (return Zig error with `!`)
+  //    - Programming errors (invalid indices, null pointers)
+  //    - Setup-time configuration errors (wrong PDO mapping)
+  //    - Critical cyclic operation failures (receive/send in RT loop)
+  //    Supervisor will restart the crashed process.
+  //    Examples: introspection NIFs, slave config ops, cyclic RT operations
+  //
+  // ============================================================================
 
   /// Get the version magic number of the EtherCAT library
   pub fn version_magic() !u32 {
@@ -300,9 +317,13 @@ defmodule EtherCAT.Nif do
 
   /// Activate the master
   /// Must be called after all configuration is complete and before cyclic operation
-  pub fn master_activate(master: MasterResource) !void {
+  /// Returns :ok | {:error, :activate_error}
+  pub fn master_activate(master: MasterResource) beam.term {
       const result = ecrt.ecrt_master_activate(master.unpack());
-      if (result != 0) return MasterError.ActivateError;
+      if (result != 0) {
+          return beam.make(.{.error, .activate_error}, .{});
+      }
+      return beam.make(.ok, .{});
   }
 
   /// Receive frames from the network
@@ -331,10 +352,12 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get the current state of the master
-  /// Returns a master_state_t structure with slave and link information
-  pub fn get_master_state(master: MasterResource) !beam.term {
-      const master_state: master_state_t = try do_get_master_state(master.unpack());
-      return beam.make(master_state, .{});
+  /// Returns {:ok, master_state_t} | {:error, reason}
+  pub fn get_master_state(master: MasterResource) beam.term {
+      const master_state = do_get_master_state(master.unpack()) catch {
+          return beam.make(.{.error, .master_not_found}, .{});
+      };
+      return beam.make(.{.ok, master_state}, .{});
   }
 
   /// Internal helper to retrieve and unpack master state
@@ -356,34 +379,50 @@ defmodule EtherCAT.Nif do
 
   /// Create a new domain accessor with layout tracking
   /// Domains are used to group PDO registrations for efficient I/O
-  pub fn master_create_domain(master: MasterResource, pid: beam.pid, interval: u32) !DomainAccessorResource {
-      const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse
-          return MasterError.MasterNotFound;
+  /// Returns {:ok, domain_accessor_resource} | {:error, reason}
+  pub fn master_create_domain(master: MasterResource, pid: beam.pid, interval: u32) beam.term {
+      const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse {
+          return beam.make(.{.error, .domain_creation_failed}, .{});
+      };
 
-      const accessor = try beam.allocator.create(DomainAccessor);
-        accessor.* = DomainAccessor.init(domain, pid, interval);
+      const accessor = beam.allocator.create(DomainAccessor) catch {
+          return beam.make(.{.error, .out_of_memory}, .{});
+      };
+      accessor.* = DomainAccessor.init(domain, pid, interval);
 
-      return DomainAccessorResource.create(accessor, .{});
+      const resource = DomainAccessorResource.create(accessor, .{}) catch {
+          beam.allocator.destroy(accessor);
+          return beam.make(.{.error, .resource_creation_failed}, .{});
+      };
+      return beam.make(.{.ok, resource}, .{});
   }
 
   /// Configure a slave device
-  /// Returns a slave configuration resource for further PDO configuration
-  pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) !SlaveConfigResource {
-      const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse return MasterError.SlaveConfigError;
-      return SlaveConfigResource.create(slave_config, .{});
+  /// Returns {:ok, slave_config_resource} | {:error, :slave_config_error}
+  pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) beam.term {
+      const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse {
+          return beam.make(.{.error, .slave_config_error}, .{});
+      };
+      const resource = SlaveConfigResource.create(slave_config, .{}) catch {
+          return beam.make(.{.error, .resource_creation_failed}, .{});
+      };
+      return beam.make(.{.ok, resource}, .{});
   }
 
   /// Get information about a slave at the given position
-  pub fn master_get_slave(master: MasterResource, slave_position: u16) !beam.term {
+  /// Recoverable: Slave might not be responding (network issue)
+  /// Returns {:ok, slave_info} | {:error, :get_slave_error}
+  pub fn master_get_slave(master: MasterResource, slave_position: u16) beam.term {
       var slave_info: ecrt.ec_slave_info_t = undefined;
       const result = ecrt.ecrt_master_get_slave(master.unpack(), slave_position, &slave_info);
       if (result != 0) {
-          return MasterError.GetSlaveError;
+          return beam.make(.{.error, .get_slave_error}, .{});
       }
-      return beam.make(.{ .ok, slave_info }, .{});
+      return beam.make(.{.ok, slave_info}, .{});
   }
 
   /// Reset the master to initial state
+  /// Let it crash: If reset fails, hardware is in undefined state and needs restart
   pub fn master_reset(master: MasterResource) !void {
       const result = ecrt.ecrt_master_reset(master.unpack());
       if (result != 0) {
@@ -399,23 +438,29 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get sync manager information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_sync_manager(master: MasterResource, slave_position: u16, sync_index: u8) !beam.term {
       var sync: ecrt.ec_sync_info_t = undefined;
-      _ = ecrt.ecrt_master_get_sync_manager(master.unpack(), slave_position, sync_index, &sync);
+      const result = ecrt.ecrt_master_get_sync_manager(master.unpack(), slave_position, sync_index, &sync);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(.{ .index = sync.index, .dir = sync.dir, .n_pdos = sync.n_pdos, .watchdog_mode = sync.watchdog_mode }, .{});
   }
 
   /// Get PDO information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_pdo(master: MasterResource, slave_position: u16, sync_index: u8, pos: u16) !beam.term {
       var pdo: ecrt.ec_pdo_info_t = undefined;
-      _ = ecrt.ecrt_master_get_pdo(master.unpack(), slave_position, sync_index, pos, &pdo);
+      const result = ecrt.ecrt_master_get_pdo(master.unpack(), slave_position, sync_index, pos, &pdo);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(.{ .index = pdo.index, .n_entries = pdo.n_entries }, .{});
   }
 
   /// Get PDO entry information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_pdo_entry(master: MasterResource, slave_position: u16, sync_index: u8, pdo_pos: u16, entry_pos: u16) !beam.term {
       var pdo_entry: ecrt.ec_pdo_entry_info_t = undefined;
-      _ = ecrt.ecrt_master_get_pdo_entry(master.unpack(), slave_position, sync_index, pdo_pos, entry_pos, &pdo_entry);
+      const result = ecrt.ecrt_master_get_pdo_entry(master.unpack(), slave_position, sync_index, pdo_pos, entry_pos, &pdo_entry);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(pdo_entry, .{});
   }
 
@@ -506,9 +551,11 @@ defmodule EtherCAT.Nif do
   }
 
   /// Set the process ID for the domain accessor
-  pub fn domain_set_pid(domain_accessor: DomainAccessorResource, pid: beam.pid) !void {
+  /// Returns :ok
+  pub fn domain_set_pid(domain_accessor: DomainAccessorResource, pid: beam.pid) beam.term {
       const accessor = domain_accessor.unpack();
       accessor.setPid(pid);
+      return beam.make(.ok, .{});
   }
 
   // ============================================================================
@@ -683,33 +730,50 @@ defmodule EtherCAT.Nif do
   // ============================================================================
   // SLAVE CONFIGURATION OPERATIONS
   // ============================================================================
+  //
+  // Let it crash: All configuration errors are programming bugs.
+  // These must be called before master activation with correct parameters.
+  // If they fail, the supervisor will restart and configuration can be fixed.
+  //
+  // ============================================================================
 
   /// Configure a sync manager for the slave
+  /// Let it crash: Invalid configuration is a programming error
   pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: ecrt.ec_direction_t, watchdog_mode: ecrt.ec_watchdog_mode_t) !void {
-      _ = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
+      const result = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Add a PDO to the sync manager's PDO assignment
+  /// Let it crash: Invalid PDO assignment is a programming error
   pub fn slave_config_pdo_assign_add(slave_config: SlaveConfigResource, sync_index: u8, index: u16) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
+      const result = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Clear the sync manager's PDO assignment
+  /// Let it crash: Invalid sync manager is a programming error
   pub fn slave_config_pdo_assign_clear(slave_config: SlaveConfigResource, sync_index: u8) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
+      const result = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Add a PDO entry to a PDO's mapping
+  /// Let it crash: Invalid PDO mapping is a programming error
   pub fn slave_config_pdo_mapping_add(slave_config: SlaveConfigResource, pdo_index: u16, entry_index: u16, entry_subindex: u8, entry_bit_length: u8) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
+      const result = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Clear a PDO's mapping
+  /// Let it crash: Invalid PDO index is a programming error
   pub fn slave_config_pdo_mapping_clear(slave_config: SlaveConfigResource, pdo_index: u16) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
+      const result = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Register a PDO entry for process data exchange and add to domain layout
+  /// Let it crash: Invalid PDO entry configuration is a programming error
   /// Returns the offset in bits within the domain data
   pub fn slave_config_reg_pdo_entry(
       slave_config: SlaveConfigResource,
@@ -755,6 +819,7 @@ defmodule EtherCAT.Nif do
   }
 
   /// Register a PDO entry by position and add to domain layout
+  /// Let it crash: Invalid PDO entry position is a programming error
   /// Returns the offset in bits within the domain data
   pub fn slave_config_reg_pdo_entry_pos(
       slave_config: SlaveConfigResource,
@@ -811,6 +876,7 @@ defmodule EtherCAT.Nif do
   /// (typically at master activation). The configuration persists and is
   /// automatically re-applied if the slave reboots.
   ///
+  /// Let it crash: Invalid SDO configuration is a programming error
   /// MUST be called BEFORE ecrt_master_activate(). Errors are asynchronous.
   pub fn slave_config_sdo(
       slave_config: SlaveConfigResource,
