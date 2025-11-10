@@ -20,7 +20,6 @@ defmodule EtherCAT.Slave do
     :slave_config,
     :sync_count,
     :pdo_registrations,
-    :assigned_pdos,
     locked?: false,
     configured?: false
   ]
@@ -35,7 +34,6 @@ defmodule EtherCAT.Slave do
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
           pdo_registrations: %{(unique_name :: String.t()) => domain()},
-          assigned_pdos: MapSet.t({non_neg_integer(), non_neg_integer()}),
           locked?: boolean(),
           configured?: boolean()
         }
@@ -331,8 +329,7 @@ defmodule EtherCAT.Slave do
       serial: 0,
       slave_config: slave_config,
       sync_count: sync_count,
-      pdo_registrations: %{},
-      assigned_pdos: MapSet.new()
+      pdo_registrations: %{}
     }
 
     {:ok, state}
@@ -587,9 +584,9 @@ defmodule EtherCAT.Slave do
       nil ->
         # Not registered yet, proceed with registration
         case register_single_pdo(name, domain, state) do
-          {:ok, ^unique_name, updated_state} ->
-            pdo_registrations = Map.put(updated_state.pdo_registrations, unique_name, domain)
-            {:reply, {:ok, unique_name}, %{updated_state | pdo_registrations: pdo_registrations}}
+          {:ok, ^unique_name, _state} ->
+            pdo_registrations = Map.put(state.pdo_registrations, unique_name, domain)
+            {:reply, {:ok, unique_name}, %{state | pdo_registrations: pdo_registrations}}
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
@@ -669,41 +666,28 @@ defmodule EtherCAT.Slave do
   # Follows EtherLab pattern: incrementally add assignments and mapping entries
   defp register_single_pdo(name, domain_name, state) do
     # Get PDO info from driver
-    {:ok, %{sync_manager: {sync_index, _direction, _watchdog}, pdo_index: pdo_index, entry: entry}} =
+    {:ok, %{sync_manager: {sync_index, direction, _watchdog}, pdo_index: pdo_index, entry: entry}} =
       state.driver.pdo_info(state.driver_state, name)
 
-    # Track this (sync_index, pdo_index) pair
-    pdo_key = {sync_index, pdo_index}
-
-    # Add PDO to assignment only if not already assigned
-    # Multiple driver PDO names can share the same pdo_index (different entries)
-    updated_state =
-      if MapSet.member?(state.assigned_pdos, pdo_key) do
-        state
-      else
-        config_pdo_assign_add_internal(state, sync_index, pdo_index)
-        %{state | assigned_pdos: MapSet.put(state.assigned_pdos, pdo_key)}
-      end
+    # Add PDO to assignment (EtherLab handles duplicates gracefully)
+    config_pdo_assign_add_internal(state, sync_index, pdo_index)
 
     # Add this entry to the PDO mapping (never clear - already cleared in configure)
     {entry_index, entry_subindex, entry_size} = entry
-    config_pdo_mapping_add_internal(updated_state, pdo_index, entry_index, entry_subindex, entry_size)
+    config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
 
     # Convert EtherCAT sync manager direction to atom for domain registration
     # 1 = EC_DIR_OUTPUT (master writes, slave reads - outputs from master's perspective)
     # 2 = EC_DIR_INPUT (master reads, slave writes - inputs from master's perspective)
-    {:ok, %{sync_manager: {_sync_idx, direction, _wd}}} =
-      updated_state.driver.pdo_info(updated_state.driver_state, name)
-
     pdo_direction = if direction == 2, do: :input, else: :output
 
     # Look up domain PID from Registry
-    {:ok, domain_pid} = Domain.find_domain(updated_state.master, domain_name)
+    {:ok, domain_pid} = Domain.find_domain(state.master, domain_name)
 
     # Register with domain using unique name
-    unique_name = "slave_#{updated_state.position}:#{name}"
-    Domain.register_pdo_entry(domain_pid, updated_state.slave_config, unique_name, entry, pdo_direction)
+    unique_name = "slave_#{state.position}:#{name}"
+    Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
 
-    {:ok, unique_name, updated_state}
+    {:ok, unique_name, state}
   end
 end
