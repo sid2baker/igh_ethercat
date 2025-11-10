@@ -20,7 +20,8 @@ defmodule EtherCAT.Slave do
     :slave_config,
     :sync_count,
     :pdo_registrations,
-    locked?: false
+    locked?: false,
+    configured?: false
   ]
 
   @type t :: %__MODULE__{
@@ -33,7 +34,8 @@ defmodule EtherCAT.Slave do
           product_code: non_neg_integer(),
           slave_config: reference() | nil,
           pdo_registrations: %{(unique_name :: String.t()) => domain()},
-          locked?: boolean()
+          locked?: boolean(),
+          configured?: boolean()
         }
 
   @type name :: String.t()
@@ -178,41 +180,47 @@ defmodule EtherCAT.Slave do
   end
 
   @doc """
-  Registers named PDOs to a domain for cyclic data exchange.
+  Registers a named PDO to a domain for cyclic data exchange.
 
-  This configures the slave's sync managers and PDO mappings based on the
-  driver's configuration, then registers the PDO entries with the specified
+  This function incrementally configures the slave's sync managers and PDO mappings
+  based on the driver's configuration, then registers the PDO entry with the specified
   domain for real-time I/O.
+
+  **IMPORTANT:** You must call `Slave.configure/2` before calling this function.
 
   ## Parameters
   - `slave` - The slave process PID
-  - `names` - List of PDO names (from `list_pdos/1`)
+  - `name` - PDO name (from `list_pdos/1`)
   - `domain` - Domain identifier (default: `:default_domain`)
   - `timeout` - Call timeout in milliseconds (default: 10_000 for configuration)
 
   ## Returns
-  - `{:ok, unique_names}` - List of unique PDO names (e.g., `["slave_0:pdo_6000:1"]`)
+  - `{:ok, unique_name}` - Unique PDO name (e.g., `"slave_0:pdo_6000:1"`)
   - `{:error, reason}` - Error if registration fails
 
   ## Example
 
-      {:ok, unique_names} = Slave.register_pdos(slave, [:input1, :input2], :default_domain)
-      #=> {:ok, ["slave_0:input1", "slave_0:input2"]}
+      # Configure the slave first
+      :ok = Slave.configure(slave, %{})
+
+      # Register PDOs incrementally to different domains
+      {:ok, "slave_0:input1"} = Slave.register_pdo(slave, :input1, :fast_domain)
+      {:ok, "slave_0:input2"} = Slave.register_pdo(slave, :input2, :slow_domain)
   """
-  @spec register_pdos(pid(), [name()], domain(), timeout()) ::
-          {:ok, [String.t()]} | {:error, term()}
-  def register_pdos(slave, names, domain \\ :default_domain, timeout \\ 10_000) do
-    GenServer.call(slave, {:register_pdos, names, domain}, timeout)
+  @spec register_pdo(pid(), name(), domain(), timeout()) ::
+          {:ok, String.t()} | {:error, term()}
+  def register_pdo(slave, name, domain \\ :default_domain, timeout \\ 10_000) do
+    GenServer.call(slave, {:register_pdo, name, domain}, timeout)
   end
 
   @doc """
   Convenience function to register all available PDOs to a domain.
 
-  Equivalent to calling `register_pdos(slave, list_pdos(slave), domain)`.
+  Calls `register_pdo/3` for each PDO returned by `list_pdos/1`.
 
   ## Returns
   - `{:ok, unique_names}` - List of unique PDO names
-  - `{:error, reason}` - Error if registration fails
+  - `{:error, reason}` - Error if any registration fails
 
   ## Example
 
@@ -225,7 +233,18 @@ defmodule EtherCAT.Slave do
   @spec register_all_pdos(pid(), domain()) :: {:ok, [String.t()]} | {:error, term()}
   def register_all_pdos(slave, domain \\ :default_domain) do
     all_pdos = list_pdos(slave)
-    register_pdos(slave, all_pdos, domain)
+
+    # Register each PDO individually
+    results =
+      Enum.map(all_pdos, fn pdo ->
+        register_pdo(slave, pdo, domain)
+      end)
+
+    # Check if any failed
+    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
+      {:error, reason} -> {:error, reason}
+      nil -> {:ok, Enum.map(results, fn {:ok, name} -> name end)}
+    end
   end
 
   @doc """
@@ -419,8 +438,14 @@ defmodule EtherCAT.Slave do
       sync_count: state.sync_count
     }
 
+    # Call driver configuration
     {:ok, driver_state} = state.driver.configure(ctx, state.driver_state, config)
-    {:reply, :ok, %{state | driver_state: driver_state}}
+
+    # Clear all PDO assignments and mappings for all sync managers
+    # This is done once after driver configuration to prepare for incremental registration
+    clear_all_pdo_config(state)
+
+    {:reply, :ok, %{state | driver_state: driver_state, configured?: true}}
   end
 
   # Read-only operations - allowed when locked
@@ -530,7 +555,7 @@ defmodule EtherCAT.Slave do
   end
 
   # PDO registration - reject when locked
-  def handle_call({:register_pdos, _names, _domain}, _from, %{locked?: true} = state) do
+  def handle_call({:register_pdo, _name, _domain}, _from, %{locked?: true} = state) do
     {:reply,
      {:error,
       {:slave_locked,
@@ -538,52 +563,38 @@ defmodule EtherCAT.Slave do
          "Reconfiguration requires restarting the master."}}, state}
   end
 
-  def handle_call({:register_pdos, names, domain}, _from, state) do
-    # Check if any PDO is already registered to a different domain
-    conflicts =
-      Enum.filter(names, fn name ->
-        unique_name = "slave_#{state.position}:#{name}"
+  # PDO registration - reject when not configured
+  def handle_call({:register_pdo, _name, _domain}, _from, %{configured?: false} = state) do
+    {:reply,
+     {:error,
+      {:not_configured,
+       "Cannot register PDOs before calling configure/2. " <>
+         "Call Slave.configure/2 first to initialize PDO configuration."}}, state}
+  end
 
-        case state.pdo_registrations[unique_name] do
-          nil -> false
-          ^domain -> false
-          other_domain -> {name, other_domain}
+  def handle_call({:register_pdo, name, domain}, _from, state) do
+    unique_name = "slave_#{state.position}:#{name}"
+
+    # Check if PDO is already registered to a different domain
+    case state.pdo_registrations[unique_name] do
+      ^domain ->
+        # Already registered to this domain, return success with same name
+        {:reply, {:ok, unique_name}, state}
+
+      nil ->
+        # Not registered yet, proceed with registration
+        case register_single_pdo(name, domain, state) do
+          {:ok, ^unique_name} ->
+            pdo_registrations = Map.put(state.pdo_registrations, unique_name, domain)
+            {:reply, {:ok, unique_name}, %{state | pdo_registrations: pdo_registrations}}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
         end
-      end)
 
-    if conflicts != [] do
-      # Return error with details about which PDOs are already registered
-      conflict_details =
-        Enum.map(conflicts, fn
-          {name, other_domain} -> {name, other_domain}
-          name -> {name, state.pdo_registrations["slave_#{state.position}:#{name}"]}
-        end)
-
-      {:reply, {:error, {:pdo_already_registered, conflict_details}}, state}
-    else
-      sync_managers = build_sync_manager_config(names, state)
-      Logger.debug("Sync managers to configure: #{inspect(sync_managers)}")
-
-      configured_entries = configure_and_register_pdos(sync_managers, state, domain)
-      Logger.debug("Configured PDO entries: #{inspect(configured_entries)}")
-
-      # Extract unique names from configured entries
-      unique_names =
-        Enum.map(configured_entries, fn {name, _entry, _direction} ->
-          "slave_#{state.position}:#{name}"
-        end)
-
-      # Map unique names to domain for tracking registrations
-      pdo_registrations =
-        configured_entries
-        |> Enum.map(fn {name, _entry, _direction} ->
-          unique_name = "slave_#{state.position}:#{name}"
-          {unique_name, domain}
-        end)
-        |> Map.new()
-        |> Map.merge(state.pdo_registrations)
-
-      {:reply, {:ok, unique_names}, %{state | pdo_registrations: pdo_registrations}}
+      other_domain ->
+        # Already registered to a different domain
+        {:reply, {:error, {:pdo_already_registered, name, other_domain}}, state}
     end
   end
 
@@ -607,67 +618,47 @@ defmodule EtherCAT.Slave do
 
   # Private helpers
 
-  # Builds a map of sync manager configurations from PDO names
-  defp build_sync_manager_config(names, state) do
-    Enum.reduce(names, %{}, fn name, acc ->
-      {:ok,
-       %{sync_manager: {sync_index, direction, watchdog}, pdo_index: pdo_index, entry: entry}} =
-        state.driver.pdo_info(state.driver_state, name)
+  # Clears all PDO assignments for all sync managers
+  # Called once during configure to prepare for incremental registration
+  defp clear_all_pdo_config(state) do
+    # Clear assignments for all sync managers
+    for sync_index <- 0..(state.sync_count - 1) do
+      config_pdo_assign_clear_internal(state, sync_index)
+    end
 
-      Map.update(
-        acc,
-        sync_index,
-        {direction, watchdog, %{pdo_index => [{name, entry}]}},
-        fn {^direction, ^watchdog, pdos} ->
-          pdos = Map.update(pdos, pdo_index, [{name, entry}], &[{name, entry} | &1])
-          {direction, watchdog, pdos}
-        end
-      )
-    end)
+    :ok
   end
 
-  # Configures sync managers and PDOs, then registers them with the domain
-  defp configure_and_register_pdos(sync_managers, state, domain_name) do
-    configured_entries =
-      for {sync_index, {sm_direction, watchdog, pdos}} <- sync_managers do
-        config_sync_manager_internal(state, sync_index, sm_direction, watchdog)
-        config_pdo_assign_clear_internal(state, sync_index)
+  # Registers a single PDO to a domain without clearing existing configuration
+  # This function is called after configure/2 has cleared all PDO assignments
+  defp register_single_pdo(name, domain_name, state) do
+    # Get PDO info from driver
+    {:ok, %{sync_manager: {sync_index, direction, watchdog}, pdo_index: pdo_index, entry: entry}} =
+      state.driver.pdo_info(state.driver_state, name)
 
-        # Convert EtherCAT sync manager direction to atom
-        # 1 = EC_DIR_OUTPUT (master writes, slave reads - outputs from master's perspective)
-        # 2 = EC_DIR_INPUT (master reads, slave writes - inputs from master's perspective)
-        pdo_direction = if sm_direction == 2, do: :input, else: :output
+    # Configure sync manager (idempotent)
+    config_sync_manager_internal(state, sync_index, direction, watchdog)
 
-        for {pdo_index, entries} <- pdos do
-          config_pdo_assign_add_internal(state, sync_index, pdo_index)
-          config_pdo_mapping_clear_internal(state, pdo_index)
+    # Add PDO to assignment (incremental - does not clear)
+    config_pdo_assign_add_internal(state, sync_index, pdo_index)
 
-          for {name, {entry_index, entry_subindex, entry_size}} <- entries do
-            config_pdo_mapping_add_internal(
-              state,
-              pdo_index,
-              entry_index,
-              entry_subindex,
-              entry_size
-            )
+    # Configure PDO mapping for this specific PDO
+    {entry_index, entry_subindex, entry_size} = entry
+    config_pdo_mapping_clear_internal(state, pdo_index)
+    config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
 
-            # Include direction as atom in the entry tuple
-            {name, {entry_index, entry_subindex, entry_size}, pdo_direction}
-          end
-        end
-      end
-      |> List.flatten()
+    # Convert EtherCAT sync manager direction to atom
+    # 1 = EC_DIR_OUTPUT (master writes, slave reads - outputs from master's perspective)
+    # 2 = EC_DIR_INPUT (master reads, slave writes - inputs from master's perspective)
+    pdo_direction = if direction == 2, do: :input, else: :output
 
     # Look up domain PID from Registry
     {:ok, domain_pid} = Domain.find_domain(state.master, domain_name)
 
-    # Register all entries with domain, using globally unique names
-    for {name, entry, direction} <- configured_entries do
-      # Prefix with slave position to ensure uniqueness across slaves
-      unique_name = "slave_#{state.position}:#{name}"
-      Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, direction)
-    end
+    # Register with domain using unique name
+    unique_name = "slave_#{state.position}:#{name}"
+    Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
 
-    configured_entries
+    {:ok, unique_name}
   end
 end
