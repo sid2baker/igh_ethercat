@@ -244,8 +244,14 @@ defmodule EtherCAT.Nif do
       pub fn initDomainData(self: *DomainAccessor) !void {
           const domain = self.getDomain();
           const size = ecrt.ecrt_domain_size(domain);
-          const data_ptr = ecrt.ecrt_domain_data(domain);
 
+          // Empty domains (no PDOs registered) have size 0 and null data pointer
+          if (size == 0) {
+              self.data = &[_]u8{};
+              return;
+          }
+
+          const data_ptr = ecrt.ecrt_domain_data(domain);
           if (data_ptr == null) {
               return error.InvalidDomainData;
           }

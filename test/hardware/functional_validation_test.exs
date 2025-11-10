@@ -74,11 +74,10 @@ defmodule Hardware.FunctionalValidationTest do
     on_exit(fn ->
       Logger.info("=== Cleaning up EtherCAT master ===")
 
-      try do
+      if Process.alive?(master) do
         EtherCAT.close(master)
-      catch
-        :exit, {:noproc, _} ->
-          Logger.info("Master process already terminated, skipping close")
+      else
+        Logger.info("Master process already terminated, skipping close")
       end
 
       :erlang.garbage_collect()

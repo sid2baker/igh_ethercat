@@ -126,6 +126,8 @@ defmodule Hardware.BasicIOTest do
     # Cleanup using new API (blocks until master is fully released)
     EtherCAT.close(master)
 
+    :erlang.garbage_collect()
+
     Logger.info("Test passed!")
   end
 end

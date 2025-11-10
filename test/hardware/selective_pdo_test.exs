@@ -107,6 +107,8 @@ defmodule Hardware.SelectivePDOTest do
     # Cleanup (blocks until master is fully released)
     EtherCAT.close(master)
 
+    :erlang.garbage_collect()
+
     Logger.info("Test passed!")
   end
 end
