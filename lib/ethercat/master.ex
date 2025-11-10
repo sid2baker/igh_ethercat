@@ -131,19 +131,8 @@ defmodule EtherCAT.Master do
             )
         end
 
-        domain_ref = Nif.master_create_domain(ref, self(), 1)
-
-        # Start default domain as linked process (dies with Master)
-        case Domain.start_link(
-               name: :default_domain,
-               master: self(),
-               resource: domain_ref,
-               interval: 1
-             ) do
-          {:ok, domain_pid} ->
-            # Update the domain accessor with the Domain process PID
-            Nif.domain_set_pid(domain_ref, domain_pid)
-
+        case do_create_domain(ref, :default_domain, 1) do
+          {:ok, _domain_ref, domain_pid} ->
             data = %__MODULE__{
               master_ref: ref,
               domains: [domain_pid],
@@ -156,8 +145,8 @@ defmodule EtherCAT.Master do
             {:ok, :offline, data}
 
           {:error, reason} ->
-            Logger.error("Failed to start default domain: #{inspect(reason)}")
-            {:stop, {:failed_to_start_domain, reason}}
+            Logger.error("Failed to create default domain: #{inspect(reason)}")
+            {:stop, {:failed_to_create_domain, reason}}
         end
 
       :error ->
@@ -205,44 +194,43 @@ defmodule EtherCAT.Master do
   def offline({:call, from}, :connect, data) do
     start_time = System.monotonic_time()
 
-    try do
-      master_state = Nif.get_master_state(data.master_ref)
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        if master_state.link_up == 1 do
+          duration = System.monotonic_time() - start_time
 
-      if master_state.link_up == 1 do
+          :telemetry.execute(
+            [:ethercat, :master, :connect],
+            %{duration: duration},
+            %{result: :success}
+          )
+
+          Logger.info("Master connected successfully, transitioning to :stale")
+          {:next_state, :stale, data, [{:reply, from, :ok}]}
+        else
+          duration = System.monotonic_time() - start_time
+
+          :telemetry.execute(
+            [:ethercat, :master, :connect],
+            %{duration: duration},
+            %{result: :link_down}
+          )
+
+          Logger.warning("Master connect failed: link is down")
+          {:keep_state_and_data, [{:reply, from, {:error, :link_down}}]}
+        end
+
+      {:error, reason} ->
         duration = System.monotonic_time() - start_time
 
         :telemetry.execute(
           [:ethercat, :master, :connect],
           %{duration: duration},
-          %{result: :success}
+          %{result: :error, error: inspect(reason)}
         )
 
-        Logger.info("Master connected successfully, transitioning to :stale")
-        {:next_state, :stale, data, [{:reply, from, :ok}]}
-      else
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :connect],
-          %{duration: duration},
-          %{result: :link_down}
-        )
-
-        Logger.warning("Master connect failed: link is down")
-        {:keep_state_and_data, [{:reply, from, {:error, :link_down}}]}
-      end
-    rescue
-      error ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :connect],
-          %{duration: duration},
-          %{result: :error, error: inspect(error)}
-        )
-
-        Logger.error("Error connecting master: #{inspect(error)}")
-        {:keep_state_and_data, [{:reply, from, {:error, :nif_error}}]}
+        Logger.error("Error connecting master: #{inspect(reason)}")
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
@@ -272,36 +260,8 @@ defmodule EtherCAT.Master do
   def stale({:call, from}, :sync_slaves, data) do
     start_time = System.monotonic_time()
 
-    try do
-      master_state = Nif.get_master_state(data.master_ref)
-
-      slaves =
-        for slave_position <- create_range(master_state.slaves_responding) do
-          {:ok, slave_info} = Nif.master_get_slave(data.master_ref, slave_position)
-          driver = driver_for_slave(slave_info.vendor_id, slave_info.product_code)
-
-          slave_config =
-            Nif.master_slave_config(
-              data.master_ref,
-              0,
-              slave_position,
-              slave_info.vendor_id,
-              slave_info.product_code
-            )
-
-          # Start slave as linked process (dies with Master)
-          {:ok, slave} =
-            Slave.start_link(
-              master: self(),
-              position: slave_position,
-              driver: driver,
-              slave_config: slave_config,
-              sync_count: slave_info.sync_count
-            )
-
-          slave
-        end
-
+    with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
+         {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
       :telemetry.execute(
@@ -311,32 +271,38 @@ defmodule EtherCAT.Master do
       )
 
       {:next_state, :synced, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
-    rescue
-      error ->
+    else
+      {:error, reason} ->
         duration = System.monotonic_time() - start_time
 
         :telemetry.execute(
           [:ethercat, :master, :sync_slaves],
           %{duration: duration},
-          %{result: :error, error: inspect(error)}
+          %{result: :error, error: inspect(reason)}
         )
 
-        Logger.error("Error syncing slaves: #{inspect(error)}")
-        {:keep_state_and_data, [{:reply, from, {:error, :sync_failed}}]}
+        Logger.error("Error syncing slaves: #{inspect(reason)}")
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
   def stale(:state_timeout, :update_master_state, data) do
-    master_state = Nif.get_master_state(data.master_ref)
-    require Logger
-    Logger.debug("Master state (stale): #{inspect(master_state)}")
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        Logger.debug("Master state (stale): #{inspect(master_state)}")
 
-    if master_state.slaves_responding == length(data.slaves) and
-         master_state.slaves_responding > 0 do
-      {:next_state, :synced, data}
-    else
-      actions = [{:state_timeout, data.update_interval, :update_master_state}]
-      {:keep_state_and_data, actions}
+        if master_state.slaves_responding == length(data.slaves) and
+             master_state.slaves_responding > 0 do
+          {:next_state, :synced, data}
+        else
+          actions = [{:state_timeout, data.update_interval, :update_master_state}]
+          {:keep_state_and_data, actions}
+        end
+
+      {:error, reason} ->
+        Logger.warning("Failed to get master state in stale: #{inspect(reason)}")
+        actions = [{:state_timeout, data.update_interval, :update_master_state}]
+        {:keep_state_and_data, actions}
     end
   end
 
@@ -409,14 +375,8 @@ defmodule EtherCAT.Master do
   end
 
   def synced({:call, from}, {:create_domain, name, interval}, data) do
-    domain_ref = Nif.master_create_domain(data.master_ref, self(), interval)
-
-    # Start domain as linked process (dies with Master)
-    case Domain.start_link(name: name, master: self(), resource: domain_ref, interval: interval) do
-      {:ok, domain_pid} ->
-        # Update the domain accessor with the Domain process PID
-        Nif.domain_set_pid(domain_ref, domain_pid)
-
+    case do_create_domain(data.master_ref, name, interval) do
+      {:ok, domain_ref, domain_pid} ->
         {:keep_state, %{data | domains: [domain_pid | data.domains]},
          [{:reply, from, {:ok, domain_ref}}]}
 
@@ -430,27 +390,34 @@ defmodule EtherCAT.Master do
   end
 
   def synced(:state_timeout, :update_master_state, data) do
-    master_state = Nif.get_master_state(data.master_ref)
-    Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
 
-    if master_state.slaves_responding == length(data.slaves) do
-      actions = [{:state_timeout, data.update_interval, :update_master_state}]
-      {:keep_state_and_data, actions}
-    else
-      # Slave count mismatch - network topology changed
-      # Terminate existing slave processes before transitioning to stale
-      Logger.warning(
-        "Slave count mismatch: expected #{length(data.slaves)}, got #{master_state.slaves_responding}. Re-scanning bus."
-      )
+        if master_state.slaves_responding == length(data.slaves) do
+          actions = [{:state_timeout, data.update_interval, :update_master_state}]
+          {:keep_state_and_data, actions}
+        else
+          # Slave count mismatch - network topology changed
+          # Terminate existing slave processes before transitioning to stale
+          Logger.warning(
+            "Slave count mismatch: expected #{length(data.slaves)}, got #{master_state.slaves_responding}. Re-scanning bus."
+          )
 
-      # Gracefully terminate all slave processes
-      Enum.each(data.slaves, fn slave_pid ->
-        if Process.alive?(slave_pid) do
-          GenServer.stop(slave_pid, :normal)
+          # Gracefully terminate all slave processes
+          Enum.each(data.slaves, fn slave_pid ->
+            if Process.alive?(slave_pid) do
+              GenServer.stop(slave_pid, :normal)
+            end
+          end)
+
+          {:next_state, :stale, %{data | slaves: []}}
         end
-      end)
 
-      {:next_state, :stale, %{data | slaves: []}}
+      {:error, reason} ->
+        Logger.warning("Failed to get master state in synced: #{inspect(reason)}")
+        actions = [{:state_timeout, data.update_interval, :update_master_state}]
+        {:keep_state_and_data, actions}
     end
   end
 
@@ -466,40 +433,40 @@ defmodule EtherCAT.Master do
 
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :operational})
 
-    try do
-      Nif.master_activate(data.master_ref)
-      parent_pid = self()
+    case Nif.master_activate(data.master_ref) do
+      :ok ->
+        parent_pid = self()
 
-      domain_resources =
-        Enum.map(data.domains, fn domain ->
-          Domain.get_ref(domain)
-        end)
+        domain_resources =
+          Enum.map(data.domains, fn domain ->
+            Domain.get_ref(domain)
+          end)
 
-      task_pid =
-        spawn_link(fn ->
-          Nif.cyclic_task(parent_pid, data.master_ref, domain_resources, data.update_interval)
-        end)
+        task_pid =
+          spawn_link(fn ->
+            Nif.cyclic_task(parent_pid, data.master_ref, domain_resources, data.update_interval)
+          end)
 
-      duration = System.monotonic_time() - start_time
-
-      :telemetry.execute(
-        [:ethercat, :master, :activate],
-        %{duration: duration},
-        %{domains: length(data.domains), slaves: length(data.slaves)}
-      )
-
-      {:keep_state, %{data | task_pid: task_pid}, []}
-    rescue
-      error ->
         duration = System.monotonic_time() - start_time
 
         :telemetry.execute(
           [:ethercat, :master, :activate],
           %{duration: duration},
-          %{result: :error, error: inspect(error)}
+          %{domains: length(data.domains), slaves: length(data.slaves)}
         )
 
-        Logger.error("Error activating master: #{inspect(error)}")
+        {:keep_state, %{data | task_pid: task_pid}, []}
+
+      {:error, reason} ->
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:ethercat, :master, :activate],
+          %{duration: duration},
+          %{result: :error, error: inspect(reason)}
+        )
+
+        Logger.error("Error activating master: #{inspect(reason)}")
         {:keep_state_and_data, []}
     end
   end
@@ -555,6 +522,62 @@ defmodule EtherCAT.Master do
   defp handle_unexpected(event_type, event_content, state, _data) do
     Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
     {:keep_state_and_data, []}
+  end
+
+  # Helper to create domain with proper two-step initialization (avoids race condition)
+  # 1. Create domain resource via NIF
+  # 2. Start Domain process with resource
+  # 3. Set PID in resource (now that process exists to receive messages)
+  defp do_create_domain(master_ref, name, interval) do
+    with {:ok, domain_ref} <- Nif.master_create_domain(master_ref, self(), interval),
+         {:ok, domain_pid} <-
+           Domain.start_link(
+             name: name,
+             master: self(),
+             resource: domain_ref,
+             interval: interval
+           ),
+         :ok <- Nif.domain_set_pid(domain_ref, domain_pid) do
+      {:ok, domain_ref, domain_pid}
+    end
+  end
+
+  # Helper to synchronize all slaves on the bus
+  defp sync_all_slaves(master_ref, slave_count) do
+    create_range(slave_count)
+    |> Enum.reduce_while({:ok, []}, fn slave_position, {:ok, acc} ->
+      case sync_single_slave(master_ref, slave_position) do
+        {:ok, slave_pid} -> {:cont, {:ok, [slave_pid | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, slaves} -> {:ok, Enum.reverse(slaves)}
+      error -> error
+    end
+  end
+
+  # Helper to synchronize a single slave
+  defp sync_single_slave(master_ref, slave_position) do
+    with {:ok, slave_info} <- Nif.master_get_slave(master_ref, slave_position),
+         {:ok, slave_config} <-
+           Nif.master_slave_config(
+             master_ref,
+             0,
+             slave_position,
+             slave_info.vendor_id,
+             slave_info.product_code
+           ) do
+      driver = driver_for_slave(slave_info.vendor_id, slave_info.product_code)
+
+      Slave.start_link(
+        master: self(),
+        position: slave_position,
+        driver: driver,
+        slave_config: slave_config,
+        sync_count: slave_info.sync_count
+      )
+    end
   end
 
   # Handle EXIT messages from linked processes (slaves, domains, cyclic task)

@@ -300,9 +300,13 @@ defmodule EtherCAT.Nif do
 
   /// Activate the master
   /// Must be called after all configuration is complete and before cyclic operation
-  pub fn master_activate(master: MasterResource) !void {
+  /// Returns :ok | {:error, :activate_error}
+  pub fn master_activate(master: MasterResource) beam.term {
       const result = ecrt.ecrt_master_activate(master.unpack());
-      if (result != 0) return MasterError.ActivateError;
+      if (result != 0) {
+          return beam.make(.{.error, .activate_error}, .{});
+      }
+      return beam.make(.ok, .{});
   }
 
   /// Receive frames from the network
@@ -331,10 +335,12 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get the current state of the master
-  /// Returns a master_state_t structure with slave and link information
-  pub fn get_master_state(master: MasterResource) !beam.term {
-      const master_state: master_state_t = try do_get_master_state(master.unpack());
-      return beam.make(master_state, .{});
+  /// Returns {:ok, master_state_t} | {:error, reason}
+  pub fn get_master_state(master: MasterResource) beam.term {
+      const master_state = do_get_master_state(master.unpack()) catch {
+          return beam.make(.{.error, .master_not_found}, .{});
+      };
+      return beam.make(.{.ok, master_state}, .{});
   }
 
   /// Internal helper to retrieve and unpack master state
@@ -356,21 +362,34 @@ defmodule EtherCAT.Nif do
 
   /// Create a new domain accessor with layout tracking
   /// Domains are used to group PDO registrations for efficient I/O
-  pub fn master_create_domain(master: MasterResource, pid: beam.pid, interval: u32) !DomainAccessorResource {
-      const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse
-          return MasterError.MasterNotFound;
+  /// Returns {:ok, domain_accessor_resource} | {:error, reason}
+  pub fn master_create_domain(master: MasterResource, pid: beam.pid, interval: u32) beam.term {
+      const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse {
+          return beam.make(.{.error, .domain_creation_failed}, .{});
+      };
 
-      const accessor = try beam.allocator.create(DomainAccessor);
-        accessor.* = DomainAccessor.init(domain, pid, interval);
+      const accessor = beam.allocator.create(DomainAccessor) catch {
+          return beam.make(.{.error, .out_of_memory}, .{});
+      };
+      accessor.* = DomainAccessor.init(domain, pid, interval);
 
-      return DomainAccessorResource.create(accessor, .{});
+      const resource = DomainAccessorResource.create(accessor, .{}) catch {
+          beam.allocator.destroy(accessor);
+          return beam.make(.{.error, .resource_creation_failed}, .{});
+      };
+      return beam.make(.{.ok, resource}, .{});
   }
 
   /// Configure a slave device
-  /// Returns a slave configuration resource for further PDO configuration
-  pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) !SlaveConfigResource {
-      const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse return MasterError.SlaveConfigError;
-      return SlaveConfigResource.create(slave_config, .{});
+  /// Returns {:ok, slave_config_resource} | {:error, :slave_config_error}
+  pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) beam.term {
+      const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse {
+          return beam.make(.{.error, .slave_config_error}, .{});
+      };
+      const resource = SlaveConfigResource.create(slave_config, .{}) catch {
+          return beam.make(.{.error, .resource_creation_failed}, .{});
+      };
+      return beam.make(.{.ok, resource}, .{});
   }
 
   /// Get information about a slave at the given position
@@ -506,9 +525,11 @@ defmodule EtherCAT.Nif do
   }
 
   /// Set the process ID for the domain accessor
-  pub fn domain_set_pid(domain_accessor: DomainAccessorResource, pid: beam.pid) !void {
+  /// Returns :ok
+  pub fn domain_set_pid(domain_accessor: DomainAccessorResource, pid: beam.pid) beam.term {
       const accessor = domain_accessor.unpack();
       accessor.setPid(pid);
+      return beam.make(.ok, .{});
   }
 
   // ============================================================================
