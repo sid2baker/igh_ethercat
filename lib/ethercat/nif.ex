@@ -422,6 +422,7 @@ defmodule EtherCAT.Nif do
   }
 
   /// Reset the master to initial state
+  /// Let it crash: If reset fails, hardware is in undefined state and needs restart
   pub fn master_reset(master: MasterResource) !void {
       const result = ecrt.ecrt_master_reset(master.unpack());
       if (result != 0) {
@@ -729,33 +730,50 @@ defmodule EtherCAT.Nif do
   // ============================================================================
   // SLAVE CONFIGURATION OPERATIONS
   // ============================================================================
+  //
+  // Let it crash: All configuration errors are programming bugs.
+  // These must be called before master activation with correct parameters.
+  // If they fail, the supervisor will restart and configuration can be fixed.
+  //
+  // ============================================================================
 
   /// Configure a sync manager for the slave
+  /// Let it crash: Invalid configuration is a programming error
   pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: ecrt.ec_direction_t, watchdog_mode: ecrt.ec_watchdog_mode_t) !void {
-      _ = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
+      const result = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Add a PDO to the sync manager's PDO assignment
+  /// Let it crash: Invalid PDO assignment is a programming error
   pub fn slave_config_pdo_assign_add(slave_config: SlaveConfigResource, sync_index: u8, index: u16) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
+      const result = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Clear the sync manager's PDO assignment
+  /// Let it crash: Invalid sync manager is a programming error
   pub fn slave_config_pdo_assign_clear(slave_config: SlaveConfigResource, sync_index: u8) !void {
-      _ = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
+      const result = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Add a PDO entry to a PDO's mapping
+  /// Let it crash: Invalid PDO mapping is a programming error
   pub fn slave_config_pdo_mapping_add(slave_config: SlaveConfigResource, pdo_index: u16, entry_index: u16, entry_subindex: u8, entry_bit_length: u8) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
+      const result = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Clear a PDO's mapping
+  /// Let it crash: Invalid PDO index is a programming error
   pub fn slave_config_pdo_mapping_clear(slave_config: SlaveConfigResource, pdo_index: u16) !void {
-      _ = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
+      const result = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
+      if (result != 0) return MasterError.SlaveConfigError;
   }
 
   /// Register a PDO entry for process data exchange and add to domain layout
+  /// Let it crash: Invalid PDO entry configuration is a programming error
   /// Returns the offset in bits within the domain data
   pub fn slave_config_reg_pdo_entry(
       slave_config: SlaveConfigResource,
@@ -801,6 +819,7 @@ defmodule EtherCAT.Nif do
   }
 
   /// Register a PDO entry by position and add to domain layout
+  /// Let it crash: Invalid PDO entry position is a programming error
   /// Returns the offset in bits within the domain data
   pub fn slave_config_reg_pdo_entry_pos(
       slave_config: SlaveConfigResource,
@@ -857,6 +876,7 @@ defmodule EtherCAT.Nif do
   /// (typically at master activation). The configuration persists and is
   /// automatically re-applied if the slave reboots.
   ///
+  /// Let it crash: Invalid SDO configuration is a programming error
   /// MUST be called BEFORE ecrt_master_activate(). Errors are asynchronous.
   pub fn slave_config_sdo(
       slave_config: SlaveConfigResource,
