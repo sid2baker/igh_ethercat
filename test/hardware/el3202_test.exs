@@ -76,23 +76,14 @@ defmodule Hardware.EL3202Test do
       Logger.info("Configuring EL3202 with temperature limits...")
       {:ok, available_pdos} = EtherCAT.configure_slave(el3202, config)
       Logger.info("Available PDOs: #{inspect(available_pdos)}")
+      # Available PDOs will be [:ch1, :ch2] - each representing a complete channel
 
       pdos_to_register = [
-        :ch1_value,
-        :ch1_error,
-        :ch1_underrange,
-        :ch1_overrange,
-        :ch1_limit1,
-        :ch1_limit2,
-        :ch2_value,
-        :ch2_error,
-        :ch2_underrange,
-        :ch2_overrange,
-        :ch2_limit1,
-        :ch2_limit2
+        :ch1,  # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
+        :ch2   # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
       ]
 
-      Logger.info("Registering PDOs...")
+      Logger.info("Registering PDOs (each PDO contains all entries for one channel)...")
       {:ok, pdo_handles} = EtherCAT.register_pdos(master, el3202, pdos_to_register)
 
       Logger.info("Starting cyclic mode...")
@@ -104,12 +95,12 @@ defmodule Hardware.EL3202Test do
 
       ch1_handle =
         Enum.find(pdo_handles, fn h ->
-          String.contains?(h.unique_name, "ch1_value")
+          String.contains?(h.unique_name, "ch1:value")
         end)
 
       ch2_handle =
         Enum.find(pdo_handles, fn h ->
-          String.contains?(h.unique_name, "ch2_value")
+          String.contains?(h.unique_name, "ch2:value")
         end)
 
       temp_values =

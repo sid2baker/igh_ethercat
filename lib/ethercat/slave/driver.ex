@@ -36,12 +36,15 @@ defmodule EtherCAT.Slave.Driver do
         }
 
   @typedoc """
-  Complete PDO information including sync manager, PDO index, and entry details
+  Complete PDO information including sync manager, PDO index, and all entries.
+
+  A PDO is an atomic unit - all entries must be registered together to the same domain.
+  The entries map provides semantic names for each entry in the PDO.
   """
   @type pdo_info :: %{
           sync_manager: sync_manager_config(),
           pdo_index: non_neg_integer(),
-          entry: pdo_entry_config()
+          entries: %{(entry_name :: atom()) => pdo_entry_config()}
         }
 
   @typedoc """
@@ -104,8 +107,21 @@ defmodule EtherCAT.Slave.Driver do
   @doc """
   Get detailed information about a specific PDO.
 
-  Returns PDO configuration including sync manager settings, PDO index,
-  and entry details needed for registration.
+  Returns complete PDO configuration including sync manager settings, PDO index,
+  and ALL entries in the PDO. A PDO is an atomic unit - all entries will be
+  registered together to the same domain.
+
+  ## Example
+
+      pdo_info(state, :ch1)
+      #=> {:ok, %{
+      #     sync_manager: {3, 2, 0},
+      #     pdo_index: 0x1A00,
+      #     entries: %{
+      #       underrange: {0x6000, 0x01, 1},
+      #       value: {0x6000, 0x11, 16}
+      #     }
+      #   }}
   """
   @callback pdo_info(state :: state(), pdo :: pdo_name()) ::
               {:ok, pdo_info()} | {:error, term()}
@@ -263,11 +279,18 @@ defmodule EtherCAT.Slave.Driver do
       # Discover all PDOs from slave's EEPROM configuration.
       #
       # Reads sync managers, PDOs, and PDO entries to build a complete
-      # map of available PDOs. Useful for generic drivers or drivers that
-      # need to validate expected PDO configuration.
+      # map of available PDOs. Each PDO contains all its entries.
+      # Useful for generic drivers or drivers that need to validate expected PDO configuration.
       #
-      # Returns map of PDO names to configurations:
-      #   %{"pdo_6000:1" => %{sync_manager: {...}, pdo_index: ..., entry: {...}}}
+      # Returns map of PDO identifiers (using pdo_index as hex string) to configurations:
+      #   %{"0x1a00" => %{
+      #     sync_manager: {3, 2, 0},
+      #     pdo_index: 0x1A00,
+      #     entries: %{
+      #       "0x6000:1" => {0x6000, 0x01, 1},
+      #       "0x6000:11" => {0x6000, 0x11, 16}
+      #     }
+      #   }}
       @spec discover_pdos_from_eeprom(EtherCAT.Slave.Driver.context(), non_neg_integer()) ::
               map()
       defp discover_pdos_from_eeprom(ctx, sync_count) do
@@ -277,19 +300,27 @@ defmodule EtherCAT.Slave.Driver do
           for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
             pdo = get_pdo(ctx, sync_index, pdo_pos)
 
-            for entry_pos <- 0..(pdo.n_entries - 1) do
-              entry = get_pdo_entry(ctx, sync_index, pdo_pos, entry_pos)
+            # Collect all entries for this PDO
+            entries =
+              for entry_pos <- 0..(pdo.n_entries - 1) do
+                entry = get_pdo_entry(ctx, sync_index, pdo_pos, entry_pos)
 
-              pdo_name =
-                "pdo_#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
+                entry_name =
+                  "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
 
-              {pdo_name,
-               %{
-                 sync_manager: {sync_manager.index, sync_manager.dir, sync_manager.watchdog_mode},
-                 pdo_index: pdo.index,
-                 entry: {entry.index, entry.subindex, entry.bit_length}
-               }}
-            end
+                {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+              end
+              |> Map.new()
+
+            # Use PDO index as the identifier
+            pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
+
+            {pdo_name,
+             %{
+               sync_manager: {sync_manager.index, sync_manager.dir, sync_manager.watchdog_mode},
+               pdo_index: pdo.index,
+               entries: entries
+             }}
           end
         end
         |> List.flatten()

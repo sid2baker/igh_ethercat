@@ -19,122 +19,45 @@ defmodule EtherCAT.Drivers.EL3202 do
   @impl true
   def list_pdos(_state) do
     [
-      # Channel 1 PDO entries
-      :ch1_underrange,
-      :ch1_overrange,
-      :ch1_limit1,
-      :ch1_limit2,
-      :ch1_error,
-      :ch1_value,
-      # Channel 2 PDO entries
-      :ch2_underrange,
-      :ch2_overrange,
-      :ch2_limit1,
-      :ch2_limit2,
-      :ch2_error,
-      :ch2_value
+      # Each PDO represents one complete channel (all entries)
+      :ch1,
+      :ch2
     ]
   end
 
   @impl true
   def pdo_info(_state, pdo_name) do
     case pdo_name do
-      # Channel 1 entries (all in TxPDO 0x1A00, SM3)
-      :ch1_underrange ->
+      # Channel 1 - TxPDO 0x1A00 (SM3, all 6 entries)
+      :ch1 ->
         {:ok,
          %{
            sync_manager: {3, 2, 0},
            pdo_index: 0x1A00,
-           entry: {0x6000, 0x01, 1}
+           entries: %{
+             underrange: {0x6000, 0x01, 1},
+             overrange: {0x6000, 0x02, 1},
+             limit1: {0x6000, 0x03, 2},
+             limit2: {0x6000, 0x05, 2},
+             error: {0x6000, 0x07, 1},
+             value: {0x6000, 0x11, 16}
+           }
          }}
 
-      :ch1_overrange ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A00,
-           entry: {0x6000, 0x02, 1}
-         }}
-
-      :ch1_limit1 ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A00,
-           entry: {0x6000, 0x03, 2}
-         }}
-
-      :ch1_limit2 ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A00,
-           entry: {0x6000, 0x05, 2}
-         }}
-
-      :ch1_error ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A00,
-           entry: {0x6000, 0x07, 1}
-         }}
-
-      :ch1_value ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A00,
-           entry: {0x6000, 0x11, 16}
-         }}
-
-      # Channel 2 entries (all in TxPDO 0x1A01, SM3)
-      :ch2_underrange ->
+      # Channel 2 - TxPDO 0x1A01 (SM3, all 6 entries)
+      :ch2 ->
         {:ok,
          %{
            sync_manager: {3, 2, 0},
            pdo_index: 0x1A01,
-           entry: {0x6010, 0x01, 1}
-         }}
-
-      :ch2_overrange ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A01,
-           entry: {0x6010, 0x02, 1}
-         }}
-
-      :ch2_limit1 ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A01,
-           entry: {0x6010, 0x03, 2}
-         }}
-
-      :ch2_limit2 ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A01,
-           entry: {0x6010, 0x05, 2}
-         }}
-
-      :ch2_error ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A01,
-           entry: {0x6010, 0x07, 1}
-         }}
-
-      :ch2_value ->
-        {:ok,
-         %{
-           sync_manager: {3, 2, 0},
-           pdo_index: 0x1A01,
-           entry: {0x6010, 0x11, 16}
+           entries: %{
+             underrange: {0x6010, 0x01, 1},
+             overrange: {0x6010, 0x02, 1},
+             limit1: {0x6010, 0x03, 2},
+             limit2: {0x6010, 0x05, 2},
+             error: {0x6010, 0x07, 1},
+             value: {0x6010, 0x11, 16}
+           }
          }}
 
       _ ->
