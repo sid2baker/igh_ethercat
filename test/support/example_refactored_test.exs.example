@@ -1,0 +1,85 @@
+defmodule Hardware.RefactoredBasicIOTest do
+  @moduledoc """
+  Example showing how to use the new test infrastructure.
+
+  This is a refactored version of basic_io_test.exs demonstrating:
+  - Use of HardwareCase for automatic setup/teardown
+  - HardwareHelpers for common operations
+  - HardwareConfigs for explicit requirements
+  - Cleaner, more maintainable test code
+  """
+
+  use HardwareCase
+
+  # Declare hardware requirements explicitly
+  @hardware_config :basic_io_loopback
+  @tag min_slaves: 3
+
+  setup %{master: master, slaves: slaves} do
+    # Validate hardware configuration
+    config = HardwareConfigs.get(@hardware_config)
+
+    case HardwareConfigs.validate(config, slaves) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+
+    # Select input/output slaves using helper
+    {input_slave, output_slave} = select_io_slaves(slaves)
+
+    # Configure slaves
+    {:ok, input_pdos} = EtherCAT.configure_slave(input_slave, %{})
+    {:ok, output_pdos} = EtherCAT.configure_slave(output_slave, %{})
+
+    # Register PDOs
+    {:ok, input_handles} = EtherCAT.register_pdos(master, input_slave, input_pdos)
+    {:ok, output_handles} = EtherCAT.register_pdos(master, output_slave, output_pdos)
+
+    # Start cyclic
+    EtherCAT.start_cyclic(master)
+    wait_stabilization()
+
+    %{
+      input: hd(input_handles),
+      output: hd(output_handles)
+    }
+  end
+
+  test "basic loopback", %{input: input, output: output} do
+    # Clean test using helpers - no boilerplate!
+    assert_loopback(input, output, false)
+    assert_loopback(input, output, true)
+    assert_loopback(input, output, false)
+  end
+
+  test "notification delivery", %{input: input, output: output} do
+    # Subscribe and flush
+    :ok = EtherCAT.watch(input)
+    flush_mailbox()
+
+    # Test sequence
+    :ok = EtherCAT.write(output, true)
+    assert_notification(input.unique_name, true)
+
+    :ok = EtherCAT.write(output, false)
+    assert_notification(input.unique_name, false)
+  end
+
+  test "concurrent operations", %{input: input, output: output} do
+    :ok = EtherCAT.watch(input)
+    flush_mailbox()
+
+    # Rapid toggles
+    for value <- [true, false, true, false, true] do
+      :ok = EtherCAT.write(output, value)
+      :timer.sleep(100)
+    end
+
+    # Verify notifications received
+    notifications = count_notifications()
+    assert notifications >= 3, "Expected multiple notifications, got #{notifications}"
+  end
+end
