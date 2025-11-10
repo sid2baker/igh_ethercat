@@ -321,7 +321,7 @@ defmodule EtherCAT.Nif do
   pub fn master_activate(master: MasterResource) beam.term {
       const result = ecrt.ecrt_master_activate(master.unpack());
       if (result != 0) {
-          return beam.make(.{.error, .activate_error}, .{});
+          return beam.make_error_pair(.activate_error, .{});
       }
       return beam.make(.ok, .{});
   }
@@ -355,9 +355,9 @@ defmodule EtherCAT.Nif do
   /// Returns {:ok, master_state_t} | {:error, reason}
   pub fn get_master_state(master: MasterResource) beam.term {
       const master_state = do_get_master_state(master.unpack()) catch {
-          return beam.make(.{.error, .master_not_found}, .{});
+          return beam.make_error_pair(.master_not_found, .{});
       };
-      return beam.make(.{.ok, master_state}, .{});
+      return beam.make(.{ .ok, master_state }, .{});
   }
 
   /// Internal helper to retrieve and unpack master state
@@ -382,31 +382,31 @@ defmodule EtherCAT.Nif do
   /// Returns {:ok, domain_accessor_resource} | {:error, reason}
   pub fn master_create_domain(master: MasterResource, pid: beam.pid, interval: u32) beam.term {
       const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse {
-          return beam.make(.{.error, .domain_creation_failed}, .{});
+          return beam.make_error_pair(.domain_creation_failed, .{});
       };
 
       const accessor = beam.allocator.create(DomainAccessor) catch {
-          return beam.make(.{.error, .out_of_memory}, .{});
+          return beam.make_error_pair(.out_of_memory, .{});
       };
       accessor.* = DomainAccessor.init(domain, pid, interval);
 
       const resource = DomainAccessorResource.create(accessor, .{}) catch {
           beam.allocator.destroy(accessor);
-          return beam.make(.{.error, .resource_creation_failed}, .{});
+          return beam.make_error_pair(.resource_creation_failed, .{});
       };
-      return beam.make(.{.ok, resource}, .{});
+      return beam.make(.{ .ok, resource }, .{});
   }
 
   /// Configure a slave device
   /// Returns {:ok, slave_config_resource} | {:error, :slave_config_error}
   pub fn master_slave_config(master: MasterResource, alias: u16, position: u16, vendor_id: u32, product_code: u32) beam.term {
       const slave_config = ecrt.ecrt_master_slave_config(master.unpack(), alias, position, vendor_id, product_code) orelse {
-          return beam.make(.{.error, .slave_config_error}, .{});
+          return beam.make_error_pair(.slave_config_error, .{});
       };
       const resource = SlaveConfigResource.create(slave_config, .{}) catch {
-          return beam.make(.{.error, .resource_creation_failed}, .{});
+          return beam.make_error_pair(.resource_creation_failed, .{});
       };
-      return beam.make(.{.ok, resource}, .{});
+      return beam.make(.{ .ok, resource }, .{});
   }
 
   /// Get information about a slave at the given position
@@ -416,9 +416,9 @@ defmodule EtherCAT.Nif do
       var slave_info: ecrt.ec_slave_info_t = undefined;
       const result = ecrt.ecrt_master_get_slave(master.unpack(), slave_position, &slave_info);
       if (result != 0) {
-          return beam.make(.{.error, .get_slave_error}, .{});
+          return beam.make_error_pair(.get_slave_error, .{});
       }
-      return beam.make(.{.ok, slave_info}, .{});
+      return beam.make(.{ .ok, slave_info }, .{});
   }
 
   /// Reset the master to initial state

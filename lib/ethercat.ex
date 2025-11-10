@@ -9,37 +9,26 @@ defmodule EtherCAT do
   @doc "Opens master, connects, and discovers slaves. Returns `{:ok, master, [slaves]}`."
   @spec open(keyword()) :: {:ok, pid(), [pid()]} | {:error, term()}
   def open(opts \\ []) do
-    with {:ok, master} <- Master.start_link(opts),
-         :ok <- Master.connect(master),
-         {:ok, slaves} <- Master.sync_slaves(master) do
-      {:ok, master, slaves}
+    case Master.start_link(opts) do
+      {:ok, master} ->
+        with :ok <- Master.connect(master),
+             {:ok, slaves} <- Master.sync_slaves(master) do
+          {:ok, master, slaves}
+        else
+          error ->
+            Master.stop(master)
+            error
+        end
+
+      error ->
+        error
     end
   end
 
   @doc "Closes master and cleans up all resources."
   @spec close(pid()) :: :ok
   def close(master) do
-    # Monitor the master process to know when it terminates
-    ref = Process.monitor(master)
-
-    # Stop the master (blocks until terminate/2 completes)
-    GenServer.stop(master, :normal)
-
-    # Wait for the process to terminate
-    receive do
-      {:DOWN, ^ref, :process, ^master, _reason} -> :ok
-    after
-      5000 ->
-        Logger.warning("Master process did not terminate within 5 seconds")
-        :ok
-    end
-
-    # Give the EtherCAT kernel module time to release the device
-    # Empirically determined: 500ms for single test, 3500ms for multiple sequential tests
-    # The kernel module needs significant time to fully release resources
-    :timer.sleep(3500)
-
-    :ok
+    Master.stop(master)
   end
 
   @doc "Creates domain with name and interval multiplier."

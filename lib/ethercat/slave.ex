@@ -4,7 +4,6 @@ defmodule EtherCAT.Slave do
   """
   use GenServer
   require Logger
-  import EtherCAT.Utils
 
   alias EtherCAT.{Master, Domain}
 

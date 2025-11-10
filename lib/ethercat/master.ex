@@ -46,6 +46,21 @@ defmodule EtherCAT.Master do
     :gen_statem.start_link({:local, name}, __MODULE__, {master_index, update_interval}, [])
   end
 
+  @doc """
+  Safely stops the master and cleans up all resources.
+
+  This will:
+  - Stop the cyclic task (if running)
+  - Terminate all linked domains and slaves
+  - Release the EtherCAT master resource
+
+  The process terminates normally via OTP's supervision tree.
+  """
+  @spec stop(GenServer.server(), timeout()) :: :ok
+  def stop(master, timeout \\ 5000) do
+    :gen_statem.stop(master, :normal, timeout)
+  end
+
   @doc "Connects to EtherCAT network, transitions to `:stale`."
   @spec connect(GenServer.server(), timeout()) :: :ok | {:error, term()}
   def connect(master, timeout \\ 5000) do
@@ -156,28 +171,10 @@ defmodule EtherCAT.Master do
   end
 
   @impl true
-  def terminate(reason, _state, data) do
+  def terminate(reason, _state, _data) do
     Logger.info("EtherCAT Master terminating: #{inspect(reason)}")
-
-    # Stop cyclic task if running
-    if data.task_pid && Process.alive?(data.task_pid) do
-      Process.exit(data.task_pid, :shutdown)
-    end
-
-    # Terminate all slaves (linked, so they'll die automatically, but we send explicit shutdown)
-    Enum.each(data.slaves, fn slave_pid ->
-      if Process.alive?(slave_pid) do
-        Process.exit(slave_pid, :shutdown)
-      end
-    end)
-
-    # Terminate all domains (linked, so they'll die automatically, but we send explicit shutdown)
-    Enum.each(data.domains, fn domain_pid ->
-      if Process.alive?(domain_pid) do
-        Process.exit(domain_pid, :shutdown)
-      end
-    end)
-
+    # All linked processes (slaves, domains, cyclic task) will automatically
+    # receive exit signals and terminate when this process terminates
     Logger.info("EtherCAT Master cleanup completed")
     :ok
   end
