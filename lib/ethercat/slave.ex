@@ -154,31 +154,6 @@ defmodule EtherCAT.Slave do
     GenServer.call(slave, {:get_pdo_entry, sync_index, pdo_pos, entry_pos})
   end
 
-  # Configuration API (must be called before Master activation)
-
-  @doc """
-  Configures a sync manager with direction and watchdog settings.
-  """
-  def configure_sync_manager(slave, sync_index, direction, watchdog) do
-    GenServer.call(slave, {:configure_sync_manager, sync_index, direction, watchdog})
-  end
-
-  @doc """
-  Configures PDO assignment for a sync manager.
-  Clears existing assignments and adds the specified PDO indices.
-  """
-  def configure_pdo_assignment(slave, sync_index, pdo_indices) do
-    GenServer.call(slave, {:configure_pdo_assignment, sync_index, pdo_indices})
-  end
-
-  @doc """
-  Configures PDO mapping for a specific PDO index.
-  Clears existing mappings and adds the specified entries.
-  """
-  def configure_pdo_mapping(slave, pdo_index, entries) do
-    GenServer.call(slave, {:configure_pdo_mapping, pdo_index, entries})
-  end
-
   @doc """
   Registers a named PDO to a domain for cyclic data exchange.
 
@@ -467,66 +442,6 @@ defmodule EtherCAT.Slave do
   def handle_call({:get_pdo_entry, sync_index, pdo_pos, entry_pos}, _from, state) do
     result = get_pdo_entry_internal(state, sync_index, pdo_pos, entry_pos)
     {:reply, result, state}
-  end
-
-  # Sync manager configuration - reject when locked
-  def handle_call(
-        {:configure_sync_manager, _sync_index, _direction, _watchdog},
-        _from,
-        %{locked?: true} = state
-      ) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot configure sync managers after master activation. " <>
-         "Reconfiguration requires restarting the master."}}, state}
-  end
-
-  def handle_call({:configure_sync_manager, sync_index, direction, watchdog}, _from, state) do
-    config_sync_manager_internal(state, sync_index, direction, watchdog)
-    {:reply, :ok, state}
-  end
-
-  # PDO assignment configuration - reject when locked
-  def handle_call(
-        {:configure_pdo_assignment, _sync_index, _pdo_indices},
-        _from,
-        %{locked?: true} = state
-      ) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot configure PDO assignments after master activation. " <>
-         "Reconfiguration requires restarting the master."}}, state}
-  end
-
-  def handle_call({:configure_pdo_assignment, sync_index, pdo_indices}, _from, state) do
-    config_pdo_assign_clear_internal(state, sync_index)
-
-    for pdo_index <- pdo_indices do
-      config_pdo_assign_add_internal(state, sync_index, pdo_index)
-    end
-
-    {:reply, :ok, state}
-  end
-
-  # PDO mapping configuration - reject when locked
-  def handle_call({:configure_pdo_mapping, _pdo_index, _entries}, _from, %{locked?: true} = state) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot configure PDO mappings after master activation. " <>
-         "Reconfiguration requires restarting the master."}}, state}
-  end
-
-  def handle_call({:configure_pdo_mapping, pdo_index, entries}, _from, state) do
-    config_pdo_mapping_clear_internal(state, pdo_index)
-
-    for {entry_index, entry_subindex, entry_size} <- entries do
-      config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
-    end
-
-    {:reply, :ok, state}
   end
 
   # SDO configuration - reject when locked
