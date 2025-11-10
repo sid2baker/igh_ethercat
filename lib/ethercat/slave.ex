@@ -575,18 +575,17 @@ defmodule EtherCAT.Slave do
   def handle_call({:register_pdo, name, domain}, _from, state) do
     unique_name = "slave_#{state.position}:#{name}"
 
-    # Check if PDO is already registered to a different domain
     case state.pdo_registrations[unique_name] do
       ^domain ->
-        # Already registered to this domain, return success with same name
+        # Already registered to this domain, return success idempotently
         {:reply, {:ok, unique_name}, state}
 
       nil ->
         # Not registered yet, proceed with registration
         case register_single_pdo(name, domain, state) do
-          {:ok, ^unique_name, _state} ->
-            pdo_registrations = Map.put(state.pdo_registrations, unique_name, domain)
-            {:reply, {:ok, unique_name}, %{state | pdo_registrations: pdo_registrations}}
+          {:ok, ^unique_name} ->
+            new_state = put_in(state.pdo_registrations[unique_name], domain)
+            {:reply, {:ok, unique_name}, new_state}
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
@@ -622,72 +621,59 @@ defmodule EtherCAT.Slave do
   # Called once during configure to prepare for incremental registration
   # Following EtherLab's ecrt_slave_config_pdos pattern
   defp clear_all_pdo_config(state) do
-    # Get all PDOs from driver to know which pdo_indices to clear
-    all_pdos = state.driver.list_pdos(state.driver_state)
-
-    # Extract PDO info for all driver PDOs
-    pdo_infos =
-      Enum.map(all_pdos, fn pdo_name ->
-        {:ok, info} = state.driver.pdo_info(state.driver_state, pdo_name)
-        info
-      end)
-
-    # Group by sync_index
-    by_sync = Enum.group_by(pdo_infos, fn info ->
+    state.driver.list_pdos(state.driver_state)
+    |> Enum.map(fn pdo_name ->
+      {:ok, info} = state.driver.pdo_info(state.driver_state, pdo_name)
+      info
+    end)
+    |> Enum.group_by(fn info ->
       {sync_idx, _dir, _wd} = info.sync_manager
       sync_idx
     end)
-
-    # Configure and clear for each sync manager
-    for {sync_index, infos} <- by_sync do
+    |> Enum.each(fn {sync_index, infos} ->
       # Get sync manager config from first PDO in this sync
       {_sync_idx, direction, watchdog} = hd(infos).sync_manager
 
-      # Configure sync manager
+      # Configure sync manager, then clear assignments and mappings
       config_sync_manager_internal(state, sync_index, direction, watchdog)
-
-      # Clear PDO assignments for this sync
       config_pdo_assign_clear_internal(state, sync_index)
 
       # Clear PDO mappings for all unique pdo_indices in this sync
       infos
       |> Enum.map(& &1.pdo_index)
       |> Enum.uniq()
-      |> Enum.each(fn pdo_index ->
-        config_pdo_mapping_clear_internal(state, pdo_index)
-      end)
-    end
-
-    :ok
+      |> Enum.each(&config_pdo_mapping_clear_internal(state, &1))
+    end)
   end
 
   # Registers a single PDO to a domain without clearing existing configuration
   # This function is called after configure/2 has cleared all PDO assignments and mappings
   # Follows EtherLab pattern: incrementally add assignments and mapping entries
   defp register_single_pdo(name, domain_name, state) do
-    # Get PDO info from driver
-    {:ok, %{sync_manager: {sync_index, direction, _watchdog}, pdo_index: pdo_index, entry: entry}} =
-      state.driver.pdo_info(state.driver_state, name)
+    with {:ok, pdo_info} <- state.driver.pdo_info(state.driver_state, name),
+         {:ok, domain_pid} <- Domain.find_domain(state.master, domain_name) do
+      %{sync_manager: {sync_index, direction, _watchdog}, pdo_index: pdo_index, entry: entry} =
+        pdo_info
 
-    # Add PDO to assignment (EtherLab handles duplicates gracefully)
-    config_pdo_assign_add_internal(state, sync_index, pdo_index)
+      # Add PDO to assignment (EtherLab handles duplicates gracefully)
+      config_pdo_assign_add_internal(state, sync_index, pdo_index)
 
-    # Add this entry to the PDO mapping (never clear - already cleared in configure)
-    {entry_index, entry_subindex, entry_size} = entry
-    config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
+      # Add this entry to the PDO mapping (never clear - already cleared in configure)
+      {entry_index, entry_subindex, entry_size} = entry
+      config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
 
-    # Convert EtherCAT sync manager direction to atom for domain registration
-    # 1 = EC_DIR_OUTPUT (master writes, slave reads - outputs from master's perspective)
-    # 2 = EC_DIR_INPUT (master reads, slave writes - inputs from master's perspective)
-    pdo_direction = if direction == 2, do: :input, else: :output
+      # Register with domain using unique name
+      unique_name = "slave_#{state.position}:#{name}"
+      pdo_direction = ethercat_direction_to_atom(direction)
+      Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
 
-    # Look up domain PID from Registry
-    {:ok, domain_pid} = Domain.find_domain(state.master, domain_name)
-
-    # Register with domain using unique name
-    unique_name = "slave_#{state.position}:#{name}"
-    Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
-
-    {:ok, unique_name, state}
+      {:ok, unique_name}
+    end
   end
+
+  # Converts EtherCAT direction integer to atom for domain registration
+  # 1 = EC_DIR_OUTPUT (master writes, slave reads)
+  # 2 = EC_DIR_INPUT (master reads, slave writes)
+  defp ethercat_direction_to_atom(2), do: :input
+  defp ethercat_direction_to_atom(_), do: :output
 end
