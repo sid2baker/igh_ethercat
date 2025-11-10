@@ -64,17 +64,26 @@ defmodule EtherCAT do
   @spec register_pdos(pid(), pid(), [Slave.name()], Slave.domain()) ::
           {:ok, [PDO.t()]} | {:error, term()}
   def register_pdos(master, slave, pdo_names, domain \\ :default_domain) do
-    case Slave.register_pdos(slave, pdo_names, domain) do
-      {:ok, unique_names} ->
+    # Register each PDO individually using the new singular API
+    results =
+      Enum.map(pdo_names, fn pdo_name ->
+        Slave.register_pdo(slave, pdo_name, domain)
+      end)
+
+    # Check if any failed
+    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
+      {:error, _} = error ->
+        error
+
+      nil ->
+        unique_names = Enum.map(results, fn {:ok, name} -> name end)
+
         handles =
           Enum.map(unique_names, fn unique_name ->
             PDO.new(domain, unique_name, master)
           end)
 
         {:ok, handles}
-
-      error ->
-        error
     end
   end
 

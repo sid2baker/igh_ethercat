@@ -85,7 +85,10 @@ defmodule EL3202Example do
       :ch2_limit2
     ]
 
-    :ok = Slave.register_pdos(slave_pid, pdos_to_register)
+    # Register each PDO to the default domain
+    for pdo <- pdos_to_register do
+      {:ok, _} = Slave.register_pdo(slave_pid, pdo)
+    end
 
     # Create domain for cyclic communication
     # 1ms cycle
