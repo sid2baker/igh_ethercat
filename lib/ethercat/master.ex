@@ -171,10 +171,27 @@ defmodule EtherCAT.Master do
   end
 
   @impl true
-  def terminate(reason, _state, _data) do
+  def terminate(reason, _state, %{task_pid: task_pid} = _data) do
     Logger.info("EtherCAT Master terminating: #{inspect(reason)}")
     # All linked processes (slaves, domains, cyclic task) will automatically
     # receive exit signals and terminate when this process terminates
+    if task_pid do
+      # task_pid needs to be terminated with :kill, otherwise beam.yield doesn't work
+      # look at https://github.com/E-xyza/zigler/issues/571 for more information
+      Process.exit(task_pid, :kill)
+
+      # wait till cyclic_task dies
+      :ok =
+        receive do
+          {:EXIT, ^task_pid, reason} -> :ok
+        end
+
+      :ok =
+        receive do
+          :cyclic_task_died -> :ok
+        end
+    end
+
     Logger.info("EtherCAT Master cleanup completed")
     :ok
   end

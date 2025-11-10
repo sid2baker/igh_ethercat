@@ -910,10 +910,6 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         try accessor.initDomainData();
     }
 
-    defer {
-        beam.send(master_pid, .killed, .{}) catch {};
-    }
-
     var counter: u32 = 0;
 
     // Main cyclic loop with deterministic timing
@@ -1024,7 +1020,14 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         // Yield to BEAM scheduler periodically
         if (counter % yield_interval == 0) {
-            try beam.yield();
+            beam.yield() catch {
+                master_resource.release();
+                for (domain_accessors) |domain_accessor_resource| {
+                    domain_accessor_resource.release();
+                }
+                try beam.send(master_pid, .cyclic_task_died, .{});
+                return;
+            };
         }
 
         counter +%= 1; // Wrapping increment
