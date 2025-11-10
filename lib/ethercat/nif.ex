@@ -281,6 +281,23 @@ defmodule EtherCAT.Nif do
   // ============================================================================
   // MASTER OPERATIONS
   // ============================================================================
+  //
+  // ERROR HANDLING PHILOSOPHY (Elixir "Let It Crash"):
+  //
+  // 1. RECOVERABLE ERRORS → Return {:ok, result} | {:error, reason}
+  //    - Network issues (slave not responding, link down)
+  //    - Resource exhaustion (out of memory, no masters available)
+  //    - Business logic failures (activation failed, domain creation failed)
+  //    Examples: request_master, master_activate, get_master_state, master_get_slave
+  //
+  // 2. EXCEPTIONAL ERRORS → Raise (return Zig error with `!`)
+  //    - Programming errors (invalid indices, null pointers)
+  //    - Setup-time configuration errors (wrong PDO mapping)
+  //    - Critical cyclic operation failures (receive/send in RT loop)
+  //    Supervisor will restart the crashed process.
+  //    Examples: introspection NIFs, slave config ops, cyclic RT operations
+  //
+  // ============================================================================
 
   /// Get the version magic number of the EtherCAT library
   pub fn version_magic() !u32 {
@@ -393,13 +410,15 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get information about a slave at the given position
-  pub fn master_get_slave(master: MasterResource, slave_position: u16) !beam.term {
+  /// Recoverable: Slave might not be responding (network issue)
+  /// Returns {:ok, slave_info} | {:error, :get_slave_error}
+  pub fn master_get_slave(master: MasterResource, slave_position: u16) beam.term {
       var slave_info: ecrt.ec_slave_info_t = undefined;
       const result = ecrt.ecrt_master_get_slave(master.unpack(), slave_position, &slave_info);
       if (result != 0) {
-          return MasterError.GetSlaveError;
+          return beam.make(.{.error, .get_slave_error}, .{});
       }
-      return beam.make(.{ .ok, slave_info }, .{});
+      return beam.make(.{.ok, slave_info}, .{});
   }
 
   /// Reset the master to initial state
@@ -418,23 +437,29 @@ defmodule EtherCAT.Nif do
   }
 
   /// Get sync manager information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_sync_manager(master: MasterResource, slave_position: u16, sync_index: u8) !beam.term {
       var sync: ecrt.ec_sync_info_t = undefined;
-      _ = ecrt.ecrt_master_get_sync_manager(master.unpack(), slave_position, sync_index, &sync);
+      const result = ecrt.ecrt_master_get_sync_manager(master.unpack(), slave_position, sync_index, &sync);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(.{ .index = sync.index, .dir = sync.dir, .n_pdos = sync.n_pdos, .watchdog_mode = sync.watchdog_mode }, .{});
   }
 
   /// Get PDO information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_pdo(master: MasterResource, slave_position: u16, sync_index: u8, pos: u16) !beam.term {
       var pdo: ecrt.ec_pdo_info_t = undefined;
-      _ = ecrt.ecrt_master_get_pdo(master.unpack(), slave_position, sync_index, pos, &pdo);
+      const result = ecrt.ecrt_master_get_pdo(master.unpack(), slave_position, sync_index, pos, &pdo);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(.{ .index = pdo.index, .n_entries = pdo.n_entries }, .{});
   }
 
   /// Get PDO entry information for a slave
+  /// Let it crash: Invalid indices are programming errors
   pub fn master_get_pdo_entry(master: MasterResource, slave_position: u16, sync_index: u8, pdo_pos: u16, entry_pos: u16) !beam.term {
       var pdo_entry: ecrt.ec_pdo_entry_info_t = undefined;
-      _ = ecrt.ecrt_master_get_pdo_entry(master.unpack(), slave_position, sync_index, pdo_pos, entry_pos, &pdo_entry);
+      const result = ecrt.ecrt_master_get_pdo_entry(master.unpack(), slave_position, sync_index, pdo_pos, entry_pos, &pdo_entry);
+      if (result != 0) return MasterError.GetSlaveError;
       return beam.make(pdo_entry, .{});
   }
 

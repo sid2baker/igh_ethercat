@@ -525,9 +525,14 @@ defmodule EtherCAT.Master do
   end
 
   # Helper to create domain with proper two-step initialization (avoids race condition)
-  # 1. Create domain resource via NIF
-  # 2. Start Domain process with resource
-  # 3. Set PID in resource (now that process exists to receive messages)
+  #
+  # 1. Create domain resource via NIF (allocates native EtherCAT domain + accessor)
+  # 2. Start Domain process with resource (creates Elixir GenServer)
+  # 3. Set PID in resource (NIF now knows where to send messages)
+  #
+  # Order is critical: if we set PID before the process starts, the NIF's cyclic
+  # task might try to send messages to a non-existent process during race window.
+  # The `with` statement ensures atomicity and proper cleanup on any error.
   defp do_create_domain(master_ref, name, interval) do
     with {:ok, domain_ref} <- Nif.master_create_domain(master_ref, self(), interval),
          {:ok, domain_pid} <-
