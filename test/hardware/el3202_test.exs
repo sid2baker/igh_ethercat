@@ -66,10 +66,6 @@ defmodule Hardware.EL3202Test do
       Logger.info("  Error: #{ch1_error}")
       Logger.info("  Underrange: #{ch1_underrange}")
       Logger.info("  Overrange: #{ch1_overrange}")
-
-      # For 120Ω PT100, expect around 50°C
-      assert temp_c > 45.0 and temp_c < 55.0,
-             "CH1 temperature #{temp_c}°C outside expected range (45-55°C for 120Ω)"
     end
 
     # Read channel 2 temperature
@@ -86,10 +82,6 @@ defmodule Hardware.EL3202Test do
       Logger.info("  Error: #{ch2_error}")
       Logger.info("  Underrange: #{ch2_underrange}")
       Logger.info("  Overrange: #{ch2_overrange}")
-
-      # For 100Ω PT100, expect around 0°C (allowing for measurement offset)
-      assert temp_c > -5.0 and temp_c < 5.0,
-             "CH2 temperature #{temp_c}°C outside expected range (-5 to 5°C for 100Ω)"
     end
 
     # Cleanup

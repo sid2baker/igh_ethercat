@@ -484,7 +484,7 @@ defmodule EtherCAT.Slave do
 
       :ok = Slave.watch_entry(slave, :ch1, :value)
       receive do
-        {:pdo_value_changed, _name, new_value} -> IO.puts("Value: #{new_value}")
+        {:pdo_value_changed, _name, value} -> IO.puts("Value: \#{value}")
       end
   """
   @spec watch_entry(pid(), pdo_name(), entry_name(), pid(), timeout()) ::
@@ -932,8 +932,11 @@ defmodule EtherCAT.Slave do
 
       {entry_type, entry_index, entry_subindex, entry_bit_length} =
         case entry do
-          {type, index, subindex, bit_length} -> {type, index, subindex, bit_length}
-          {index, subindex, bit_length} -> {Driver.infer_type_from_bit_length(bit_length), index, subindex, bit_length}
+          {type, index, subindex, bit_length} ->
+            {type, index, subindex, bit_length}
+
+          {index, subindex, bit_length} ->
+            {Driver.infer_type_from_bit_length(bit_length), index, subindex, bit_length}
         end
 
       # Check if device supports PDO configuration
@@ -978,12 +981,14 @@ defmodule EtherCAT.Slave do
       unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
       pdo_direction = ethercat_direction_to_atom(direction)
 
-      # Pass the entry tuple (with type if present) to domain
+      # Pass the entry tuple without type to domain (domain only needs index/subindex/size)
+      domain_entry = {entry_index, entry_subindex, entry_bit_length}
+
       Domain.register_pdo_entry(
         domain_pid,
         updated_data.slave_config,
         unique_name,
-        entry,
+        domain_entry,
         pdo_direction
       )
 
@@ -998,7 +1003,10 @@ defmodule EtherCAT.Slave do
         entry_config: entry
       }
 
-      updated_data = %{updated_data | entries: Map.put(updated_data.entries, {pdo_name, entry_name}, entry_metadata)}
+      updated_data = %{
+        updated_data
+        | entries: Map.put(updated_data.entries, {pdo_name, entry_name}, entry_metadata)
+      }
 
       # Return PDOEntry struct
       pdo_entry = PDOEntry.new(self(), pdo_name, entry_name)

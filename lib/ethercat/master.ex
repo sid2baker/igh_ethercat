@@ -344,10 +344,14 @@ defmodule EtherCAT.Master do
       )
 
       # Register all pending PDO entries via NIF and build the registered entries map
+      # Entries are 4-tuples: {index, subindex, size, direction}
+      # Domain doesn't need type info - that's handled by Slave for encoding/decoding
       registered_entries =
         for {slave_config, pdo_entries} <- pending_entries,
-            {name, {entry_type, entry_index, entry_subindex, entry_size, direction}} <-
-              pdo_entries do
+            {name, {entry_index, entry_subindex, entry_size, direction}} <- pdo_entries do
+          # Infer type for NIF registration
+          entry_type = EtherCAT.Slave.Driver.infer_type_from_bit_length(entry_size)
+
           offset =
             Nif.slave_config_reg_pdo_entry(
               slave_config,
@@ -511,7 +515,10 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, {:domain_set_value, _domain_ref, name, value}, _data) do
     {:keep_state_and_data,
-     [{:reply, from, {:error, {:invalid_value_type, name, "Expected binary, got: #{inspect(value)}"}}}]}
+     [
+       {:reply, from,
+        {:error, {:invalid_value_type, name, "Expected binary, got: #{inspect(value)}"}}}
+     ]}
   end
 
   def operational({:call, from}, {:domain_get_value, domain_ref, name}, _data) do

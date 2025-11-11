@@ -52,7 +52,7 @@ defmodule EtherCAT.Drivers.EL3202 do
              error: {0x6000, 0x07, 1},
              txpdo_state: {0x1800, 0x07, 1},
              txpdo_toggle: {0x1800, 0x09, 1},
-             value: {:int16, 0x6000, 0x11, 16}
+             value: {0x6000, 0x11, 16}
            }
          }}
 
@@ -70,7 +70,7 @@ defmodule EtherCAT.Drivers.EL3202 do
              error: {0x6010, 0x07, 1},
              txpdo_state: {0x1801, 0x07, 1},
              txpdo_toggle: {0x1801, 0x09, 1},
-             value: {:int16, 0x6010, 0x11, 16}
+             value: {0x6010, 0x11, 16}
            }
          }}
 

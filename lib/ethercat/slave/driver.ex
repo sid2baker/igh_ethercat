@@ -240,7 +240,8 @@ defmodule EtherCAT.Slave.Driver do
     {:ok, <<value::little-unsigned-16>>}
   end
 
-  def encode_pdo_value(:int16, value) when is_integer(value) and value >= -32768 and value <= 32767 do
+  def encode_pdo_value(:int16, value)
+      when is_integer(value) and value >= -32768 and value <= 32767 do
     {:ok, <<value::little-signed-16>>}
   end
 

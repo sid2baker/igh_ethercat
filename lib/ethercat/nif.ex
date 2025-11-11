@@ -644,7 +644,9 @@ defmodule EtherCAT.Nif do
       extractBitsToBuffer(buffer[0..required_bytes], data_slice, entry.bit_offset, entry.bit_length);
 
       // Return as Elixir binary for driver to decode
-      return beam.make_slice(buffer[0..required_bytes], .{});
+      const bin = try beam.allocator.alloc(u8, required_bytes);
+      @memcpy(bin, buffer[0..required_bytes]);
+      return beam.make(bin, .{});
   }
 
   /// Set a value - directly updates the entry's expected value from binary data

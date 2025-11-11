@@ -135,22 +135,21 @@ defmodule EtherCAT.Domain do
   - `domain` - Domain process
   - `slave_config` - Slave configuration reference
   - `name` - PDO entry name
-  - `entry` - Entry tuple (see Entry Format below)
+  - `entry` - Entry tuple: `{entry_index, entry_subindex, bit_length}`
   - `direction` - `:input` or `:output` (for change detection and verification)
 
-  ## Entry Format
+  ## Note
 
-  The entry parameter can be:
-  - `{entry_type, entry_index, entry_subindex, bit_length}` - explicit type
-  - `{entry_index, entry_subindex, bit_length}` - type inferred from bit length
+  The domain does not need type information - it only stores and exchanges
+  raw binary data. Type encoding/decoding is handled by the Slave driver.
 
   ## Example
 
-      # Register input with explicit type
+        # Register temperature input
       Domain.register_pdo_entry(domain, slave_config, "temperature",
-        {:uint16, 0x6000, 1, 16}, :input)
+        {0x6000, 1, 16}, :input)
 
-      # Register output with inferred type
+        # Register motor command output
       Domain.register_pdo_entry(domain, slave_config, "motor_command",
         {0x7010, 1, 16}, :output)
   """
@@ -324,19 +323,9 @@ defmodule EtherCAT.Domain do
   # Accept PDO registration when domain is unlocked (configuration phase)
   @impl true
   def handle_call({:register_pdo_entry, slave_config, name, entry, direction}, _from, state) do
-    # Normalize entry to include direction
-    # Entry can be {type, index, subindex, size} or {index, subindex, size}
-    # We preserve the format and just add direction
-    normalized_entry =
-      case entry do
-        {entry_type, entry_index, entry_subindex, entry_size} when is_atom(entry_type) ->
-          # Has explicit type - preserve it
-          {entry_type, entry_index, entry_subindex, entry_size, direction}
-
-        {entry_index, entry_subindex, entry_size} ->
-          # No type - just add direction (Domain doesn't need type info)
-          {entry_index, entry_subindex, entry_size, direction}
-      end
+    # Entry is always {index, subindex, size} - add direction to make 4-tuple
+    {entry_index, entry_subindex, entry_size} = entry
+    normalized_entry = {entry_index, entry_subindex, entry_size, direction}
 
     result =
       Map.update(
