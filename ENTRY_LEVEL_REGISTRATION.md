@@ -9,6 +9,21 @@ The refactored `EtherCAT.Slave` module now supports **two levels of registration
 
 This provides flexibility to optimize memory and performance by registering only the data you actually use.
 
+## Semantic Slave Naming
+
+Slaves can now be assigned **semantic names** for more readable unique identifiers:
+
+```elixir
+# Without names (default):
+# unique_name = "s0:ch1:value"
+
+# With semantic names:
+EtherCAT.set_slave_name(slave, :temp_sensor_1)
+# unique_name = "temp_sensor_1:ch1:value"
+```
+
+This makes logs, debugging, and code much more readable in systems with multiple slaves.
+
 ## State Machine
 
 The Slave module now uses `gen_statem` with explicit states:
@@ -65,9 +80,14 @@ The Slave module now uses `gen_statem` with explicit states:
 # EL3202 Temperature Sensor - Register only temperature values, skip error flags
 
 {:ok, master, [slave]} = EtherCAT.open(index: 0)
+
+# Optional: Set semantic name for better readability
+EtherCAT.set_slave_name(slave, :temp_sensor)
+
 {:ok, _pdos} = EtherCAT.configure_slave(slave, %{})
 
 # Register only the temperature values from both channels
+# unique_name will be "temp_sensor:ch1:value" (or "s0:ch1:value" without naming)
 {:ok, temp1} = EtherCAT.register_entry(master, slave, :ch1, :value)
 {:ok, temp2} = EtherCAT.register_entry(master, slave, :ch2, :value)
 
@@ -123,7 +143,51 @@ end
 EtherCAT.start_cyclic(master)
 ```
 
-### Example 4: Invalid - Sync Manager Conflict
+### Example 4: Multiple Slaves with Semantic Names
+
+```elixir
+# Multi-slave system with readable names
+
+{:ok, master, [slave1, slave2, slave3]} = EtherCAT.open(index: 0)
+
+# Assign semantic names to each slave
+EtherCAT.set_slave_name(slave1, :reactor_temp)
+EtherCAT.set_slave_name(slave2, :coolant_flow)
+EtherCAT.set_slave_name(slave3, :pressure_vessel)
+
+# Configure all slaves
+Enum.each([slave1, slave2, slave3], fn slave ->
+  EtherCAT.configure_slave(slave, %{})
+end)
+
+# Register specific entries with semantic names
+{:ok, temp} = EtherCAT.register_entry(master, slave1, :ch1, :value)
+# unique_name = "reactor_temp:ch1:value"
+
+{:ok, flow} = EtherCAT.register_entry(master, slave2, :sensor, :rate)
+# unique_name = "coolant_flow:sensor:rate"
+
+{:ok, pressure} = EtherCAT.register_entry(master, slave3, :gauge, :value)
+# unique_name = "pressure_vessel:gauge:value"
+
+EtherCAT.start_cyclic(master)
+
+# Watch for changes - logs will show readable names
+EtherCAT.watch(temp)
+EtherCAT.watch(flow)
+EtherCAT.watch(pressure)
+
+receive do
+  {:data_changed, "reactor_temp:ch1:value", val} ->
+    IO.puts("Reactor temperature: #{val}°C")
+  {:data_changed, "coolant_flow:sensor:rate", val} ->
+    IO.puts("Coolant flow rate: #{val} L/min")
+  {:data_changed, "pressure_vessel:gauge:value", val} ->
+    IO.puts("Vessel pressure: #{val} bar")
+end
+```
+
+### Example 5: Invalid - Sync Manager Conflict
 
 ```elixir
 # ❌ ERROR: Both :ch1 and :ch2 are in SM3, must use same domain

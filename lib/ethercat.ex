@@ -35,6 +35,52 @@ defmodule EtherCAT do
   @spec create_domain(pid(), atom(), pos_integer()) :: {:ok, reference()} | {:error, term()}
   def create_domain(master, name, interval), do: Master.create_domain(master, name, interval)
 
+  @doc """
+  Sets a semantic name for a slave device.
+
+  The name is used to generate human-readable unique identifiers for PDO entries.
+  This is optional - if not set, slaves will use "s<position>" format (e.g., "s0", "s1").
+
+  ## Parameters
+  - `slave` - Slave process PID
+  - `name` - Atom or string to identify the slave
+
+  ## Returns
+  - `:ok` on success
+
+  ## Example
+
+      {:ok, master, [slave1, slave2]} = EtherCAT.open(index: 0)
+
+      # Set semantic names
+      EtherCAT.set_slave_name(slave1, :temp_sensor)
+      EtherCAT.set_slave_name(slave2, :pressure_sensor)
+
+      # Register entries - now uses semantic names
+      {:ok, temp} = EtherCAT.register_entry(master, slave1, :ch1, :value)
+      # unique_name = "temp_sensor:ch1:value" (instead of "s0:ch1:value")
+  """
+  @spec set_slave_name(pid(), atom() | String.t()) :: :ok
+  def set_slave_name(slave, name), do: Slave.set_name(slave, name)
+
+  @doc """
+  Gets the semantic name of a slave device, if set.
+
+  ## Parameters
+  - `slave` - Slave process PID
+
+  ## Returns
+  - `{:ok, name}` if name is set
+  - `{:ok, nil}` if no name is set
+
+  ## Example
+
+      EtherCAT.set_slave_name(slave, :temp_sensor)
+      {:ok, :temp_sensor} = EtherCAT.get_slave_name(slave)
+  """
+  @spec get_slave_name(pid()) :: {:ok, atom() | String.t() | nil}
+  def get_slave_name(slave), do: Slave.get_name(slave)
+
   @doc "Configures slave and returns available PDO names."
   @spec configure_slave(pid(), map()) :: {:ok, list()}
   def configure_slave(slave, config) do

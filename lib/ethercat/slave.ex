@@ -69,6 +69,7 @@ defmodule EtherCAT.Slave do
     :serial,
     :slave_config,
     :sync_count,
+    :name,
     # Tracks registered entries per PDO: %{pdo_name => %{domain: atom(), entries: MapSet}}
     pdo_registrations: %{},
     # Tracks sync manager to domain mapping: %{sync_index => domain_name}
@@ -89,6 +90,7 @@ defmodule EtherCAT.Slave do
           serial: non_neg_integer(),
           slave_config: reference() | nil,
           sync_count: non_neg_integer(),
+          name: atom() | String.t() | nil,
           pdo_registrations: %{pdo_name() => %{domain: domain(), entries: MapSet.t(atom())}},
           sync_manager_domains: %{non_neg_integer() => domain()},
           configured_sync_managers: MapSet.t(non_neg_integer())
@@ -115,12 +117,24 @@ defmodule EtherCAT.Slave do
     - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
     - `:slave_config` - The slave configuration reference from the NIF
     - `:sync_count` - Number of sync managers available on the device
+    - `:name` - Optional semantic name for the slave (atom or string)
 
   ## Returns
   - `{:ok, pid}` - The slave process PID
 
   ## Example
 
+      # With semantic name
+      {:ok, slave} = Slave.start_link(
+        master: master_pid,
+        position: 1,
+        driver: EtherCAT.Drivers.EL3202,
+        slave_config: config_ref,
+        sync_count: 4,
+        name: :temp_sensor_1
+      )
+
+      # Without name (uses "s1" as identifier)
       {:ok, slave} = Slave.start_link(
         master: master_pid,
         position: 1,
@@ -136,10 +150,11 @@ defmodule EtherCAT.Slave do
     driver = Keyword.fetch!(opts, :driver)
     slave_config = Keyword.fetch!(opts, :slave_config)
     sync_count = Keyword.fetch!(opts, :sync_count)
+    name = Keyword.get(opts, :name)
 
     :gen_statem.start_link(
       __MODULE__,
-      {master, position, driver, slave_config, sync_count},
+      {master, position, driver, slave_config, sync_count, name},
       []
     )
   end
@@ -164,6 +179,51 @@ defmodule EtherCAT.Slave do
   @spec configure(pid(), map(), timeout()) :: :ok | {:error, term()}
   def configure(slave, config, timeout \\ 5000) do
     :gen_statem.call(slave, {:configure, config}, timeout)
+  end
+
+  @doc """
+  Sets a semantic name for the slave.
+
+  The name is used to generate more readable unique identifiers for PDO entries.
+  For example, a slave named `:temp_sensor_1` will generate entry names like
+  `"temp_sensor_1:ch1:value"` instead of `"s0:ch1:value"`.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - Atom or string to identify this slave
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if setting name fails
+
+  ## Example
+
+      Slave.set_name(slave, :temp_sensor_1)
+      # Future registrations will use "temp_sensor_1:..." prefix
+  """
+  @spec set_name(pid(), atom() | String.t()) :: :ok | {:error, term()}
+  def set_name(slave, name) when is_atom(name) or is_binary(name) do
+    :gen_statem.call(slave, {:set_name, name})
+  end
+
+  @doc """
+  Gets the semantic name of the slave, if set.
+
+  ## Parameters
+  - `slave` - The slave process PID
+
+  ## Returns
+  - `{:ok, name}` if name is set
+  - `{:ok, nil}` if no name is set (using default "s<position>" format)
+
+  ## Example
+
+      Slave.set_name(slave, :temp_sensor_1)
+      {:ok, :temp_sensor_1} = Slave.get_name(slave)
+  """
+  @spec get_name(pid()) :: {:ok, atom() | String.t() | nil}
+  def get_name(slave) do
+    :gen_statem.call(slave, :get_name)
   end
 
   @doc """
@@ -436,12 +496,13 @@ defmodule EtherCAT.Slave do
   def callback_mode(), do: [:state_functions, :state_enter]
 
   @impl true
-  def init({master, position, driver, slave_config, sync_count}) do
+  def init({master, position, driver, slave_config, sync_count, name}) do
     # Register this slave in the Registry for process discovery
     Registry.register(EtherCAT.Registry, {:slave, master, position}, %{
       master: master,
       position: position,
-      driver: driver
+      driver: driver,
+      name: name
     })
 
     data = %__MODULE__{
@@ -455,9 +516,11 @@ defmodule EtherCAT.Slave do
       revision: 0,
       serial: 0,
       slave_config: slave_config,
-      sync_count: sync_count
+      sync_count: sync_count,
+      name: name
     }
 
+    Logger.debug("Slave #{position} initialized with name: #{inspect(name)}")
     {:ok, :unconfigured, data}
   end
 
@@ -524,6 +587,16 @@ defmodule EtherCAT.Slave do
     # Allow querying PDOs even before configuration
     pdos = data.driver.list_pdos(data.driver_state)
     {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def unconfigured({:call, from}, {:set_name, name}, data) do
+    updated_data = %{data | name: name}
+    Logger.debug("Slave #{data.position} name set to: #{inspect(name)}")
+    {:keep_state, updated_data, [{:reply, from, :ok}]}
+  end
+
+  def unconfigured({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
   end
 
   def unconfigured({:call, from}, :get_state, _data) do
@@ -600,6 +673,16 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, data.slave_config}]}
   end
 
+  def configured({:call, from}, {:set_name, name}, data) do
+    updated_data = %{data | name: name}
+    Logger.debug("Slave #{data.position} name set to: #{inspect(name)}")
+    {:keep_state, updated_data, [{:reply, from, :ok}]}
+  end
+
+  def configured({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
+  end
+
   def configured({:call, from}, :get_state, _data) do
     {:keep_state_and_data, [{:reply, from, :configured}]}
   end
@@ -622,6 +705,10 @@ defmodule EtherCAT.Slave do
     # Allow querying PDOs in operational state
     pdos = data.driver.list_pdos(data.driver_state)
     {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def operational({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
   end
 
   def operational({:call, from}, :get_state, _data) do
@@ -684,7 +771,15 @@ defmodule EtherCAT.Slave do
       )
 
       # Register entry with domain
-      unique_name = "slave_#{updated_data.position}:#{pdo_name}:#{entry_name}"
+      # Use semantic name if set, otherwise use "s<position>" format
+      slave_identifier =
+        case updated_data.name do
+          nil -> "s#{updated_data.position}"
+          name when is_atom(name) -> Atom.to_string(name)
+          name when is_binary(name) -> name
+        end
+
+      unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
       pdo_direction = ethercat_direction_to_atom(direction)
 
       Domain.register_pdo_entry(
