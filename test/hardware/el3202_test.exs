@@ -79,8 +79,10 @@ defmodule Hardware.EL3202Test do
       # Available PDOs will be [:ch1, :ch2] - each representing a complete channel
 
       pdos_to_register = [
-        :ch1,  # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
-        :ch2   # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
+        # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
+        :ch1,
+        # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
+        :ch2
       ]
 
       Logger.info("Registering PDOs (each PDO contains all entries for one channel)...")

@@ -429,11 +429,14 @@ defmodule EtherCAT.Slave do
     # Call driver configuration
     {:ok, driver_state} = state.driver.configure(ctx, state.driver_state, config)
 
+    # Update state with new driver_state before clearing PDO config
+    updated_state = %{state | driver_state: driver_state}
+
     # Clear all PDO assignments and mappings for all sync managers
     # This is done once after driver configuration to prepare for incremental registration
-    clear_all_pdo_config(state)
+    clear_all_pdo_config(updated_state)
 
-    {:reply, :ok, %{state | driver_state: driver_state, configured?: true}}
+    {:reply, :ok, %{updated_state | configured?: true}}
   end
 
   # Read-only operations - allowed when locked
@@ -624,11 +627,24 @@ defmodule EtherCAT.Slave do
           {entry_index, entry_subindex, entry_size} = entry
 
           # Add entry to PDO mapping
-          config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
+          config_pdo_mapping_add_internal(
+            state,
+            pdo_index,
+            entry_index,
+            entry_subindex,
+            entry_size
+          )
 
           # Register entry with domain for process data exchange
           unique_name = "slave_#{state.position}:#{name}:#{entry_name}"
-          Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
+
+          Domain.register_pdo_entry(
+            domain_pid,
+            state.slave_config,
+            unique_name,
+            entry,
+            pdo_direction
+          )
 
           unique_name
         end)
