@@ -624,26 +624,6 @@ defmodule EtherCAT.Nif do
       return result;
   }
 
-  /// Extract value from PDO entry based on its type
-  fn extractEntryValue(entry: PdoEntry, data: []const u8) !beam.term {
-      return switch (entry.entry_type) {
-          .bool => {
-              const byte_index = entry.bit_offset / 8;
-              const bit_index = @as(u3, @intCast(entry.bit_offset % 8));
-              const value = (data[byte_index] >> bit_index) & 1 != 0;
-              return beam.make(value, .{});
-          },
-          .uint8 => beam.make(extractBits(u8, data, entry.bit_offset, entry.bit_length), .{}),
-          .int8 => beam.make(@as(i8, @bitCast(extractBits(u8, data, entry.bit_offset, entry.bit_length))), .{}),
-          .uint16 => beam.make(extractBits(u16, data, entry.bit_offset, entry.bit_length), .{}),
-          .int16 => beam.make(@as(i16, @bitCast(extractBits(u16, data, entry.bit_offset, entry.bit_length))), .{}),
-          .uint32 => beam.make(extractBits(u32, data, entry.bit_offset, entry.bit_length), .{}),
-          .int32 => beam.make(@as(i32, @bitCast(extractBits(u32, data, entry.bit_offset, entry.bit_length))), .{}),
-          .uint64 => beam.make(extractBits(u64, data, entry.bit_offset, entry.bit_length), .{}),
-          .int64 => beam.make(@as(i64, @bitCast(extractBits(u64, data, entry.bit_offset, entry.bit_length))), .{}),
-      };
-  }
-
   /// Get a value from domain data by name, returns raw binary for driver decoding
   /// When called via Domain.get_pdo_value, the Slave will decode using the driver
   pub fn get_value(domain_accessor: DomainAccessorResource, name: []const u8) !beam.term {
@@ -984,16 +964,23 @@ defmodule EtherCAT.Nif do
 
                   if (changed) {
                       if (entry.direction == .input) {
-                          // Input changed: notify immediately and update stored value
-                          const value = try extractEntryValue(entry.*, accessor.data);
-                          _ = try beam.send(accessor.pid, .{ .data_changed, entry.name, value }, .{});
+                          // Input changed: extract raw binary and notify
+                          const required_bytes = (entry.bit_length + 7) / 8;
+                          var buffer: [8]u8 = [_]u8{0} ** 8;
+                          extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
+
+                          // Send binary data for driver to decode
+                          _ = try beam.send(accessor.pid, .{ .data_changed, entry.name, buffer[0..required_bytes] }, .{});
 
                           // Update stored value
                           entry.current_value = domain_value;
                       } else {
                           // Output changed: notify immediately and update domain value
                           write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
-                          _ = try beam.send(accessor.pid, .{ .output_changed, entry.name, entry.current_value }, .{});
+
+                          // For outputs, send the stored current_value buffer
+                          const required_bytes = (entry.bit_length + 7) / 8;
+                          _ = try beam.send(accessor.pid, .{ .output_changed, entry.name, entry.current_value[0..required_bytes] }, .{});
                       }
                   }
               }
