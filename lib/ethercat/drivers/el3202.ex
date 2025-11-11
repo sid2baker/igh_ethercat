@@ -19,8 +19,9 @@ defmodule EtherCAT.Drivers.EL3202 do
   @impl true
   def list_pdos(_state) do
     [
-      # Each PDO represents one complete channel (all entries)
+      # Channel 1: Groups all 6 entries from TxPDO 0x1A00
       :ch1,
+      # Channel 2: Groups all 6 entries from TxPDO 0x1A01
       :ch2
     ]
   end

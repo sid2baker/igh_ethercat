@@ -38,7 +38,10 @@ defmodule EtherCAT.Slave.Driver do
   @typedoc """
   Complete PDO information including sync manager, PDO index, and all entries.
 
-  A PDO is an atomic unit - all entries must be registered together to the same domain.
+  This represents a single PDO (Process Data Object) containing all its mapped entries.
+  While individual entries can be selectively registered to domains, grouping them
+  provides a cleaner API and matches the typical usage pattern.
+
   The entries map provides semantic names for each entry in the PDO.
   """
   @type pdo_info :: %{
@@ -108,8 +111,8 @@ defmodule EtherCAT.Slave.Driver do
   Get detailed information about a specific PDO.
 
   Returns complete PDO configuration including sync manager settings, PDO index,
-  and ALL entries in the PDO. A PDO is an atomic unit - all entries will be
-  registered together to the same domain.
+  and all entries mapped within this PDO. The driver groups related entries
+  together for convenience (e.g., all channel 1 data in `:ch1`).
 
   ## Example
 

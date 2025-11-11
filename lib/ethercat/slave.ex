@@ -155,16 +155,21 @@ defmodule EtherCAT.Slave do
   end
 
   @doc """
-  Registers a complete PDO (all its entries) to a domain for cyclic data exchange.
+  Registers a PDO (with all its entries) to a domain for cyclic data exchange.
 
   This function incrementally configures the slave's sync managers and PDO mappings
-  based on the driver's configuration, then registers ALL PDO entries with the specified
+  based on the driver's configuration, then registers all PDO entries with the specified
   domain for real-time I/O.
 
   **IMPORTANT:**
   - You must call `Slave.configure/2` before calling this function.
-  - All entries in a PDO must go to the same domain (this is enforced by IgH EtherCAT).
-  - Different PDOs can be registered to different domains.
+  - This registers all entries defined in the PDO by the driver.
+  - Different PDOs can be registered to different domains (even within the same sync manager).
+
+  **IgH EtherCAT Constraint:**
+  When any entry from a sync manager is registered to a domain, the entire sync manager's
+  process data is mapped to that domain. However, you only receive offsets for the specific
+  entries you register.
 
   ## Parameters
   - `slave` - The slave process PID
@@ -181,7 +186,7 @@ defmodule EtherCAT.Slave do
       # Configure the slave first
       :ok = Slave.configure(slave, %{})
 
-      # Register complete PDOs to different domains
+      # Register PDOs (can go to different domains)
       {:ok, ch1_entries} = Slave.register_pdo(slave, :ch1, :fast_domain)
       {:ok, ch2_entries} = Slave.register_pdo(slave, :ch2, :slow_domain)
 
@@ -542,9 +547,17 @@ defmodule EtherCAT.Slave do
 
   # Private helpers
 
-  # Clears all PDO assignments and mappings for all sync managers
-  # Called once during configure to prepare for incremental registration
-  # Following EtherLab's ecrt_slave_config_pdos pattern
+  # Prepares slave for incremental PDO registration by clearing existing configuration
+  #
+  # This function is called once during configure/2 and:
+  # 1. Configures each sync manager (direction, watchdog)
+  # 2. Clears all PDO assignments from sync managers
+  # 3. Clears all PDO mappings
+  #
+  # After this, register_pdo/3 can incrementally add back only the PDOs and entries needed.
+  # This approach allows selective PDO registration while maintaining proper configuration.
+  #
+  # Follows EtherLab's ecrt_slave_config_pdos pattern.
   defp clear_all_pdo_config(state) do
     state.driver.list_pdos(state.driver_state)
     |> Enum.map(fn pdo_name ->
@@ -559,11 +572,13 @@ defmodule EtherCAT.Slave do
       # Get sync manager config from first PDO in this sync
       {_sync_idx, direction, watchdog} = hd(infos).sync_manager
 
-      # Configure sync manager, then clear assignments and mappings
+      # Configure sync manager with direction and watchdog settings
       config_sync_manager_internal(state, sync_index, direction, watchdog)
+
+      # Clear all PDO assignments from this sync manager
       config_pdo_assign_clear_internal(state, sync_index)
 
-      # Clear PDO mappings for all unique pdo_indices in this sync
+      # Clear mappings for all PDOs in this sync manager
       infos
       |> Enum.map(& &1.pdo_index)
       |> Enum.uniq()
@@ -572,41 +587,52 @@ defmodule EtherCAT.Slave do
   end
 
   # Builds unique names for all entries in a PDO
+  # Sorts entry names for consistent ordering
   defp build_unique_names(pdo_name, entries, position) do
-    Enum.map(entries, fn {entry_name, _entry_config} ->
+    entries
+    |> Enum.map(fn {entry_name, _entry_config} ->
       "slave_#{position}:#{pdo_name}:#{entry_name}"
     end)
+    |> Enum.sort()
   end
 
-  # Registers a complete PDO (all entries) to a domain without clearing existing configuration
-  # This function is called after configure/2 has cleared all PDO assignments and mappings
-  # Follows EtherLab pattern: incrementally add assignments and mapping entries
-  # Returns list of unique names for all entries in the PDO
+  # Registers a PDO with all its entries to a domain
+  #
+  # This incremental configuration approach:
+  # 1. Adds the PDO to the sync manager's assignment list
+  # 2. Adds each entry to the PDO's mapping
+  # 3. Registers each entry with the domain for process data exchange
+  #
+  # Called after configure/2 has cleared all PDO assignments and mappings.
+  # Follows the EtherLab pattern of building up configuration incrementally.
+  #
+  # Returns {:ok, [unique_names]} where each unique_name is "slave_X:pdo:entry"
   defp register_single_pdo(name, domain_name, state) do
     with {:ok, pdo_info} <- state.driver.pdo_info(state.driver_state, name),
          {:ok, domain_pid} <- Domain.find_domain(state.master, domain_name) do
       %{sync_manager: {sync_index, direction, _watchdog}, pdo_index: pdo_index, entries: entries} =
         pdo_info
 
-      # Add PDO to assignment (EtherLab handles duplicates gracefully)
+      # Add PDO to sync manager assignment (IgH handles duplicates gracefully)
       config_pdo_assign_add_internal(state, sync_index, pdo_index)
 
       pdo_direction = ethercat_direction_to_atom(direction)
 
-      # Register ALL entries in this PDO
+      # Register each entry: add to mapping + register to domain
       unique_names =
         Enum.map(entries, fn {entry_name, entry} ->
           {entry_index, entry_subindex, entry_size} = entry
 
-          # Add this entry to the PDO mapping
+          # Add entry to PDO mapping
           config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size)
 
-          # Register with domain using unique name that includes entry name
+          # Register entry with domain for process data exchange
           unique_name = "slave_#{state.position}:#{name}:#{entry_name}"
           Domain.register_pdo_entry(domain_pid, state.slave_config, unique_name, entry, pdo_direction)
 
           unique_name
         end)
+        |> Enum.sort()
 
       {:ok, unique_names}
     end
