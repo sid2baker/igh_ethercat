@@ -104,8 +104,9 @@ defmodule EtherCAT do
   - `{:ok, %PDO{}}` - PDO handle for read/write/watch operations
   - `{:error, reason}` - Error if registration fails
 
-  ## Sync Manager Constraint
-  All entries from the same sync manager must use the same domain.
+  ## Multi-Domain Support
+  Entries from the same sync manager can be registered to different domains.
+  Each domain creates its own FMMU mapping of the sync manager memory.
 
   ## Example
 
@@ -191,8 +192,9 @@ defmodule EtherCAT do
   - `{:ok, [%PDO{}]}` - List of handles for all entries in all PDOs
   - `{:error, reason}` - Error if registration fails
 
-  ## Sync Manager Constraint
-  All PDOs from the same sync manager must use the same domain.
+  ## Multi-Domain Support
+  PDOs and entries can be registered to different domains regardless of sync manager.
+  Each domain creates its own FMMU for accessing the sync manager memory.
 
   ## Example
 
