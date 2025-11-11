@@ -1,9 +1,59 @@
 defmodule EtherCAT.Slave do
   @moduledoc """
-  GenServer managing individual EtherCAT slave device with driver-based PDO configuration.
+  Gen_statem managing individual EtherCAT slave device with driver-based PDO configuration.
+
+  ## State Machine
+
+  ```
+  :unconfigured (created, driver loaded)
+      │ configure/2
+      ▼
+  :configured (driver configured, ready for registration)
+      │ lock/1 (called by Master on activation)
+      ▼
+  :operational (locked, no changes allowed)
+  ```
+
+  ## Entry-Level vs PDO-Level Registration
+
+  This module supports both granular entry-level and convenient PDO-level registration:
+
+  ### Entry-Level (Granular)
+  Register only the specific entries you need from a PDO:
+
+      # Register just the temperature value from channel 1
+      {:ok, handle} = Slave.register_entry(slave, :ch1, :value)
+
+      # Register multiple specific entries
+      {:ok, [val_handle, err_handle]} =
+        Slave.register_entries(slave, [
+          {:ch1, :value},
+          {:ch1, :error}
+        ])
+
+  ### PDO-Level (Convenience)
+  Register all entries in a PDO at once:
+
+      # Register all 6 entries from channel 1
+      {:ok, handles} = Slave.register_pdo(slave, :ch1)
+
+  ## Sync Manager Domain Constraint
+
+  **Important:** All entries from the same sync manager must be registered to the same domain.
+
+  This is an IgH EtherCAT Master constraint: when any entry from a sync manager is registered
+  to a domain, the entire sync manager's process data is mapped to that domain via FMMU.
+
+  Different sync managers CAN use different domains (e.g., SM2 outputs → fast_domain,
+  SM3 inputs → slow_domain).
+
+  Reference: ecrt.h documentation - "respective sync manager's assigned PDOs are appended
+  to the given domain, if not already done"
   """
-  use GenServer
+
+  @behaviour :gen_statem
   require Logger
+  import EtherCAT.Utils
 
   alias EtherCAT.{Master, Domain}
 
@@ -19,26 +69,35 @@ defmodule EtherCAT.Slave do
     :serial,
     :slave_config,
     :sync_count,
-    :pdo_registrations,
-    locked?: false,
-    configured?: false
+    :name,
+    # Tracks registered entries per PDO: %{pdo_name => %{domain: atom(), entries: MapSet}}
+    pdo_registrations: %{},
+    # Tracks sync manager to domain mapping: %{sync_index => domain_name}
+    sync_manager_domains: %{},
+    # Tracks which sync managers have been configured (one-time setup)
+    configured_sync_managers: MapSet.new()
   ]
 
   @type t :: %__MODULE__{
           driver: atom() | nil,
           driver_state: map(),
-          master: Master.t(),
+          master: pid(),
           alias: non_neg_integer(),
           position: non_neg_integer(),
-          vendor_id: non_neg_integer(),
-          product_code: non_neg_integer(),
+          vendor_id: non_neg_integer() | nil,
+          product_code: non_neg_integer() | nil,
+          revision: non_neg_integer(),
+          serial: non_neg_integer(),
           slave_config: reference() | nil,
-          pdo_registrations: %{(pdo_name :: atom() | String.t()) => domain()},
-          locked?: boolean(),
-          configured?: boolean()
+          sync_count: non_neg_integer(),
+          name: atom() | String.t() | nil,
+          pdo_registrations: %{pdo_name() => %{domain: domain(), entries: MapSet.t(atom())}},
+          sync_manager_domains: %{non_neg_integer() => domain()},
+          configured_sync_managers: MapSet.t(non_neg_integer())
         }
 
-  @type name :: String.t()
+  @type pdo_name :: atom() | String.t()
+  @type entry_name :: atom() | String.t()
   @type domain :: atom()
   @type offset :: non_neg_integer()
   @type size :: non_neg_integer()
@@ -49,8 +108,7 @@ defmodule EtherCAT.Slave do
   Starts a slave process linked to the calling process.
 
   This function is typically called by the Master during slave synchronization.
-  It initializes the slave with a driver and begins auto-discovery if using
-  the Generic driver.
+  It initializes the slave with a driver in the `:unconfigured` state.
 
   ## Parameters
   - `opts` - Keyword list with:
@@ -59,12 +117,24 @@ defmodule EtherCAT.Slave do
     - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
     - `:slave_config` - The slave configuration reference from the NIF
     - `:sync_count` - Number of sync managers available on the device
+    - `:name` - Optional semantic name for the slave (atom or string)
 
   ## Returns
   - `{:ok, pid}` - The slave process PID
 
   ## Example
 
+      # With semantic name
+      {:ok, slave} = Slave.start_link(
+        master: master_pid,
+        position: 1,
+        driver: EtherCAT.Drivers.EL3202,
+        slave_config: config_ref,
+        sync_count: 4,
+        name: :temp_sensor_1
+      )
+
+      # Without name (uses "s1" as identifier)
       {:ok, slave} = Slave.start_link(
         master: master_pid,
         position: 1,
@@ -73,19 +143,26 @@ defmodule EtherCAT.Slave do
         sync_count: 4
       )
   """
-  @spec start_link(keyword()) :: GenServer.on_start()
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     master = Keyword.fetch!(opts, :master)
     position = Keyword.fetch!(opts, :position)
     driver = Keyword.fetch!(opts, :driver)
     slave_config = Keyword.fetch!(opts, :slave_config)
     sync_count = Keyword.fetch!(opts, :sync_count)
+    name = Keyword.get(opts, :name)
 
-    GenServer.start_link(__MODULE__, {master, position, driver, slave_config, sync_count})
+    :gen_statem.start_link(
+      __MODULE__,
+      {master, position, driver, slave_config, sync_count, name},
+      []
+    )
   end
 
   @doc """
   Applies driver-specific configuration to the slave.
+
+  Transitions from `:unconfigured` to `:configured` state.
 
   The configuration map is passed to the driver's `configure/2` callback,
   allowing device-specific initialization and setup.
@@ -99,17 +176,62 @@ defmodule EtherCAT.Slave do
 
       Slave.configure(slave, %{sample_rate: 1000, mode: :continuous})
   """
-  @spec configure(pid(), map(), timeout()) :: :ok
+  @spec configure(pid(), map(), timeout()) :: :ok | {:error, term()}
   def configure(slave, config, timeout \\ 5000) do
-    GenServer.call(slave, {:configure, config}, timeout)
+    :gen_statem.call(slave, {:configure, config}, timeout)
+  end
+
+  @doc """
+  Sets a semantic name for the slave.
+
+  The name is used to generate more readable unique identifiers for PDO entries.
+  For example, a slave named `:temp_sensor_1` will generate entry names like
+  `"temp_sensor_1:ch1:value"` instead of `"s0:ch1:value"`.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `name` - Atom or string to identify this slave
+
+  ## Returns
+  - `:ok` on success
+  - `{:error, reason}` if setting name fails
+
+  ## Example
+
+      Slave.set_name(slave, :temp_sensor_1)
+      # Future registrations will use "temp_sensor_1:..." prefix
+  """
+  @spec set_name(pid(), atom() | String.t()) :: :ok | {:error, term()}
+  def set_name(slave, name) when is_atom(name) or is_binary(name) do
+    :gen_statem.call(slave, {:set_name, name})
+  end
+
+  @doc """
+  Gets the semantic name of the slave, if set.
+
+  ## Parameters
+  - `slave` - The slave process PID
+
+  ## Returns
+  - `{:ok, name}` if name is set
+  - `{:ok, nil}` if no name is set (using default "s<position>" format)
+
+  ## Example
+
+      Slave.set_name(slave, :temp_sensor_1)
+      {:ok, :temp_sensor_1} = Slave.get_name(slave)
+  """
+  @spec get_name(pid()) :: {:ok, atom() | String.t() | nil}
+  def get_name(slave) do
+    :gen_statem.call(slave, :get_name)
   end
 
   @doc """
   Lists all available PDO names from the slave's driver.
 
   The returned list depends on the driver implementation:
-  - Generic driver: Auto-discovered names like "pdo_6000:1"
-  - Device-specific drivers: Semantic names like :temperature, :pressure
+  - Generic driver: Auto-discovered names like "0x1a00", "0x1a01"
+  - Device-specific drivers: Semantic names like `:ch1`, `:ch2`
 
   ## Parameters
   - `slave` - The slave process PID
@@ -121,41 +243,101 @@ defmodule EtherCAT.Slave do
   ## Example
 
       pdos = Slave.list_pdos(slave)
-      #=> [:input1, :input2, :output1]
+      #=> [:ch1, :ch2]
   """
-  @spec list_pdos(pid(), timeout()) :: [atom() | String.t()]
+  @spec list_pdos(pid(), timeout()) :: [pdo_name()]
   def list_pdos(slave, timeout \\ 5000) do
-    GenServer.call(slave, :list_pdos, timeout)
-  end
-
-  # Introspection API
-
-  @doc """
-  Gets sync manager information for the specified sync index.
-  All NIF communication goes through Master to prevent race conditions.
-  """
-  def get_sync_manager(slave, sync_index) do
-    GenServer.call(slave, {:get_sync_manager, sync_index})
+    :gen_statem.call(slave, :list_pdos, timeout)
   end
 
   @doc """
-  Gets PDO information at the specified sync manager and position.
-  All NIF communication goes through Master to prevent race conditions.
+  Registers a single PDO entry for cyclic data exchange.
+
+  This is the granular registration API - register only the specific entries you need.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `pdo_name` - PDO name from `list_pdos/1` (e.g., `:ch1`)
+  - `entry_name` - Entry name within the PDO (e.g., `:value`, `:error`)
+  - `domain` - Domain identifier (default: `:default_domain`)
+  - `timeout` - Call timeout in milliseconds (default: 10_000)
+
+  ## Returns
+  - `{:ok, unique_name}` - Unique entry identifier like "slave_0:ch1:value"
+  - `{:error, reason}` - Error if registration fails
+
+  ## Sync Manager Constraint
+  All entries from the same sync manager must use the same domain.
+
+  ## Example
+
+      # Register only the temperature value, skip error flags
+      {:ok, temp_name} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
+
+      # Use with EtherCAT.read/write/watch
+      handle = PDO.new(:fast_domain, temp_name, master)
+      {:ok, temp} = EtherCAT.read(handle)
   """
-  def get_pdo(slave, sync_index, pdo_pos) do
-    GenServer.call(slave, {:get_pdo, sync_index, pdo_pos})
+  @spec register_entry(pid(), pdo_name(), entry_name(), domain(), timeout()) ::
+          {:ok, String.t()} | {:error, term()}
+  def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain, timeout \\ 10_000) do
+    :gen_statem.call(slave, {:register_entry, pdo_name, entry_name, domain}, timeout)
   end
 
   @doc """
-  Gets PDO entry information at the specified position.
-  All NIF communication goes through Master to prevent race conditions.
+  Registers multiple PDO entries in a single call.
+
+  Convenience function for registering several entries at once.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `entries` - List of `{pdo_name, entry_name}` or `{pdo_name, entry_name, domain}` tuples
+  - `default_domain` - Domain to use when not specified per entry (default: `:default_domain`)
+  - `timeout` - Call timeout in milliseconds (default: 10_000)
+
+  ## Returns
+  - `{:ok, [unique_name]}` - List of unique entry identifiers
+  - `{:error, reason}` - Error if any registration fails
+
+  ## Example
+
+      # All to default domain
+      {:ok, names} = Slave.register_entries(slave, [
+        {:ch1, :value},
+        {:ch1, :error},
+        {:ch2, :value}
+      ])
+
+      # Different domains per entry
+      {:ok, names} = Slave.register_entries(slave, [
+        {:ch1, :value, :fast_domain},
+        {:ch2, :value, :slow_domain}
+      ])
   """
-  def get_pdo_entry(slave, sync_index, pdo_pos, entry_pos) do
-    GenServer.call(slave, {:get_pdo_entry, sync_index, pdo_pos, entry_pos})
+  @spec register_entries(pid(), list(), domain(), timeout()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def register_entries(slave, entries, default_domain \\ :default_domain, timeout \\ 10_000)
+      when is_list(entries) do
+    results =
+      Enum.map(entries, fn
+        {pdo_name, entry_name} ->
+          register_entry(slave, pdo_name, entry_name, default_domain, timeout)
+
+        {pdo_name, entry_name, domain} ->
+          register_entry(slave, pdo_name, entry_name, domain, timeout)
+      end)
+
+    # Check if any failed
+    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
+      {:error, _} = error -> error
+      nil -> {:ok, Enum.map(results, fn {:ok, name} -> name end)}
+    end
   end
 
   @doc """
   Registers a PDO (with all its entries) to a domain for cyclic data exchange.
+
+  This is the convenient registration API - register all entries in a PDO at once.
 
   This function incrementally configures the slave's sync managers and PDO mappings
   based on the driver's configuration, then registers all PDO entries with the specified
@@ -164,21 +346,17 @@ defmodule EtherCAT.Slave do
   **IMPORTANT:**
   - You must call `Slave.configure/2` before calling this function.
   - This registers all entries defined in the PDO by the driver.
-  - Different PDOs can be registered to different domains (even within the same sync manager).
-
-  **IgH EtherCAT Constraint:**
-  When any entry from a sync manager is registered to a domain, the entire sync manager's
-  process data is mapped to that domain. However, you only receive offsets for the specific
-  entries you register.
+  - Different PDOs from different sync managers can go to different domains.
+  - All PDOs from the same sync manager must use the same domain.
 
   ## Parameters
   - `slave` - The slave process PID
-  - `name` - PDO name (from `list_pdos/1`)
+  - `pdo_name` - PDO name (from `list_pdos/1`)
   - `domain` - Domain identifier (default: `:default_domain`)
   - `timeout` - Call timeout in milliseconds (default: 10_000 for configuration)
 
   ## Returns
-  - `{:ok, [unique_name]}` - List of unique names for each entry (e.g., `["slave_0:ch1:underrange", "slave_0:ch1:value"]`)
+  - `{:ok, [unique_name]}` - List of unique names for each entry
   - `{:error, reason}` - Error if registration fails
 
   ## Example
@@ -186,24 +364,20 @@ defmodule EtherCAT.Slave do
       # Configure the slave first
       :ok = Slave.configure(slave, %{})
 
-      # Register PDOs (can go to different domains)
+      # Register all entries in channel 1 PDO
       {:ok, ch1_entries} = Slave.register_pdo(slave, :ch1, :fast_domain)
-      {:ok, ch2_entries} = Slave.register_pdo(slave, :ch2, :slow_domain)
-
       # ch1_entries = ["slave_0:ch1:underrange", "slave_0:ch1:value", ...]
   """
-  @spec register_pdo(pid(), name(), domain(), timeout()) ::
+  @spec register_pdo(pid(), pdo_name(), domain(), timeout()) ::
           {:ok, [String.t()]} | {:error, term()}
-  def register_pdo(slave, name, domain \\ :default_domain, timeout \\ 10_000) do
-    GenServer.call(slave, {:register_pdo, name, domain}, timeout)
+  def register_pdo(slave, pdo_name, domain \\ :default_domain, timeout \\ 10_000) do
+    :gen_statem.call(slave, {:register_pdo, pdo_name, domain}, timeout)
   end
 
   @doc """
   Convenience function to register all available PDOs to a domain.
 
   Calls `register_pdo/3` for each PDO returned by `list_pdos/1`.
-  Since each PDO contains multiple entries, the returned list contains
-  all entry unique names from all PDOs.
 
   ## Returns
   - `{:ok, unique_names}` - Flat list of all entry unique names from all PDOs
@@ -211,24 +385,14 @@ defmodule EtherCAT.Slave do
 
   ## Example
 
-      # Register all PDOs to the default domain
-      {:ok, unique_names} = Slave.register_all_pdos(slave)
-      # unique_names = ["slave_0:ch1:underrange", "slave_0:ch1:value", "slave_0:ch2:underrange", ...]
-
-      # Register all PDOs to a custom domain
-      {:ok, unique_names} = Slave.register_all_pdos(slave, :slow_domain)
+      {:ok, unique_names} = Slave.register_all_pdos(slave, :fast_domain)
   """
-  @spec register_all_pdos(pid(), domain()) :: {:ok, [String.t()]} | {:error, term()}
-  def register_all_pdos(slave, domain \\ :default_domain) do
-    all_pdos = list_pdos(slave)
+  @spec register_all_pdos(pid(), domain(), timeout()) :: {:ok, [String.t()]} | {:error, term()}
+  def register_all_pdos(slave, domain \\ :default_domain, timeout \\ 10_000) do
+    all_pdos = list_pdos(slave, timeout)
 
-    # Register each PDO individually
-    results =
-      Enum.map(all_pdos, fn pdo ->
-        register_pdo(slave, pdo, domain)
-      end)
+    results = Enum.map(all_pdos, fn pdo -> register_pdo(slave, pdo, domain, timeout) end)
 
-    # Check if any failed
     case Enum.find(results, fn result -> match?({:error, _}, result) end) do
       {:error, reason} -> {:error, reason}
       nil -> {:ok, Enum.flat_map(results, fn {:ok, names} -> names end)}
@@ -236,19 +400,16 @@ defmodule EtherCAT.Slave do
   end
 
   @doc """
-  Returns true if slave is locked (operational mode active).
+  Returns the current state of the slave.
 
-  Locked slaves cannot accept configuration changes.
+  ## Returns
+  - `:unconfigured` - Driver loaded, waiting for configure/2
+  - `:configured` - Ready for PDO/entry registration
+  - `:operational` - Locked, master is active
   """
-  @spec locked?(pid()) :: boolean()
-  def locked?(slave) do
-    GenServer.call(slave, :locked?)
-  end
-
-  @doc false
-  @spec lock(pid()) :: :ok
-  def lock(slave) do
-    GenServer.call(slave, :lock)
+  @spec get_state(pid()) :: :unconfigured | :configured | :operational
+  def get_state(slave) do
+    :gen_statem.call(slave, :get_state)
   end
 
   @doc """
@@ -270,21 +431,53 @@ defmodule EtherCAT.Slave do
   ## Example
 
       # In driver configure/2 callback
-      def configure(slave, config) do
-        # Configure temperature limit (int16 value)
+      def configure(ctx, state, config) do
         limit = Map.get(config, :limit1, 1000)
         data = <<limit::little-signed-16>>
-        :ok = Slave.config_sdo(slave, 0x8000, 0x13, data)
-
+        :ok = Slave.config_sdo(ctx.slave_pid, 0x8000, 0x13, data)
         {:ok, %{configured: true}}
       end
   """
   @spec config_sdo(pid(), 0x0000..0xFFFF, 0x00..0xFF, binary()) :: :ok | {:error, term()}
   def config_sdo(slave, sdo_index, sdo_subindex, data) when is_binary(data) do
-    GenServer.call(slave, {:config_sdo, sdo_index, sdo_subindex, data})
+    :gen_statem.call(slave, {:config_sdo, sdo_index, sdo_subindex, data})
   end
 
-  # Internal/Advanced API
+  # Introspection API
+
+  @doc """
+  Gets sync manager information for the specified sync index.
+  All NIF communication goes through Master to prevent race conditions.
+  """
+  @spec get_sync_manager(pid(), non_neg_integer()) :: {:ok, map()} | {:error, term()}
+  def get_sync_manager(slave, sync_index) do
+    :gen_statem.call(slave, {:get_sync_manager, sync_index})
+  end
+
+  @doc """
+  Gets PDO information at the specified sync manager and position.
+  All NIF communication goes through Master to prevent race conditions.
+  """
+  @spec get_pdo(pid(), non_neg_integer(), non_neg_integer()) :: {:ok, map()} | {:error, term()}
+  def get_pdo(slave, sync_index, pdo_pos) do
+    :gen_statem.call(slave, {:get_pdo, sync_index, pdo_pos})
+  end
+
+  @doc """
+  Gets PDO entry information at the specified position.
+  All NIF communication goes through Master to prevent race conditions.
+  """
+  @spec get_pdo_entry(pid(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def get_pdo_entry(slave, sync_index, pdo_pos, entry_pos) do
+    :gen_statem.call(slave, {:get_pdo_entry, sync_index, pdo_pos, entry_pos})
+  end
+
+  @doc false
+  @spec lock(pid()) :: :ok
+  def lock(slave) do
+    :gen_statem.call(slave, :lock)
+  end
 
   @doc """
   Returns the slave configuration NIF reference.
@@ -292,20 +485,27 @@ defmodule EtherCAT.Slave do
   This is an advanced function used for direct NIF access. Most users
   should not need to call this directly.
   """
+  @spec get_slave_config(pid()) :: reference()
   def get_slave_config(slave) do
-    GenServer.call(slave, {:get_slave_config})
+    :gen_statem.call(slave, :get_slave_config)
   end
 
+  # Callbacks
+
   @impl true
-  def init({master, position, driver, slave_config, sync_count}) do
+  def callback_mode(), do: [:state_functions, :state_enter]
+
+  @impl true
+  def init({master, position, driver, slave_config, sync_count, name}) do
     # Register this slave in the Registry for process discovery
     Registry.register(EtherCAT.Registry, {:slave, master, position}, %{
       master: master,
       position: position,
-      driver: driver
+      driver: driver,
+      name: name
     })
 
-    state = %__MODULE__{
+    data = %__MODULE__{
       driver: driver,
       driver_state: %{},
       master: master,
@@ -317,254 +517,374 @@ defmodule EtherCAT.Slave do
       serial: 0,
       slave_config: slave_config,
       sync_count: sync_count,
-      pdo_registrations: %{}
+      name: name
     }
 
-    {:ok, state}
-  end
-
-  # Internal helpers that call Master
-  # All NIF communication must go through Master to prevent race conditions
-
-  defp get_sync_manager_internal(state, sync_index) do
-    Master.slave_operation(state.master, state.position, :get_sync_manager, [sync_index])
-  end
-
-  defp get_pdo_internal(state, sync_index, pdo_pos) do
-    Master.slave_operation(state.master, state.position, :get_pdo, [sync_index, pdo_pos])
-  end
-
-  defp get_pdo_entry_internal(state, sync_index, pdo_pos, entry_pos) do
-    Master.slave_operation(state.master, state.position, :get_pdo_entry, [
-      sync_index,
-      pdo_pos,
-      entry_pos
-    ])
-  end
-
-  # Configuration helpers - route through Master to avoid direct NIF calls
-
-  defp config_sync_manager_internal(state, sync_index, direction, watchdog) do
-    Master.slave_operation(state.master, state.position, :config_sync_manager, [
-      state.slave_config,
-      sync_index,
-      direction,
-      watchdog
-    ])
-  end
-
-  defp config_pdo_assign_clear_internal(state, sync_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_assign_clear, [
-      state.slave_config,
-      sync_index
-    ])
-  end
-
-  defp config_pdo_assign_add_internal(state, sync_index, pdo_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_assign_add, [
-      state.slave_config,
-      sync_index,
-      pdo_index
-    ])
-  end
-
-  defp config_pdo_mapping_clear_internal(state, pdo_index) do
-    Master.slave_operation(state.master, state.position, :config_pdo_mapping_clear, [
-      state.slave_config,
-      pdo_index
-    ])
-  end
-
-  defp config_pdo_mapping_add_internal(state, pdo_index, entry_index, entry_subindex, entry_size) do
-    Master.slave_operation(state.master, state.position, :config_pdo_mapping_add, [
-      state.slave_config,
-      pdo_index,
-      entry_index,
-      entry_subindex,
-      entry_size
-    ])
+    Logger.debug("Slave #{position} initialized with name: #{inspect(name)}")
+    {:ok, :unconfigured, data}
   end
 
   @impl true
-  def handle_call(:locked?, _from, state) do
-    {:reply, state.locked?, state}
-  end
-
-  @impl true
-  def handle_call(:lock, _from, state) do
-    Logger.info("Slave at position #{state.position} locked")
-    {:reply, :ok, %{state | locked?: true}}
-  end
-
-  @impl true
-  def handle_call({:get_slave_config}, _from, state) do
-    {:reply, state.slave_config, state}
-  end
-
-  # Configuration - reject when locked
-  @impl true
-  def handle_call({:configure, _config}, _from, %{locked?: true} = state) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot reconfigure slave after master activation. " <>
-         "Reconfiguration requires restarting the master."}}, state}
-  end
-
-  @impl true
-  def handle_call({:configure, config}, _from, state) do
-    # Create context struct with slave information
-    ctx = %{
-      master: state.master,
-      slave_pid: self(),
-      position: state.position,
-      slave_config: state.slave_config,
-      vendor_id: state.vendor_id,
-      product_code: state.product_code,
-      revision: state.revision,
-      serial: state.serial,
-      sync_count: state.sync_count
-    }
-
-    # Call driver configuration
-    {:ok, driver_state} = state.driver.configure(ctx, state.driver_state, config)
-
-    # Update state with new driver_state before clearing PDO config
-    updated_state = %{state | driver_state: driver_state}
-
-    # Clear all PDO assignments and mappings for all sync managers
-    # This is done once after driver configuration to prepare for incremental registration
-    clear_all_pdo_config(updated_state)
-
-    {:reply, :ok, %{updated_state | configured?: true}}
-  end
-
-  # Read-only operations - allowed when locked
-  def handle_call(:list_pdos, _from, state) do
-    {:reply, state.driver.list_pdos(state.driver_state), state}
-  end
-
-  # New API handlers - introspection
-  def handle_call({:get_sync_manager, sync_index}, _from, state) do
-    result = get_sync_manager_internal(state, sync_index)
-    {:reply, result, state}
-  end
-
-  def handle_call({:get_pdo, sync_index, pdo_pos}, _from, state) do
-    result = get_pdo_internal(state, sync_index, pdo_pos)
-    {:reply, result, state}
-  end
-
-  def handle_call({:get_pdo_entry, sync_index, pdo_pos, entry_pos}, _from, state) do
-    result = get_pdo_entry_internal(state, sync_index, pdo_pos, entry_pos)
-    {:reply, result, state}
-  end
-
-  # SDO configuration - reject when locked
-  def handle_call(
-        {:config_sdo, _sdo_index, _sdo_subindex, _data},
-        _from,
-        %{locked?: true} = state
-      ) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot configure SDOs after master activation. " <>
-         "SDO configuration requires restarting the master."}}, state}
-  end
-
-  def handle_call({:config_sdo, sdo_index, sdo_subindex, data}, _from, state) do
-    result =
-      Master.slave_operation(
-        state.master,
-        state.position,
-        :config_sdo,
-        [state.slave_config, sdo_index, sdo_subindex, data]
-      )
-
-    {:reply, result, state}
-  end
-
-  # PDO registration - reject when locked
-  def handle_call({:register_pdo, _name, _domain}, _from, %{locked?: true} = state) do
-    {:reply,
-     {:error,
-      {:slave_locked,
-       "Cannot register PDOs after master activation. " <>
-         "Reconfiguration requires restarting the master."}}, state}
-  end
-
-  # PDO registration - reject when not configured
-  def handle_call({:register_pdo, _name, _domain}, _from, %{configured?: false} = state) do
-    {:reply,
-     {:error,
-      {:not_configured,
-       "Cannot register PDOs before calling configure/2. " <>
-         "Call Slave.configure/2 first to initialize PDO configuration."}}, state}
-  end
-
-  def handle_call({:register_pdo, name, domain}, _from, state) do
-    # Track PDO registrations by PDO name (not individual entries)
-    case state.pdo_registrations[name] do
-      ^domain ->
-        # Already registered to this domain, return success idempotently
-        # Rebuild the unique names for all entries
-        {:ok, pdo_info} = state.driver.pdo_info(state.driver_state, name)
-        unique_names = build_unique_names(name, pdo_info.entries, state.position)
-        {:reply, {:ok, unique_names}, state}
-
-      nil ->
-        # Not registered yet, proceed with registration
-        case register_single_pdo(name, domain, state) do
-          {:ok, unique_names} when is_list(unique_names) ->
-            new_state = put_in(state.pdo_registrations[name], domain)
-            {:reply, {:ok, unique_names}, new_state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
-
-      other_domain ->
-        # Already registered to a different domain
-        {:reply, {:error, {:pdo_already_registered, name, other_domain}}, state}
-    end
-  end
-
-  @impl true
-  def terminate(reason, state) do
-    Logger.info("Slave at position #{state.position} terminating: #{inspect(reason)}")
+  def terminate(reason, _state, data) do
+    Logger.info("Slave at position #{data.position} terminating: #{inspect(reason)}")
 
     :telemetry.execute(
       [:ethercat, :slave, :terminate],
-      %{position: state.position},
-      %{reason: reason, driver: state.driver}
+      %{position: data.position},
+      %{reason: reason, driver: data.driver}
     )
 
     # Call driver's terminate callback
-    if state.driver && state.driver_state do
-      state.driver.terminate(state.driver_state)
+    if data.driver && data.driver_state do
+      data.driver.terminate(data.driver_state)
     end
 
     :ok
   end
 
+  # State: unconfigured
+  # Slave is created but driver has not been configured yet
+
+  def unconfigured(:enter, _old_state, data) do
+    Logger.debug("Slave #{data.position} entered :unconfigured state")
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :unconfigured})
+    :keep_state_and_data
+  end
+
+  def unconfigured({:call, from}, {:configure, config}, data) do
+    # Create context struct with slave information
+    context = %{
+      master: data.master,
+      slave_pid: self(),
+      position: data.position,
+      slave_config: data.slave_config,
+      vendor_id: data.vendor_id,
+      product_code: data.product_code,
+      revision: data.revision,
+      serial: data.serial,
+      sync_count: data.sync_count
+    }
+
+    # Call driver configuration
+    case data.driver.configure(context, data.driver_state, config) do
+      {:ok, driver_state} ->
+        updated_data = %{data | driver_state: driver_state}
+
+        # Clear all PDO assignments and mappings for all sync managers
+        # This prepares for incremental entry/PDO registration
+        clear_all_pdo_config(updated_data)
+
+        Logger.info("Slave #{data.position} configured, transitioning to :configured")
+        {:next_state, :configured, updated_data, [{:reply, from, :ok}]}
+
+      {:error, reason} ->
+        Logger.error("Slave #{data.position} configuration failed: #{inspect(reason)}")
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  def unconfigured({:call, from}, :list_pdos, data) do
+    # Allow querying PDOs even before configuration
+    pdos = data.driver.list_pdos(data.driver_state)
+    {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def unconfigured({:call, from}, {:set_name, name}, data) do
+    updated_data = %{data | name: name}
+    Logger.debug("Slave #{data.position} name set to: #{inspect(name)}")
+    {:keep_state, updated_data, [{:reply, from, :ok}]}
+  end
+
+  def unconfigured({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
+  end
+
+  def unconfigured({:call, from}, :get_state, _data) do
+    {:keep_state_and_data, [{:reply, from, :unconfigured}]}
+  end
+
+  def unconfigured({:call, from}, _request, data) do
+    {:keep_state_and_data,
+     [{:reply, from, {:error, {:invalid_state, :unconfigured, "Call configure/2 first"}}}]}
+  end
+
+  # State: configured
+  # Driver is configured, ready for entry/PDO registration
+
+  def configured(:enter, _old_state, data) do
+    Logger.debug("Slave #{data.position} entered :configured state")
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :configured})
+    :keep_state_and_data
+  end
+
+  def configured({:call, from}, {:register_entry, pdo_name, entry_name, domain_name}, data) do
+    case do_register_entry(pdo_name, entry_name, domain_name, data) do
+      {:ok, unique_name, updated_data} ->
+        {:keep_state, updated_data, [{:reply, from, {:ok, unique_name}}]}
+
+      {:error, _reason} = error ->
+        {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def configured({:call, from}, {:register_pdo, pdo_name, domain_name}, data) do
+    case do_register_pdo(pdo_name, domain_name, data) do
+      {:ok, unique_names, updated_data} ->
+        {:keep_state, updated_data, [{:reply, from, {:ok, unique_names}}]}
+
+      {:error, _reason} = error ->
+        {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def configured({:call, from}, {:config_sdo, sdo_index, sdo_subindex, sdo_data}, data) do
+    result =
+      Master.slave_operation(
+        data.master,
+        data.position,
+        :config_sdo,
+        [data.slave_config, sdo_index, sdo_subindex, sdo_data]
+      )
+
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def configured({:call, from}, :list_pdos, data) do
+    pdos = data.driver.list_pdos(data.driver_state)
+    {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def configured({:call, from}, {:get_sync_manager, sync_index}, data) do
+    result = get_sync_manager_internal(data, sync_index)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def configured({:call, from}, {:get_pdo, sync_index, pdo_pos}, data) do
+    result = get_pdo_internal(data, sync_index, pdo_pos)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def configured({:call, from}, {:get_pdo_entry, sync_index, pdo_pos, entry_pos}, data) do
+    result = get_pdo_entry_internal(data, sync_index, pdo_pos, entry_pos)
+    {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def configured({:call, from}, :get_slave_config, data) do
+    {:keep_state_and_data, [{:reply, from, data.slave_config}]}
+  end
+
+  def configured({:call, from}, {:set_name, name}, data) do
+    updated_data = %{data | name: name}
+    Logger.debug("Slave #{data.position} name set to: #{inspect(name)}")
+    {:keep_state, updated_data, [{:reply, from, :ok}]}
+  end
+
+  def configured({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
+  end
+
+  def configured({:call, from}, :get_state, _data) do
+    {:keep_state_and_data, [{:reply, from, :configured}]}
+  end
+
+  def configured({:call, from}, :lock, data) do
+    Logger.info("Slave #{data.position} locked, transitioning to :operational")
+    {:next_state, :operational, data, [{:reply, from, :ok}]}
+  end
+
+  # State: operational
+  # Master is activated, slave is locked, no changes allowed
+
+  def operational(:enter, _old_state, data) do
+    Logger.debug("Slave #{data.position} entered :operational state")
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :operational})
+    :keep_state_and_data
+  end
+
+  def operational({:call, from}, :list_pdos, data) do
+    # Allow querying PDOs in operational state
+    pdos = data.driver.list_pdos(data.driver_state)
+    {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def operational({:call, from}, :get_name, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.name}}]}
+  end
+
+  def operational({:call, from}, :get_state, _data) do
+    {:keep_state_and_data, [{:reply, from, :operational}]}
+  end
+
+  def operational({:call, from}, :get_slave_config, data) do
+    {:keep_state_and_data, [{:reply, from, data.slave_config}]}
+  end
+
+  def operational({:call, from}, _request, data) do
+    {:keep_state_and_data,
+     [
+       {:reply, from,
+        {:error,
+         {:slave_operational,
+          "Cannot modify slave #{data.position} after master activation. Restart master to reconfigure."}}}
+     ]}
+  end
+
   # Private helpers
 
-  # Prepares slave for incremental PDO registration by clearing existing configuration
-  #
-  # This function is called once during configure/2 and:
-  # 1. Configures each sync manager (direction, watchdog)
-  # 2. Clears all PDO assignments from sync managers
-  # 3. Clears all PDO mappings
-  #
-  # After this, register_pdo/3 can incrementally add back only the PDOs and entries needed.
-  # This approach allows selective PDO registration while maintaining proper configuration.
-  #
-  # Follows EtherLab's ecrt_slave_config_pdos pattern.
-  defp clear_all_pdo_config(state) do
-    state.driver.list_pdos(state.driver_state)
+  # Registers a single entry from a PDO
+  defp do_register_entry(pdo_name, entry_name, domain_name, data) do
+    with {:ok, pdo_info} <- data.driver.pdo_info(data.driver_state, pdo_name),
+         :ok <- validate_entry_exists(pdo_info, entry_name),
+         :ok <- validate_sync_manager_domain(pdo_info, domain_name, data),
+         {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
+      {sync_index, direction, watchdog} = pdo_info.sync_manager
+      pdo_index = pdo_info.pdo_index
+
+      # Get the specific entry configuration
+      {entry_index, entry_subindex, entry_bit_length} = pdo_info.entries[entry_name]
+
+      # Configure sync manager if first time
+      updated_data =
+        if MapSet.member?(data.configured_sync_managers, sync_index) do
+          data
+        else
+          config_sync_manager_internal(data, sync_index, direction, watchdog)
+          %{data | configured_sync_managers: MapSet.put(data.configured_sync_managers, sync_index)}
+        end
+
+      # Check if this is the first entry from this PDO
+      pdo_registration = Map.get(updated_data.pdo_registrations, pdo_name)
+      first_entry_from_pdo? = is_nil(pdo_registration)
+
+      # Add PDO to sync manager assignment if first entry
+      if first_entry_from_pdo? do
+        config_pdo_assign_add_internal(updated_data, sync_index, pdo_index)
+      end
+
+      # Add entry to PDO mapping
+      config_pdo_mapping_add_internal(
+        updated_data,
+        pdo_index,
+        entry_index,
+        entry_subindex,
+        entry_bit_length
+      )
+
+      # Register entry with domain
+      # Use semantic name if set, otherwise use "s<position>" format
+      slave_identifier =
+        case updated_data.name do
+          nil -> "s#{updated_data.position}"
+          name when is_atom(name) -> Atom.to_string(name)
+          name when is_binary(name) -> name
+        end
+
+      unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
+      pdo_direction = ethercat_direction_to_atom(direction)
+
+      Domain.register_pdo_entry(
+        domain_pid,
+        updated_data.slave_config,
+        unique_name,
+        {entry_index, entry_subindex, entry_bit_length},
+        pdo_direction
+      )
+
+      # Update tracking structures
+      updated_registrations =
+        Map.update(
+          updated_data.pdo_registrations,
+          pdo_name,
+          %{domain: domain_name, entries: MapSet.new([entry_name])},
+          fn reg -> %{reg | entries: MapSet.put(reg.entries, entry_name)} end
+        )
+
+      updated_sm_domains =
+        Map.put_new(updated_data.sync_manager_domains, sync_index, domain_name)
+
+      final_data = %{
+        updated_data
+        | pdo_registrations: updated_registrations,
+          sync_manager_domains: updated_sm_domains
+      }
+
+      Logger.debug(
+        "Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})"
+      )
+
+      {:ok, unique_name, final_data}
+    end
+  end
+
+  # Registers all entries in a PDO (convenience wrapper)
+  defp do_register_pdo(pdo_name, domain_name, data) do
+    case data.driver.pdo_info(data.driver_state, pdo_name) do
+      {:ok, pdo_info} ->
+        # Get all entry names
+        entry_names = Map.keys(pdo_info.entries)
+
+        # Register each entry
+        {final_data, unique_names} =
+          Enum.reduce(entry_names, {data, []}, fn entry_name, {acc_data, acc_names} ->
+            case do_register_entry(pdo_name, entry_name, domain_name, acc_data) do
+              {:ok, unique_name, updated_data} ->
+                {updated_data, [unique_name | acc_names]}
+
+              {:error, reason} ->
+                throw({:registration_error, reason})
+            end
+          end)
+
+        {:ok, Enum.reverse(unique_names), final_data}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  catch
+    {:registration_error, reason} -> {:error, reason}
+  end
+
+  # Validates that an entry exists in the PDO
+  defp validate_entry_exists(pdo_info, entry_name) do
+    if Map.has_key?(pdo_info.entries, entry_name) do
+      :ok
+    else
+      available = Map.keys(pdo_info.entries) |> Enum.join(", ")
+
+      {:error,
+       {:entry_not_found, entry_name,
+        "Available entries: #{available}"}}
+    end
+  end
+
+  # Validates sync manager to domain mapping constraint
+  defp validate_sync_manager_domain(pdo_info, domain_name, data) do
+    {sync_index, _direction, _watchdog} = pdo_info.sync_manager
+
+    case Map.get(data.sync_manager_domains, sync_index) do
+      nil ->
+        # First registration from this sync manager - OK
+        :ok
+
+      ^domain_name ->
+        # Same domain - OK
+        :ok
+
+      other_domain ->
+        # Different domain - ERROR
+        {:error,
+         {:sync_manager_domain_conflict,
+          "Sync manager #{sync_index} is already assigned to domain #{inspect(other_domain)}. " <>
+            "All entries from the same sync manager must use the same domain. " <>
+            "This is an IgH EtherCAT Master constraint (see ecrt.h documentation)."}}
+    end
+  end
+
+  # Prepares slave for incremental entry/PDO registration by clearing existing configuration
+  defp clear_all_pdo_config(data) do
+    data.driver.list_pdos(data.driver_state)
     |> Enum.map(fn pdo_name ->
-      {:ok, info} = state.driver.pdo_info(state.driver_state, pdo_name)
+      {:ok, info} = data.driver.pdo_info(data.driver_state, pdo_name)
       info
     end)
     |> Enum.group_by(fn info ->
@@ -576,82 +896,76 @@ defmodule EtherCAT.Slave do
       {_sync_idx, direction, watchdog} = hd(infos).sync_manager
 
       # Configure sync manager with direction and watchdog settings
-      config_sync_manager_internal(state, sync_index, direction, watchdog)
+      config_sync_manager_internal(data, sync_index, direction, watchdog)
 
       # Clear all PDO assignments from this sync manager
-      config_pdo_assign_clear_internal(state, sync_index)
+      config_pdo_assign_clear_internal(data, sync_index)
 
       # Clear mappings for all PDOs in this sync manager
       infos
       |> Enum.map(& &1.pdo_index)
       |> Enum.uniq()
-      |> Enum.each(&config_pdo_mapping_clear_internal(state, &1))
+      |> Enum.each(&config_pdo_mapping_clear_internal(data, &1))
     end)
   end
 
-  # Builds unique names for all entries in a PDO
-  # Sorts entry names for consistent ordering
-  defp build_unique_names(pdo_name, entries, position) do
-    entries
-    |> Enum.map(fn {entry_name, _entry_config} ->
-      "slave_#{position}:#{pdo_name}:#{entry_name}"
-    end)
-    |> Enum.sort()
+  # Internal helpers that call Master (all NIF communication goes through Master)
+
+  defp get_sync_manager_internal(data, sync_index) do
+    Master.slave_operation(data.master, data.position, :get_sync_manager, [sync_index])
   end
 
-  # Registers a PDO with all its entries to a domain
-  #
-  # This incremental configuration approach:
-  # 1. Adds the PDO to the sync manager's assignment list
-  # 2. Adds each entry to the PDO's mapping
-  # 3. Registers each entry with the domain for process data exchange
-  #
-  # Called after configure/2 has cleared all PDO assignments and mappings.
-  # Follows the EtherLab pattern of building up configuration incrementally.
-  #
-  # Returns {:ok, [unique_names]} where each unique_name is "slave_X:pdo:entry"
-  defp register_single_pdo(name, domain_name, state) do
-    with {:ok, pdo_info} <- state.driver.pdo_info(state.driver_state, name),
-         {:ok, domain_pid} <- Domain.find_domain(state.master, domain_name) do
-      %{sync_manager: {sync_index, direction, _watchdog}, pdo_index: pdo_index, entries: entries} =
-        pdo_info
+  defp get_pdo_internal(data, sync_index, pdo_pos) do
+    Master.slave_operation(data.master, data.position, :get_pdo, [sync_index, pdo_pos])
+  end
 
-      # Add PDO to sync manager assignment (IgH handles duplicates gracefully)
-      config_pdo_assign_add_internal(state, sync_index, pdo_index)
+  defp get_pdo_entry_internal(data, sync_index, pdo_pos, entry_pos) do
+    Master.slave_operation(data.master, data.position, :get_pdo_entry, [
+      sync_index,
+      pdo_pos,
+      entry_pos
+    ])
+  end
 
-      pdo_direction = ethercat_direction_to_atom(direction)
+  defp config_sync_manager_internal(data, sync_index, direction, watchdog) do
+    Master.slave_operation(data.master, data.position, :config_sync_manager, [
+      data.slave_config,
+      sync_index,
+      direction,
+      watchdog
+    ])
+  end
 
-      # Register each entry: add to mapping + register to domain
-      unique_names =
-        Enum.map(entries, fn {entry_name, entry} ->
-          {entry_index, entry_subindex, entry_size} = entry
+  defp config_pdo_assign_clear_internal(data, sync_index) do
+    Master.slave_operation(data.master, data.position, :config_pdo_assign_clear, [
+      data.slave_config,
+      sync_index
+    ])
+  end
 
-          # Add entry to PDO mapping
-          config_pdo_mapping_add_internal(
-            state,
-            pdo_index,
-            entry_index,
-            entry_subindex,
-            entry_size
-          )
+  defp config_pdo_assign_add_internal(data, sync_index, pdo_index) do
+    Master.slave_operation(data.master, data.position, :config_pdo_assign_add, [
+      data.slave_config,
+      sync_index,
+      pdo_index
+    ])
+  end
 
-          # Register entry with domain for process data exchange
-          unique_name = "slave_#{state.position}:#{name}:#{entry_name}"
+  defp config_pdo_mapping_clear_internal(data, pdo_index) do
+    Master.slave_operation(data.master, data.position, :config_pdo_mapping_clear, [
+      data.slave_config,
+      pdo_index
+    ])
+  end
 
-          Domain.register_pdo_entry(
-            domain_pid,
-            state.slave_config,
-            unique_name,
-            entry,
-            pdo_direction
-          )
-
-          unique_name
-        end)
-        |> Enum.sort()
-
-      {:ok, unique_names}
-    end
+  defp config_pdo_mapping_add_internal(data, pdo_index, entry_index, entry_subindex, entry_size) do
+    Master.slave_operation(data.master, data.position, :config_pdo_mapping_add, [
+      data.slave_config,
+      pdo_index,
+      entry_index,
+      entry_subindex,
+      entry_size
+    ])
   end
 
   # Converts EtherCAT direction integer to atom for domain registration
