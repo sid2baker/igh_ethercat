@@ -76,7 +76,10 @@ defmodule EtherCAT do
         error
 
       nil ->
-        unique_names = Enum.map(results, fn {:ok, name} -> name end)
+        # Each result contains {:ok, [entry_name1, entry_name2, ...]}, so flatten the list
+        unique_names =
+          results
+          |> Enum.flat_map(fn {:ok, names} -> names end)
 
         handles =
           Enum.map(unique_names, fn unique_name ->
