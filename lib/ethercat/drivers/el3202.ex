@@ -17,7 +17,14 @@ defmodule EtherCAT.Drivers.EL3202 do
 
       with :ok <- configure_channel_1(ctx, config),
            :ok <- configure_channel_2(ctx, config) do
-        {:ok, Map.put(state, :configured, true)}
+        # Store RTD element type in state for proper decoding
+        new_state =
+          state
+          |> Map.put(:configured, true)
+          |> Map.put(:ch1_rtd_element, Map.get(config, :ch1_rtd_element, 0))
+          |> Map.put(:ch2_rtd_element, Map.get(config, :ch2_rtd_element, 0))
+
+        {:ok, new_state}
       end
     end
   end
@@ -89,23 +96,39 @@ defmodule EtherCAT.Drivers.EL3202 do
   # Encode/Decode Callbacks
   # ============================================================================
 
-  # Decode temperature value from raw int16 to degrees Celsius
-  # The EL3202 provides temperature in units of 0.1°C
+  # Decode value from raw int16 based on RTD element type
+  # - For temperature sensors (PT100, PT1000, etc.): value is in units of 0.1°C
+  # - For OHMS mode (rtd_element = 8): value is in units of 0.1Ω
   @impl true
-  def decode_value(_state, _pdo_name, :value, <<raw::little-signed-16>>) do
-    celsius = raw / 10.0
-    {:ok, celsius}
+  def decode_value(state, pdo_name, :value, <<raw::little-signed-16>>) do
+    rtd_element =
+      case pdo_name do
+        :ch1 -> Map.get(state, :ch1_rtd_element, 0)
+        :ch2 -> Map.get(state, :ch2_rtd_element, 0)
+        _ -> 0
+      end
+
+    decoded_value = raw / 10.0
+
+    # Return value with appropriate context
+    case rtd_element do
+      # OHMS mode - value is in Ohms
+      8 -> {:ok, decoded_value}
+      # Temperature mode - value is in Celsius
+      _ -> {:ok, decoded_value}
+    end
   end
 
   # All other entries use default encoding/decoding
   @impl true
   def decode_value(_state, _pdo_name, _entry_name, _data), do: :default
 
-  # Encode temperature value from degrees Celsius to raw int16
-  # The EL3202 expects temperature in units of 0.1°C
+  # Encode value to raw int16 based on RTD element type
+  # - For temperature sensors: expects value in degrees Celsius, encodes to units of 0.1°C
+  # - For OHMS mode: expects value in Ohms, encodes to units of 0.1Ω
   @impl true
-  def encode_value(_state, _pdo_name, :value, celsius) when is_number(celsius) do
-    raw = trunc(celsius * 10)
+  def encode_value(_state, _pdo_name, :value, value) when is_number(value) do
+    raw = trunc(value * 10)
     {:ok, <<raw::little-signed-16>>}
   end
 
@@ -119,7 +142,11 @@ defmodule EtherCAT.Drivers.EL3202 do
 
   defp configure_channel_1(ctx, config) do
     with :ok <- maybe_configure_rtd_element_ch1(ctx, config),
+         :ok <- maybe_configure_presentation_ch1(ctx, config),
          :ok <- maybe_configure_connection_ch1(ctx, config),
+         :ok <- maybe_configure_user_scale_ch1(ctx, config),
+         :ok <- maybe_configure_user_calibration_ch1(ctx, config),
+         :ok <- maybe_configure_vendor_calibration_ch1(ctx, config),
          :ok <- maybe_configure_wire_calibration_ch1(ctx, config),
          :ok <- maybe_configure_limit1_ch1(ctx, config),
          :ok <- maybe_configure_limit2_ch1(ctx, config),
@@ -135,7 +162,11 @@ defmodule EtherCAT.Drivers.EL3202 do
 
   defp configure_channel_2(ctx, config) do
     with :ok <- maybe_configure_rtd_element_ch2(ctx, config),
+         :ok <- maybe_configure_presentation_ch2(ctx, config),
          :ok <- maybe_configure_connection_ch2(ctx, config),
+         :ok <- maybe_configure_user_scale_ch2(ctx, config),
+         :ok <- maybe_configure_user_calibration_ch2(ctx, config),
+         :ok <- maybe_configure_vendor_calibration_ch2(ctx, config),
          :ok <- maybe_configure_wire_calibration_ch2(ctx, config),
          :ok <- maybe_configure_limit1_ch2(ctx, config),
          :ok <- maybe_configure_limit2_ch2(ctx, config),
@@ -166,11 +197,33 @@ defmodule EtherCAT.Drivers.EL3202 do
     end
   end
 
+  # Channel 1 presentation mode configuration (SDO 0x8000:0x02)
+  # Values: 0 = Signed (default), 1 = High resolution, 2 = Unsigned
+  defp maybe_configure_presentation_ch1(ctx, config) do
+    case Map.get(config, :ch1_presentation) do
+      nil ->
+        :ok
+
+      presentation when presentation in [0, 1, 2] ->
+        case write_sdo_value(ctx, 0x8000, 0x02, presentation, :uint8) do
+          :ok ->
+            Logger.debug("Ch1 Presentation configured: #{presentation}")
+            :ok
+
+          error ->
+            error
+        end
+
+      _ ->
+        {:error, :invalid_ch1_presentation}
+    end
+  end
+
   # Channel 1 connection technology configuration (SDO 0x8000:0x1a)
   # Values: 0 = 2-wire, 1 = 3-wire, 2 = 4-wire
   defp maybe_configure_connection_ch1(ctx, config) do
-    # Default to 2-wire
-    connection = Map.get(config, :ch1_connection, 0)
+    # Default to 3-wire
+    connection = Map.get(config, :ch1_connection, 1)
 
     case write_sdo_value(ctx, 0x8000, 0x1A, connection, :uint16) do
       :ok ->
@@ -180,6 +233,115 @@ defmodule EtherCAT.Drivers.EL3202 do
 
       error ->
         error
+    end
+  end
+
+  # Channel 1 user scale configuration (SDO 0x8000:0x01, 0x11, 0x12)
+  # Allows calibration offset and gain adjustment
+  defp maybe_configure_user_scale_ch1(ctx, config) do
+    enable = Map.get(config, :ch1_enable_user_scale, false)
+
+    with :ok <- write_sdo_value(ctx, 0x8000, 0x01, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch1_user_scale_offset, 0)
+        gain = Map.get(config, :ch1_user_scale_gain, 10000)
+
+        with :ok <- write_sdo_value(ctx, 0x8000, 0x11, offset, :int16),
+             :ok <- write_sdo_value(ctx, 0x8000, 0x12, gain, :int32) do
+          Logger.debug(
+            "Ch1 User scale configured: offset=#{offset / 10.0}Ω, gain=#{gain / 10000.0}"
+          )
+
+          :ok
+        end
+      else
+        :ok
+      end
+    end
+  end
+
+  # Channel 1 user calibration configuration (SDO 0x8000:0x0a, 0x8000:0x17, 0x8000:0x18)
+  # Allows user-level calibration offset and gain adjustment
+  defp maybe_configure_user_calibration_ch1(ctx, config) do
+    enable = Map.get(config, :ch1_enable_user_calibration, false)
+
+    with :ok <- write_sdo_value(ctx, 0x8000, 0x0A, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch1_user_calibration_offset)
+        gain = Map.get(config, :ch1_user_calibration_gain)
+
+        cond do
+          offset != nil and gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8000, 0x17, offset, :int16),
+                 :ok <- write_sdo_value(ctx, 0x8000, 0x18, gain, :uint16) do
+              Logger.debug(
+                "Ch1 User calibration configured: offset=#{offset / 10.0}Ω, gain=#{gain}"
+              )
+
+              :ok
+            end
+
+          offset != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8000, 0x17, offset, :int16) do
+              Logger.debug("Ch1 User calibration offset: #{offset / 10.0}Ω")
+              :ok
+            end
+
+          gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8000, 0x18, gain, :uint16) do
+              Logger.debug("Ch1 User calibration gain: #{gain}")
+              :ok
+            end
+
+          true ->
+            :ok
+        end
+      else
+        :ok
+      end
+    end
+  end
+
+  # Channel 1 vendor calibration configuration (SDO 0x8000:0x0b, 0x800f:0x01, 0x800f:0x02)
+  # Allows factory/vendor-level calibration offset and gain adjustment
+  defp maybe_configure_vendor_calibration_ch1(ctx, config) do
+    # Enabled by default
+    enable = Map.get(config, :ch1_enable_vendor_calibration, true)
+
+    with :ok <- write_sdo_value(ctx, 0x8000, 0x0B, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch1_vendor_calibration_offset)
+        gain = Map.get(config, :ch1_vendor_calibration_gain)
+
+        cond do
+          offset != nil and gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x800F, 0x01, offset, :int16),
+                 :ok <- write_sdo_value(ctx, 0x800F, 0x02, gain, :uint16) do
+              Logger.debug(
+                "Ch1 Vendor calibration configured: offset=#{offset / 10.0}Ω, gain=#{gain}"
+              )
+
+              :ok
+            end
+
+          offset != nil ->
+            with :ok <- write_sdo_value(ctx, 0x800F, 0x01, offset, :int16) do
+              Logger.debug("Ch1 Vendor calibration offset: #{offset / 10.0}Ω")
+              :ok
+            end
+
+          gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x800F, 0x02, gain, :uint16) do
+              Logger.debug("Ch1 Vendor calibration gain: #{gain}")
+              :ok
+            end
+
+          true ->
+            :ok
+        end
+      else
+        :ok
+      end
     end
   end
 
@@ -271,11 +433,33 @@ defmodule EtherCAT.Drivers.EL3202 do
     end
   end
 
+  # Channel 2 presentation mode configuration (SDO 0x8010:0x02)
+  # Values: 0 = Signed (default), 1 = High resolution, 2 = Unsigned
+  defp maybe_configure_presentation_ch2(ctx, config) do
+    case Map.get(config, :ch2_presentation) do
+      nil ->
+        :ok
+
+      presentation when presentation in [0, 1, 2] ->
+        case write_sdo_value(ctx, 0x8010, 0x02, presentation, :uint8) do
+          :ok ->
+            Logger.debug("Ch2 Presentation configured: #{presentation}")
+            :ok
+
+          error ->
+            error
+        end
+
+      _ ->
+        {:error, :invalid_ch2_presentation}
+    end
+  end
+
   # Channel 2 connection technology configuration (SDO 0x8010:0x1a)
   # Values: 0 = 2-wire, 1 = 3-wire, 2 = 4-wire
   defp maybe_configure_connection_ch2(ctx, config) do
-    # Default to 2-wire
-    connection = Map.get(config, :ch2_connection, 0)
+    # Default to 3-wire
+    connection = Map.get(config, :ch2_connection, 1)
 
     case write_sdo_value(ctx, 0x8010, 0x1A, connection, :uint16) do
       :ok ->
@@ -285,6 +469,115 @@ defmodule EtherCAT.Drivers.EL3202 do
 
       error ->
         error
+    end
+  end
+
+  # Channel 2 user scale configuration (SDO 0x8010:0x01, 0x11, 0x12)
+  # Allows calibration offset and gain adjustment
+  defp maybe_configure_user_scale_ch2(ctx, config) do
+    enable = Map.get(config, :ch2_enable_user_scale, false)
+
+    with :ok <- write_sdo_value(ctx, 0x8010, 0x01, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch2_user_scale_offset, 0)
+        gain = Map.get(config, :ch2_user_scale_gain, 10000)
+
+        with :ok <- write_sdo_value(ctx, 0x8010, 0x11, offset, :int16),
+             :ok <- write_sdo_value(ctx, 0x8010, 0x12, gain, :int32) do
+          Logger.debug(
+            "Ch2 User scale configured: offset=#{offset / 10.0}Ω, gain=#{gain / 10000.0}"
+          )
+
+          :ok
+        end
+      else
+        :ok
+      end
+    end
+  end
+
+  # Channel 2 user calibration configuration (SDO 0x8010:0x0a, 0x8010:0x17, 0x8010:0x18)
+  # Allows user-level calibration offset and gain adjustment
+  defp maybe_configure_user_calibration_ch2(ctx, config) do
+    enable = Map.get(config, :ch2_enable_user_calibration, false)
+
+    with :ok <- write_sdo_value(ctx, 0x8010, 0x0A, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch2_user_calibration_offset)
+        gain = Map.get(config, :ch2_user_calibration_gain)
+
+        cond do
+          offset != nil and gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8010, 0x17, offset, :int16),
+                 :ok <- write_sdo_value(ctx, 0x8010, 0x18, gain, :uint16) do
+              Logger.debug(
+                "Ch2 User calibration configured: offset=#{offset / 10.0}Ω, gain=#{gain}"
+              )
+
+              :ok
+            end
+
+          offset != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8010, 0x17, offset, :int16) do
+              Logger.debug("Ch2 User calibration offset: #{offset / 10.0}Ω")
+              :ok
+            end
+
+          gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x8010, 0x18, gain, :uint16) do
+              Logger.debug("Ch2 User calibration gain: #{gain}")
+              :ok
+            end
+
+          true ->
+            :ok
+        end
+      else
+        :ok
+      end
+    end
+  end
+
+  # Channel 2 vendor calibration configuration (SDO 0x8010:0x0b, 0x801f:0x01, 0x801f:0x02)
+  # Allows factory/vendor-level calibration offset and gain adjustment
+  defp maybe_configure_vendor_calibration_ch2(ctx, config) do
+    # Enabled by default
+    enable = Map.get(config, :ch2_enable_vendor_calibration, true)
+
+    with :ok <- write_sdo_value(ctx, 0x8010, 0x0B, enable, :bool) do
+      if enable do
+        offset = Map.get(config, :ch2_vendor_calibration_offset)
+        gain = Map.get(config, :ch2_vendor_calibration_gain)
+
+        cond do
+          offset != nil and gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x801F, 0x01, offset, :int16),
+                 :ok <- write_sdo_value(ctx, 0x801F, 0x02, gain, :uint16) do
+              Logger.debug(
+                "Ch2 Vendor calibration configured: offset=#{offset / 10.0}Ω, gain=#{gain}"
+              )
+
+              :ok
+            end
+
+          offset != nil ->
+            with :ok <- write_sdo_value(ctx, 0x801F, 0x01, offset, :int16) do
+              Logger.debug("Ch2 Vendor calibration offset: #{offset / 10.0}Ω")
+              :ok
+            end
+
+          gain != nil ->
+            with :ok <- write_sdo_value(ctx, 0x801F, 0x02, gain, :uint16) do
+              Logger.debug("Ch2 Vendor calibration gain: #{gain}")
+              :ok
+            end
+
+          true ->
+            :ok
+        end
+      else
+        :ok
+      end
     end
   end
 

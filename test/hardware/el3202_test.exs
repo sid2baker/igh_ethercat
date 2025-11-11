@@ -35,9 +35,34 @@ defmodule Hardware.EL3202Test do
     el3202 = Enum.at(slaves, 3)
     assert el3202 != nil, "EL3202 not found at position 3"
 
-    # Configure with empty config to use defaults (no SDO configuration)
-    Logger.info("Configuring EL3202 with default settings...")
-    {:ok, available_pdos} = EtherCAT.configure_slave(el3202, %{})
+    # Configure for OHMS measurement mode with user scale
+    # Formula: Yscaled = (Ycalibrated * AW * 2^-16) + BW
+    # Default gain is 32768 (1.0x), so: gain = 32768 * desired_factor
+    # Measured: Ch1=95.5Ω, Ch2=79.4Ω. Actual: Ch1=120Ω, Ch2=100Ω
+    Logger.info("Configuring EL3202 for OHMS measurement...")
+
+    config = %{
+      # OHMS mode
+      ch1_rtd_element: 8,
+      # 2-wire
+      ch1_connection: 0,
+      ch1_enable_user_scale: true,
+      # No offset
+      ch1_user_scale_offset: 0,
+      # 32768 * 1.257 (120/95.5)
+      ch1_user_scale_gain: 41190,
+      # OHMS mode
+      ch2_rtd_element: 8,
+      # 2-wire
+      ch2_connection: 0,
+      ch2_enable_user_scale: true,
+      # No offset
+      ch2_user_scale_offset: 0,
+      # 32768 * 1.259 (100/79.4)
+      ch2_user_scale_gain: 41264
+    }
+
+    {:ok, available_pdos} = EtherCAT.configure_slave(el3202, config)
     Logger.info("Available PDOs: #{inspect(available_pdos)}")
 
     # Register both channels
@@ -60,12 +85,26 @@ defmodule Hardware.EL3202Test do
     ch1_overrange = read_pdo_entry(pdo_handles, :ch1, :overrange)
 
     if ch1_value do
-      # Driver now returns temperature in Celsius (auto-scaled from raw int16)
-      temp_c = ch1_value
-      Logger.info("  Value: #{temp_c}°C")
+      # Driver returns resistance in Ohms when configured for OHMS mode
+      Logger.info("  PDO Value: #{ch1_value}Ω")
       Logger.info("  Error: #{ch1_error}")
       Logger.info("  Underrange: #{ch1_underrange}")
       Logger.info("  Overrange: #{ch1_overrange}")
+
+      # Also check the internal resistor value (SDO 0x800e:0x02)
+      # This is the actual measured resistance after wire compensation
+      case System.cmd("ethercat", ["upload", "-p", "3", "0x800e", "0x02", "--type", "uint16"]) do
+        {output, 0} ->
+          if String.contains?(output, "0x") do
+            [_, hex_val | _] = String.split(output)
+            {int_val, _} = Integer.parse(String.trim(hex_val), 16)
+            internal_ohms = int_val / 10.0
+            Logger.info("  Internal Resistor: #{internal_ohms}Ω (from SDO 0x800e:0x02)")
+          end
+
+        _ ->
+          :ok
+      end
     end
 
     # Read channel 2 temperature
@@ -76,12 +115,26 @@ defmodule Hardware.EL3202Test do
     ch2_overrange = read_pdo_entry(pdo_handles, :ch2, :overrange)
 
     if ch2_value do
-      # Driver now returns temperature in Celsius (auto-scaled from raw int16)
-      temp_c = ch2_value
-      Logger.info("  Value: #{temp_c}°C")
+      # Driver returns resistance in Ohms when configured for OHMS mode
+      Logger.info("  PDO Value: #{ch2_value}Ω")
       Logger.info("  Error: #{ch2_error}")
       Logger.info("  Underrange: #{ch2_underrange}")
       Logger.info("  Overrange: #{ch2_overrange}")
+
+      # Also check the internal resistor value (SDO 0x801e:0x02)
+      # This is the actual measured resistance after wire compensation
+      case System.cmd("ethercat", ["upload", "-p", "3", "0x801e", "0x02", "--type", "uint16"]) do
+        {output, 0} ->
+          if String.contains?(output, "0x") do
+            [_, hex_val | _] = String.split(output)
+            {int_val, _} = Integer.parse(String.trim(hex_val), 16)
+            internal_ohms = int_val / 10.0
+            Logger.info("  Internal Resistor: #{internal_ohms}Ω (from SDO 0x801e:0x02)")
+          end
+
+        _ ->
+          :ok
+      end
     end
 
     # Cleanup
