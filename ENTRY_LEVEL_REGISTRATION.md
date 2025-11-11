@@ -123,21 +123,22 @@ receive do
 end
 ```
 
-### Example 3: Different Domains per Sync Manager
+### Example 3: Multi-Rate Control with Different Domains
 
 ```elixir
 # Device with outputs (SM2) and inputs (SM3)
-# Can register them to different domains!
+# Different sync managers can use different domains (and even entries
+# from the SAME sync manager can use different domains!)
 
 {:ok, master, [slave]} = EtherCAT.open(index: 0)
 {:ok, _} = EtherCAT.create_domain(master, :fast_outputs, 1)
 {:ok, _} = EtherCAT.create_domain(master, :slow_inputs, 10)
 {:ok, _pdos} = EtherCAT.configure_slave(slave, %{})
 
-# Outputs to fast domain (1x base rate)
+# Outputs (SM2) to fast domain (1x base rate)
 {:ok, cmd} = EtherCAT.register_entry(master, slave, :output1, :command, :fast_outputs)
 
-# Inputs to slow domain (10x base rate)
+# Inputs (SM3) to slow domain (10x base rate)
 {:ok, status} = EtherCAT.register_entry(master, slave, :input1, :status, :slow_inputs)
 
 EtherCAT.start_cyclic(master)
@@ -187,34 +188,42 @@ receive do
 end
 ```
 
-### Example 5: Invalid - Sync Manager Conflict
+### Example 5: Multi-Rate Control with Same Sync Manager
 
 ```elixir
-# ❌ ERROR: Both :ch1 and :ch2 are in SM3, must use same domain
+# ✅ VALID: Entries from the same sync manager can go to different domains!
+# Each domain creates its own FMMU for independent access.
 
-{:ok, _} = EtherCAT.register_entry(master, slave, :ch1, :value, :fast)
-{:error, {:sync_manager_domain_conflict, msg}} =
-  EtherCAT.register_entry(master, slave, :ch2, :value, :slow)
+# Fast control loop (1ms) - critical position data
+{:ok, pos} = EtherCAT.register_entry(master, slave, :ch1, :value, :fast)
 
-# Error message:
-# "Sync manager 3 is already assigned to domain :fast.
-#  All entries from the same sync manager must use the same domain.
-#  This is an IgH EtherCAT Master constraint (see ecrt.h documentation)."
+# Slow monitoring (10ms) - diagnostic data from same sync manager
+{:ok, diag} = EtherCAT.register_entry(master, slave, :ch2, :value, :slow)
+
+# Both :ch1 and :ch2 are in SM3, but can use different domains.
+# The IgH Master creates one FMMU per domain for this sync manager.
 ```
 
-## Sync Manager Domain Constraint
+## Multi-Domain Registration and FMMUs
 
-**Important:** All entries from the same sync manager must be registered to the same domain.
+**Key Insight:** Entries from the same sync manager CAN be registered to different domains!
 
-### Why This Constraint Exists
+### How It Works
 
-When you register any entry from a sync manager to a domain, the IgH EtherCAT Master:
+When you register entries from a sync manager to different domains, the IgH EtherCAT Master:
 
-1. Configures an FMMU (Fieldbus Memory Management Unit) to map the **entire sync manager's memory** to that domain
-2. The sync manager provides synchronized access to that memory region
-3. Splitting a sync manager across domains would require splitting its synchronized memory access → architectural impossibility
+1. Creates one **FMMU (Fieldbus Memory Management Unit)** per domain
+2. Each FMMU independently maps the **same sync manager memory** to its domain's process data image
+3. This enables multi-rate control: critical data updates fast, diagnostic data updates slowly
 
-Reference: IgH EtherCAT Master `ecrt.h` documentation states "respective sync manager's assigned PDOs are appended to the given domain, **if not already done**"
+**Reference:** IgH EtherCAT Master documentation states "each domain occupies one FMMU in each slave involved"
+
+### FMMU Limit
+
+The only constraint is the **number of available FMMUs** per slave:
+- Typical slaves have 8-16 FMMUs
+- One FMMU is consumed per (domain × slave) combination
+- Example: 3 domains × 1 slave = 3 FMMUs used
 
 ### How to Know Which Entries Share a Sync Manager?
 
@@ -227,7 +236,7 @@ Reference: IgH EtherCAT Master `ecrt.h` documentation states "respective sync ma
 # Example EL3202:
 # :ch1 → SM3 (inputs)
 # :ch2 → SM3 (inputs)
-# Both must use same domain!
+# Both CAN use different domains - each gets its own FMMU!
 ```
 
 ### Valid Domain Assignments
@@ -236,7 +245,7 @@ Reference: IgH EtherCAT Master `ecrt.h` documentation states "respective sync ma
 |----------|--------|--------|
 | `:ch1:value` → `:fast`, `:ch1:error` → `:fast` | ✅ Yes | Same PDO, same SM, same domain |
 | `:ch1:value` → `:fast`, `:ch2:value` → `:fast` | ✅ Yes | Different PDOs, same SM3, same domain |
-| `:ch1:value` → `:fast`, `:ch2:value` → `:slow` | ❌ No | Different PDOs, same SM3, **different domains** |
+| `:ch1:value` → `:fast`, `:ch2:value` → `:slow` | ✅ **YES!** | Different PDOs, same SM3, **different domains** (uses 2 FMMUs) |
 | `:output1` (SM2) → `:fast`, `:input1` (SM3) → `:slow` | ✅ Yes | **Different SMs**, can use different domains |
 
 ## API Reference
@@ -259,8 +268,8 @@ Registers a single PDO entry.
 **Errors:**
 - `{:invalid_state, :unconfigured, msg}` - Must call `configure/2` first
 - `{:entry_not_found, entry_name, msg}` - Entry doesn't exist in PDO
-- `{:sync_manager_domain_conflict, msg}` - SM already assigned to different domain
 - `{:slave_operational, msg}` - Cannot register after master activation
+- `{:error, :domain_not_found}` - Specified domain doesn't exist
 
 ### `EtherCAT.register_entries/4`
 

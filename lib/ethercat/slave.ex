@@ -37,18 +37,23 @@ defmodule EtherCAT.Slave do
       # Register all 6 entries from channel 1
       {:ok, handles} = Slave.register_pdo(slave, :ch1)
 
-  ## Sync Manager Domain Constraint
+  ## Multi-Domain Registration
 
-  **Important:** All entries from the same sync manager must be registered to the same domain.
+  Entries from the same sync manager CAN be registered to different domains.
+  Each domain creates its own FMMU (Fieldbus Memory Management Unit) mapping of the
+  sync manager's memory.
 
-  This is an IgH EtherCAT Master constraint: when any entry from a sync manager is registered
-  to a domain, the entire sync manager's process data is mapped to that domain via FMMU.
+  This enables multi-rate control systems where different entries update at different rates:
 
-  Different sync managers CAN use different domains (e.g., SM2 outputs → fast_domain,
-  SM3 inputs → slow_domain).
+      # Fast control loop (1ms): Register critical entries
+      {:ok, position} = Slave.register_entry(slave, :status, :position, :fast_domain)
 
-  Reference: ecrt.h documentation - "respective sync manager's assigned PDOs are appended
-  to the given domain, if not already done"
+      # Slow monitoring (10ms): Register diagnostic entries
+      {:ok, temp} = Slave.register_entry(slave, :status, :temperature, :slow_domain)
+
+  The only hardware limit is the number of available FMMUs per slave (typically 8-16).
+
+  Reference: IgH EtherCAT Master documentation - "each domain occupies one FMMU in each slave involved"
   """
 
   @behaviour :gen_statem
@@ -72,8 +77,6 @@ defmodule EtherCAT.Slave do
     :name,
     # Tracks registered entries per PDO: %{pdo_name => %{domain: atom(), entries: MapSet}}
     pdo_registrations: %{},
-    # Tracks sync manager to domain mapping: %{sync_index => domain_name}
-    sync_manager_domains: %{},
     # Tracks which sync managers have been configured (one-time setup)
     configured_sync_managers: MapSet.new()
   ]
@@ -92,7 +95,6 @@ defmodule EtherCAT.Slave do
           sync_count: non_neg_integer(),
           name: atom() | String.t() | nil,
           pdo_registrations: %{pdo_name() => %{domain: domain(), entries: MapSet.t(atom())}},
-          sync_manager_domains: %{non_neg_integer() => domain()},
           configured_sync_managers: MapSet.t(non_neg_integer())
         }
 
@@ -266,8 +268,9 @@ defmodule EtherCAT.Slave do
   - `{:ok, unique_name}` - Unique entry identifier like "slave_0:ch1:value"
   - `{:error, reason}` - Error if registration fails
 
-  ## Sync Manager Constraint
-  All entries from the same sync manager must use the same domain.
+  ## Multi-Domain Support
+  Entries from the same sync manager can be registered to different domains.
+  Each domain uses a separate FMMU to access the same sync manager memory.
 
   ## Example
 
@@ -346,8 +349,8 @@ defmodule EtherCAT.Slave do
   **IMPORTANT:**
   - You must call `Slave.configure/2` before calling this function.
   - This registers all entries defined in the PDO by the driver.
-  - Different PDOs from different sync managers can go to different domains.
-  - All PDOs from the same sync manager must use the same domain.
+  - Entries/PDOs can be registered to different domains regardless of sync manager.
+  - Each domain creates its own FMMU mapping.
 
   ## Parameters
   - `slave` - The slave process PID
@@ -735,7 +738,6 @@ defmodule EtherCAT.Slave do
   defp do_register_entry(pdo_name, entry_name, domain_name, data) do
     with {:ok, pdo_info} <- data.driver.pdo_info(data.driver_state, pdo_name),
          :ok <- validate_entry_exists(pdo_info, entry_name),
-         :ok <- validate_sync_manager_domain(pdo_info, domain_name, data),
          {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
       {sync_index, direction, watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
@@ -799,13 +801,9 @@ defmodule EtherCAT.Slave do
           fn reg -> %{reg | entries: MapSet.put(reg.entries, entry_name)} end
         )
 
-      updated_sm_domains =
-        Map.put_new(updated_data.sync_manager_domains, sync_index, domain_name)
-
       final_data = %{
         updated_data
-        | pdo_registrations: updated_registrations,
-          sync_manager_domains: updated_sm_domains
+        | pdo_registrations: updated_registrations
       }
 
       Logger.debug(
@@ -854,29 +852,6 @@ defmodule EtherCAT.Slave do
       {:error,
        {:entry_not_found, entry_name,
         "Available entries: #{available}"}}
-    end
-  end
-
-  # Validates sync manager to domain mapping constraint
-  defp validate_sync_manager_domain(pdo_info, domain_name, data) do
-    {sync_index, _direction, _watchdog} = pdo_info.sync_manager
-
-    case Map.get(data.sync_manager_domains, sync_index) do
-      nil ->
-        # First registration from this sync manager - OK
-        :ok
-
-      ^domain_name ->
-        # Same domain - OK
-        :ok
-
-      other_domain ->
-        # Different domain - ERROR
-        {:error,
-         {:sync_manager_domain_conflict,
-          "Sync manager #{sync_index} is already assigned to domain #{inspect(other_domain)}. " <>
-            "All entries from the same sync manager must use the same domain. " <>
-            "This is an IgH EtherCAT Master constraint (see ecrt.h documentation)."}}
     end
   end
 
