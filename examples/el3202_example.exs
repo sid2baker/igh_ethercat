@@ -62,32 +62,17 @@ defmodule EL3202Example do
     :ok = Slave.configure(slave_pid)
 
     # Register PDOs for cyclic data exchange
+    # Each PDO (:ch1, :ch2) contains all 6 entries for that channel:
+    # - underrange, overrange, limit1, limit2, error, value
     pdos_to_register = [
-      # Temperature value channel 1
-      :ch1_value,
-      # Error flag channel 1
-      :ch1_error,
-      # Underrange flag
-      :ch1_underrange,
-      # Overrange flag
-      :ch1_overrange,
-      # Limit 1 status
-      :ch1_limit1,
-      # Limit 2 status
-      :ch1_limit2,
-      # Temperature value channel 2
-      :ch2_value,
-      # Error flag channel 2
-      :ch2_error,
-      :ch2_underrange,
-      :ch2_overrange,
-      :ch2_limit1,
-      :ch2_limit2
+      :ch1,  # Channel 1 complete PDO (all 6 entries)
+      :ch2   # Channel 2 complete PDO (all 6 entries)
     ]
 
     # Register each PDO to the default domain
+    # This will register all entries in each PDO atomically
     for pdo <- pdos_to_register do
-      {:ok, _} = Slave.register_pdo(slave_pid, pdo)
+      {:ok, _entry_names} = Slave.register_pdo(slave_pid, pdo)
     end
 
     # Create domain for cyclic communication
