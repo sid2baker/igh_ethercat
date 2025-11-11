@@ -644,7 +644,8 @@ defmodule EtherCAT.Nif do
       };
   }
 
-  /// Get a value from domain data by name
+  /// Get a value from domain data by name, returns raw binary for driver decoding
+  /// When called via Domain.get_pdo_value, the Slave will decode using the driver
   pub fn get_value(domain_accessor: DomainAccessorResource, name: []const u8) !beam.term {
       const accessor = domain_accessor.unpack();
       const entry = accessor.layout.findEntry(name) orelse
@@ -655,26 +656,20 @@ defmodule EtherCAT.Nif do
       const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
       const data_slice = data[0..domain_size];
 
-      return switch (entry.entry_type) {
-          .bool => {
-              const byte_index = entry.bit_offset / 8;
-              const bit_index = @as(u3, @intCast(entry.bit_offset % 8));
-              const value = (data_slice[byte_index] >> bit_index) & 1 != 0;
-              return beam.make(value, .{});
-          },
-          .uint8 => beam.make(extractBits(u8, data_slice, entry.bit_offset, entry.bit_length), .{}),
-          .int8 => beam.make(@as(i8, @bitCast(extractBits(u8, data_slice, entry.bit_offset, entry.bit_length))), .{}),
-          .uint16 => beam.make(extractBits(u16, data_slice, entry.bit_offset, entry.bit_length), .{}),
-          .int16 => beam.make(@as(i16, @bitCast(extractBits(u16, data_slice, entry.bit_offset, entry.bit_length))), .{}),
-          .uint32 => beam.make(extractBits(u32, data_slice, entry.bit_offset, entry.bit_length), .{}),
-          .int32 => beam.make(@as(i32, @bitCast(extractBits(u32, data_slice, entry.bit_offset, entry.bit_length))), .{}),
-          .uint64 => beam.make(extractBits(u64, data_slice, entry.bit_offset, entry.bit_length), .{}),
-          .int64 => beam.make(@as(i64, @bitCast(extractBits(u64, data_slice, entry.bit_offset, entry.bit_length))), .{}),
-      };
+      // Calculate required bytes for the entry
+      const required_bytes = (entry.bit_length + 7) / 8;
+
+      // Extract bits from domain data into temporary buffer
+      var buffer: [8]u8 = [_]u8{0} ** 8;
+      extractBitsToBuffer(buffer[0..required_bytes], data_slice, entry.bit_offset, entry.bit_length);
+
+      // Return as Elixir binary for driver to decode
+      return beam.make_slice(buffer[0..required_bytes], .{});
   }
 
-  /// Set a value - directly updates the entry's expected value
+  /// Set a value - directly updates the entry's expected value from binary data
   /// The cyclic task will write this value to the domain buffer every cycle
+  /// Encoding is handled by driver on Elixir side, this just stores the raw binary
   pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, value: beam.term) !void {
       const accessor = domain_accessor.unpack();
       const entry = accessor.layout.findEntry(name) orelse
@@ -685,47 +680,18 @@ defmodule EtherCAT.Nif do
 
       if (entry.bit_offset >= max_bit_offset) return DomainError.OutOfBounds;
 
-      var value_data: [8]u8 = [_]u8{0} ** 8;
+      // Extract binary data from BEAM term
+      const binary = try beam.get([]u8, value, .{});
 
-      // Convert the value based on type
-      switch (entry.entry_type) {
-          .bool => {
-              const val = try beam.get(bool, value, .{});
-              value_data[0] = if (val) 1 else 0;
-          },
-          .uint8 => {
-              const val = try beam.get(u8, value, .{});
-              value_data[0] = val;
-          },
-          .int8 => {
-              const val = try beam.get(i8, value, .{});
-              value_data[0] = @bitCast(val);
-          },
-          .uint16 => {
-              const val = try beam.get(u16, value, .{});
-              @memcpy(value_data[0..2], std.mem.asBytes(&val));
-          },
-          .int16 => {
-              const val = try beam.get(i16, value, .{});
-              @memcpy(value_data[0..2], std.mem.asBytes(&val));
-          },
-          .uint32 => {
-              const val = try beam.get(u32, value, .{});
-              @memcpy(value_data[0..4], std.mem.asBytes(&val));
-          },
-          .int32 => {
-              const val = try beam.get(i32, value, .{});
-              @memcpy(value_data[0..4], std.mem.asBytes(&val));
-          },
-          .uint64 => {
-              const val = try beam.get(u64, value, .{});
-              @memcpy(value_data[0..8], std.mem.asBytes(&val));
-          },
-          .int64 => {
-              const val = try beam.get(i64, value, .{});
-              @memcpy(value_data[0..8], std.mem.asBytes(&val));
-          },
+      // Calculate required bytes based on entry bit length
+      const required_bytes = (entry.bit_length + 7) / 8;
+      if (binary.len != required_bytes) {
+          return error.InvalidBinarySize;
       }
+
+      // Copy binary data to entry's current_value buffer
+      var value_data: [8]u8 = [_]u8{0} ** 8;
+      @memcpy(value_data[0..binary.len], binary);
 
       // Update the expected value in the entry (thread-safe)
       accessor.mutex.lock();
