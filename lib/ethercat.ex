@@ -147,7 +147,20 @@ defmodule EtherCAT do
   @spec register_entries(pid(), list(), Slave.domain()) ::
           {:ok, [PDOEntry.t()]} | {:error, term()}
   def register_entries(slave, entries, default_domain \\ :default_domain) do
-    Slave.register_entries(slave, entries, default_domain)
+    results =
+      Enum.map(entries, fn
+        {pdo_name, entry_name} ->
+          Slave.register_entry(slave, pdo_name, entry_name, default_domain)
+
+        {pdo_name, entry_name, domain} ->
+          Slave.register_entry(slave, pdo_name, entry_name, domain)
+      end)
+
+    # Check if any failed
+    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
+      {:error, _} = error -> error
+      nil -> {:ok, Enum.map(results, fn {:ok, entry} -> entry end)}
+    end
   end
 
   @doc """
@@ -177,10 +190,19 @@ defmodule EtherCAT do
   @spec register_pdos(pid(), [Slave.pdo_name()], Slave.domain()) ::
           {:ok, [PDOEntry.t()]} | {:error, term()}
   def register_pdos(slave, pdo_names, domain \\ :default_domain) do
-    # Register each PDO individually using the PDO-level API
+    # For each PDO, get its entries and register them all
     results =
-      Enum.map(pdo_names, fn pdo_name ->
-        Slave.register_pdo(slave, pdo_name, domain)
+      Enum.flat_map(pdo_names, fn pdo_name ->
+        case Slave.get_pdo_entries(slave, pdo_name) do
+          {:ok, entry_names} ->
+            # Register each entry in this PDO
+            Enum.map(entry_names, fn entry_name ->
+              Slave.register_entry(slave, pdo_name, entry_name, domain)
+            end)
+
+          {:error, reason} ->
+            [{:error, reason}]
+        end
       end)
 
     # Check if any failed
@@ -189,8 +211,8 @@ defmodule EtherCAT do
         error
 
       nil ->
-        # Each result contains {:ok, [pdo_entry_structs]}, so flatten
-        handles = Enum.flat_map(results, fn {:ok, pdo_entries} -> pdo_entries end)
+        # Extract all PDOEntry structs
+        handles = Enum.map(results, fn {:ok, entry} -> entry end)
         {:ok, handles}
     end
   end
