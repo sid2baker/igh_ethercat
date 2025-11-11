@@ -643,7 +643,7 @@ defmodule EtherCAT.Nif do
       var buffer: [8]u8 = [_]u8{0} ** 8;
       extractBitsToBuffer(buffer[0..required_bytes], data_slice, entry.bit_offset, entry.bit_length);
 
-      // Return as Elixir binary for driver to decode
+      // Return as Elixir binary for driver to decode (only the required bytes)
       const bin = try beam.allocator.alloc(u8, required_bytes);
       @memcpy(bin, buffer[0..required_bytes]);
       return beam.make(bin, .{});

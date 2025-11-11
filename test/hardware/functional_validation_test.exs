@@ -150,7 +150,7 @@ defmodule Hardware.FunctionalValidationTest do
     input_pdo = context.input_pdo
     output_pdo = context.output_pdo
 
-    Logger.info("Testing PDO pair: #{output_pdo.unique_name} -> #{input_pdo.unique_name}")
+    Logger.info("Testing PDO pair: #{inspect(output_pdo)} -> #{inspect(input_pdo)}")
 
     # Test sequence: false -> true -> false
     Logger.info("Step 1: Setting output to FALSE")
@@ -173,7 +173,7 @@ defmodule Hardware.FunctionalValidationTest do
     input_pdo = context.input_pdo
     output_pdo = context.output_pdo
 
-    Logger.info("Testing PDO pair: #{output_pdo.unique_name} -> #{input_pdo.unique_name}")
+    Logger.info("Testing PDO pair: #{inspect(output_pdo)} -> #{inspect(input_pdo)}")
 
     # Test various bit patterns through the single loopback channel
     test_patterns = [
@@ -250,22 +250,27 @@ defmodule Hardware.FunctionalValidationTest do
     # Test sequence with notification verification
     test_values = [true, false, true, false, true]
 
+    # Construct unique_name for notifications: "s{position}:{pdo_name}:{entry_name}"
+    # Input is slave 1, so "s1:0x1A00:0x6000:1"
+    unique_name = "s1:#{input_pdo.pdo_name}:#{input_pdo.entry_name}"
+
     for {value, idx} <- Enum.with_index(test_values) do
       Logger.info("Step #{idx + 1}: Setting output to #{value}")
 
       # Set output using PDO handle
       assert :ok = EtherCAT.write(output_pdo, value)
 
-      # Wait for notification (notifications use the unique_name from the PDO struct)
-      unique_name = input_pdo.unique_name
+      # Notifications send binary data, so convert expected value to binary for matching
+      expected_binary = if value, do: <<1>>, else: <<0>>
 
+      # Wait for notification
       receive do
-        {:data_changed, ^unique_name, ^value} ->
+        {:data_changed, ^unique_name, ^expected_binary} ->
           Logger.debug("✓ Notification received: #{unique_name} = #{value}")
 
         {:data_changed, pdo, other_value} ->
           flunk(
-            "Unexpected notification: #{inspect(pdo)} = #{other_value}, expected #{unique_name} = #{value}"
+            "Unexpected notification: #{inspect(pdo)} = #{inspect(other_value)}, expected #{unique_name} = #{inspect(expected_binary)}"
           )
 
         other ->
