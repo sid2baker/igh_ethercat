@@ -42,7 +42,6 @@ defmodule EtherCAT.Nif do
       master_get_pdo: [],
       master_get_pdo_entry: [],
       # maybe use dirty_cup/dirty_io
-      listen_bus_changes: [:threaded],
       cyclic_task: [:threaded]
     ],
     resources: [
@@ -856,29 +855,6 @@ defmodule EtherCAT.Nif do
   // ============================================================================
   // THREADED OPERATIONS
   // ============================================================================
-
-  /// Listen for bus state changes and notify the Elixir process
-  /// This runs in a separate thread and sends messages when the master state changes
-  pub fn listen_bus_changes(pid: beam.pid, master_resource: MasterResource, interval: u64) !void {
-      defer {
-          beam.send(pid, .killed, .{}) catch {};
-      }
-
-      const master = master_resource.unpack();
-      var state: master_state_t = try do_get_master_state(master);
-      var last_state: master_state_t = undefined;
-
-      while (true) {
-          if (!std.meta.eql(last_state, state)) {
-              _ = try beam.send(pid, .{ .master_state_changed, state }, .{});
-          }
-          last_state = state;
-          state = try do_get_master_state(master);
-
-          std.Thread.sleep(interval * std.time.ns_per_ms);
-          try beam.yield();
-      }
-  }
 
   /// Main cyclic task for EtherCAT communication
   ///
