@@ -130,6 +130,19 @@ defmodule EtherCAT.Slave.Driver do
               {:ok, pdo_info()} | {:error, term()}
 
   @doc """
+  Indicates whether this device supports dynamic PDO configuration.
+
+  Returns true if the device supports changing PDO mappings (Enable PDO Configuration),
+  or false if it has fixed PDO mappings. Devices with fixed mappings (like EL3202) cannot
+  have their PDO assignments or mappings modified.
+
+  Default: true (supports dynamic PDO configuration)
+  """
+  @callback supports_pdo_config?(state :: state()) :: boolean()
+
+  @optional_callbacks supports_pdo_config?: 1
+
+  @doc """
   Clean up driver resources when the slave process terminates.
 
   This callback is called during slave process termination and should
@@ -142,6 +155,16 @@ defmodule EtherCAT.Slave.Driver do
       @behaviour EtherCAT.Slave.Driver
 
       require Logger
+
+      # ========================================================================
+      # Default Implementations
+      # ========================================================================
+
+      # Default: Most devices support dynamic PDO configuration
+      # Override this in your driver if the device has fixed PDO mappings
+      def supports_pdo_config?(_state), do: true
+
+      defoverridable supports_pdo_config?: 1
 
       # ========================================================================
       # SDO Configuration Helpers

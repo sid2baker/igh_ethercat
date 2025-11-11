@@ -753,9 +753,20 @@ defmodule EtherCAT.Slave do
          {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
       {sync_index, direction, _watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
-      {entry_index, entry_subindex, entry_bit_length} = pdo_info.entries[entry_name]
 
-      # Assign PDO to sync manager if not already assigned
+      # Handle both 3-tuple and 4-tuple (with explicit type) formats
+      entry = pdo_info.entries[entry_name]
+
+      {entry_index, entry_subindex, entry_bit_length} =
+        case entry do
+          {_type, index, subindex, bit_length} -> {index, subindex, bit_length}
+          {index, subindex, bit_length} -> {index, subindex, bit_length}
+        end
+
+      # Check if device supports PDO configuration
+      supports_pdo_config = data.driver.supports_pdo_config?(data.driver_state)
+
+      # Assign PDO to sync manager if not already assigned (always needed)
       updated_data =
         if MapSet.member?(data.assigned_pdos, pdo_index) do
           data
@@ -764,14 +775,24 @@ defmodule EtherCAT.Slave do
           %{data | assigned_pdos: MapSet.put(data.assigned_pdos, pdo_index)}
         end
 
-      # Add entry to PDO mapping
-      config_pdo_mapping_add_internal(
-        updated_data,
-        pdo_index,
-        entry_index,
-        entry_subindex,
-        entry_bit_length
-      )
+      # Only configure PDO entry mappings for devices that support it
+      updated_data =
+        if supports_pdo_config do
+          # Add entry to PDO mapping (dynamic configuration)
+          config_pdo_mapping_add_internal(
+            updated_data,
+            pdo_index,
+            entry_index,
+            entry_subindex,
+            entry_bit_length
+          )
+
+          updated_data
+        else
+          # For fixed PDO mappings, skip entry mapping configuration
+          # The device will use its default PDO mapping
+          updated_data
+        end
 
       # Generate unique name and register with domain
       slave_identifier =
@@ -784,11 +805,12 @@ defmodule EtherCAT.Slave do
       unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
       pdo_direction = ethercat_direction_to_atom(direction)
 
+      # Pass the entry tuple (with type if present) to domain
       Domain.register_pdo_entry(
         domain_pid,
         updated_data.slave_config,
         unique_name,
-        {entry_index, entry_subindex, entry_bit_length},
+        entry,
         pdo_direction
       )
 

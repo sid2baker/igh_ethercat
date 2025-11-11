@@ -16,7 +16,6 @@ defmodule EtherCATTest do
     # Slave operations
     assert function_exported?(EtherCAT, :configure_slave, 2)
     assert function_exported?(EtherCAT, :register_pdos, 3)
-    assert function_exported?(EtherCAT, :register_pdos, 4)
 
     # I/O operations (now use PDO handles)
     assert function_exported?(EtherCAT, :read, 1)

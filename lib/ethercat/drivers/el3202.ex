@@ -8,13 +8,22 @@ defmodule EtherCAT.Drivers.EL3202 do
 
   @impl true
   def configure(ctx, state, config) do
-    Logger.info("Configuring EL3202 RTD input terminal")
-
-    with :ok <- configure_channel_1(ctx, config),
-         :ok <- configure_channel_2(ctx, config) do
+    # Skip all SDO configuration if config is empty
+    if map_size(config) == 0 do
+      Logger.info("EL3202: Using default configuration (no SDO writes)")
       {:ok, Map.put(state, :configured, true)}
+    else
+      Logger.info("Configuring EL3202 RTD input terminal")
+
+      with :ok <- configure_channel_1(ctx, config),
+           :ok <- configure_channel_2(ctx, config) do
+        {:ok, Map.put(state, :configured, true)}
+      end
     end
   end
+
+  @impl true
+  def supports_pdo_config?(_state), do: false
 
   @impl true
   def list_pdos(_state) do
@@ -29,7 +38,7 @@ defmodule EtherCAT.Drivers.EL3202 do
   @impl true
   def pdo_info(_state, pdo_name) do
     case pdo_name do
-      # Channel 1 - TxPDO 0x1A00 (SM3, all 6 entries)
+      # Channel 1 - TxPDO 0x1A00 (SM3, all entries including padding)
       :ch1 ->
         {:ok,
          %{
@@ -41,11 +50,13 @@ defmodule EtherCAT.Drivers.EL3202 do
              limit1: {0x6000, 0x03, 2},
              limit2: {0x6000, 0x05, 2},
              error: {0x6000, 0x07, 1},
-             value: {0x6000, 0x11, 16}
+             txpdo_state: {0x1800, 0x07, 1},
+             txpdo_toggle: {0x1800, 0x09, 1},
+             value: {:int16, 0x6000, 0x11, 16}
            }
          }}
 
-      # Channel 2 - TxPDO 0x1A01 (SM3, all 6 entries)
+      # Channel 2 - TxPDO 0x1A01 (SM3, all entries including padding)
       :ch2 ->
         {:ok,
          %{
@@ -57,7 +68,9 @@ defmodule EtherCAT.Drivers.EL3202 do
              limit1: {0x6010, 0x03, 2},
              limit2: {0x6010, 0x05, 2},
              error: {0x6010, 0x07, 1},
-             value: {0x6010, 0x11, 16}
+             txpdo_state: {0x1801, 0x07, 1},
+             txpdo_toggle: {0x1801, 0x09, 1},
+             value: {:int16, 0x6010, 0x11, 16}
            }
          }}
 
@@ -77,7 +90,10 @@ defmodule EtherCAT.Drivers.EL3202 do
   # ============================================================================
 
   defp configure_channel_1(ctx, config) do
-    with :ok <- maybe_configure_limit1_ch1(ctx, config),
+    with :ok <- maybe_configure_rtd_element_ch1(ctx, config),
+         :ok <- maybe_configure_connection_ch1(ctx, config),
+         :ok <- maybe_configure_wire_calibration_ch1(ctx, config),
+         :ok <- maybe_configure_limit1_ch1(ctx, config),
          :ok <- maybe_configure_limit2_ch1(ctx, config),
          :ok <- maybe_configure_filter_ch1(ctx, config) do
       Logger.debug("Channel 1 configured successfully")
@@ -90,7 +106,10 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   defp configure_channel_2(ctx, config) do
-    with :ok <- maybe_configure_limit1_ch2(ctx, config),
+    with :ok <- maybe_configure_rtd_element_ch2(ctx, config),
+         :ok <- maybe_configure_connection_ch2(ctx, config),
+         :ok <- maybe_configure_wire_calibration_ch2(ctx, config),
+         :ok <- maybe_configure_limit1_ch2(ctx, config),
          :ok <- maybe_configure_limit2_ch2(ctx, config),
          :ok <- maybe_configure_filter_ch2(ctx, config) do
       Logger.debug("Channel 2 configured successfully")
@@ -99,6 +118,63 @@ defmodule EtherCAT.Drivers.EL3202 do
       {:error, reason} ->
         Logger.error("Failed to configure channel 2: #{inspect(reason)}")
         {:error, {:config_failed, :channel_2, reason}}
+    end
+  end
+
+  # Channel 1 RTD element configuration (SDO 0x8000:0x19)
+  # Values: 0 = PT100, 1 = NI100, 2 = PT1000, 3 = PT500, 4 = PT200, 5 = NI1000, 6 = NI1000 TK1500, 7 = NI120, 8 = OHMS, 9 = KTY
+  defp maybe_configure_rtd_element_ch1(ctx, config) do
+    # Default to PT100
+    rtd_element = Map.get(config, :ch1_rtd_element, 0)
+
+    case write_sdo_value(ctx, 0x8000, 0x19, rtd_element, :uint16) do
+      :ok ->
+        element_name = rtd_element_name(rtd_element)
+        Logger.debug("Ch1 RTD element configured: #{element_name} (#{rtd_element})")
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  # Channel 1 connection technology configuration (SDO 0x8000:0x1a)
+  # Values: 0 = 2-wire, 1 = 3-wire, 2 = 4-wire
+  defp maybe_configure_connection_ch1(ctx, config) do
+    # Default to 2-wire
+    connection = Map.get(config, :ch1_connection, 0)
+
+    case write_sdo_value(ctx, 0x8000, 0x1A, connection, :uint16) do
+      :ok ->
+        connection_name = connection_name(connection)
+        Logger.debug("Ch1 Connection configured: #{connection_name} (#{connection})")
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  # Channel 1 wire calibration configuration (SDO 0x8000:0x1b)
+  # Value in 1/32 Ohm units (e.g., 32 = 1 Ohm wire resistance)
+  defp maybe_configure_wire_calibration_ch1(ctx, config) do
+    case Map.get(config, :ch1_wire_calibration) do
+      nil ->
+        :ok
+
+      calibration when is_integer(calibration) ->
+        case write_sdo_value(ctx, 0x8000, 0x1B, calibration, :int16) do
+          :ok ->
+            ohms = calibration / 32.0
+            Logger.debug("Ch1 Wire calibration configured: #{ohms} Ohm (raw: #{calibration})")
+            :ok
+
+          error ->
+            error
+        end
+
+      _ ->
+        {:error, :invalid_ch1_wire_calibration}
     end
   end
 
@@ -150,6 +226,63 @@ defmodule EtherCAT.Drivers.EL3202 do
     end
   end
 
+  # Channel 2 RTD element configuration (SDO 0x8010:0x19)
+  # Values: 0 = PT100, 1 = NI100, 2 = PT1000, 3 = PT500, 4 = PT200, 5 = NI1000, 6 = NI1000 TK1500, 7 = NI120, 8 = OHMS, 9 = KTY
+  defp maybe_configure_rtd_element_ch2(ctx, config) do
+    # Default to PT100
+    rtd_element = Map.get(config, :ch2_rtd_element, 0)
+
+    case write_sdo_value(ctx, 0x8010, 0x19, rtd_element, :uint16) do
+      :ok ->
+        element_name = rtd_element_name(rtd_element)
+        Logger.debug("Ch2 RTD element configured: #{element_name} (#{rtd_element})")
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  # Channel 2 connection technology configuration (SDO 0x8010:0x1a)
+  # Values: 0 = 2-wire, 1 = 3-wire, 2 = 4-wire
+  defp maybe_configure_connection_ch2(ctx, config) do
+    # Default to 2-wire
+    connection = Map.get(config, :ch2_connection, 0)
+
+    case write_sdo_value(ctx, 0x8010, 0x1A, connection, :uint16) do
+      :ok ->
+        connection_name = connection_name(connection)
+        Logger.debug("Ch2 Connection configured: #{connection_name} (#{connection})")
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  # Channel 2 wire calibration configuration (SDO 0x8010:0x1b)
+  # Value in 1/32 Ohm units (e.g., 32 = 1 Ohm wire resistance)
+  defp maybe_configure_wire_calibration_ch2(ctx, config) do
+    case Map.get(config, :ch2_wire_calibration) do
+      nil ->
+        :ok
+
+      calibration when is_integer(calibration) ->
+        case write_sdo_value(ctx, 0x8010, 0x1B, calibration, :int16) do
+          :ok ->
+            ohms = calibration / 32.0
+            Logger.debug("Ch2 Wire calibration configured: #{ohms} Ohm (raw: #{calibration})")
+            :ok
+
+          error ->
+            error
+        end
+
+      _ ->
+        {:error, :invalid_ch2_wire_calibration}
+    end
+  end
+
   # Channel 2 limit 1 configuration (SDO 0x8010:0x13)
   defp maybe_configure_limit1_ch2(ctx, config) do
     case {Map.get(config, :ch2_limit1), Map.get(config, :ch2_enable_limit1, false)} do
@@ -197,4 +330,22 @@ defmodule EtherCAT.Drivers.EL3202 do
       :ok
     end
   end
+
+  # Helper functions for mapping values to names
+  defp rtd_element_name(0), do: "PT100"
+  defp rtd_element_name(1), do: "NI100"
+  defp rtd_element_name(2), do: "PT1000"
+  defp rtd_element_name(3), do: "PT500"
+  defp rtd_element_name(4), do: "PT200"
+  defp rtd_element_name(5), do: "NI1000"
+  defp rtd_element_name(6), do: "NI1000 TK1500"
+  defp rtd_element_name(7), do: "NI120"
+  defp rtd_element_name(8), do: "OHMS"
+  defp rtd_element_name(9), do: "KTY"
+  defp rtd_element_name(n), do: "Unknown(#{n})"
+
+  defp connection_name(0), do: "2-wire"
+  defp connection_name(1), do: "3-wire"
+  defp connection_name(2), do: "4-wire"
+  defp connection_name(n), do: "Unknown(#{n})"
 end

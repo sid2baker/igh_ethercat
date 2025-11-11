@@ -1,174 +1,111 @@
 defmodule Hardware.EL3202Test do
-  use ExUnit.Case, async: false
-  require Logger
-
   @moduledoc """
-  EL3202 RTD temperature input test.
-
-  This test demonstrates SDO configuration and PDO reading for the
-  Beckhoff EL3202 2-channel RTD (PT100/PT1000) temperature input terminal.
+  Simple EL3202 RTD temperature input test.
 
   ## Hardware Setup
 
   Expected configuration:
-  - Slave 0: Bus coupler (e.g., EK1100)
-  - Slave 1: Digital input (optional, e.g., EL1008)
-  - Slave 2: Digital output (optional, e.g., EL2008)
+  - Slave 0: EK1100 Bus coupler
+  - Slave 1: EL1809 Digital input
+  - Slave 2: EL2809 Digital output
   - Slave 3: EL3202 RTD temperature input (2 channels)
 
-  Connect PT100 or PT1000 sensors to the EL3202 channels.
+  Connect resistors to simulate PT100 sensors:
+  - CH1 (pins 1+, 2-): 120Ω resistor → ~50°C
+  - CH2 (pins 5+, 6-): 100Ω resistor → ~0°C
 
   ## Running
 
-  To run this test with actual hardware:
-
       mix test test/hardware/el3202_test.exs --include hardware
-
-  Or run in IEx for interactive testing:
-
-      iex> Hardware.EL3202Test.run()
   """
+
+  use ExUnit.Case, async: false
+  require Logger
 
   @tag :hardware
   @tag timeout: 30_000
-  test "EL3202 temperature reading with limits" do
-    {:ok, master, temp_values} = run()
+  test "EL3202 reads temperature values" do
+    Logger.info("\n=== EL3202 Temperature Reading Test ===\n")
 
-    assert is_list(temp_values)
-    assert length(temp_values) > 0
-
-    EtherCAT.close(master)
-  end
-
-  @doc """
-  Interactive test function for manual testing in IEx.
-
-  Returns master_pid and temperature_values for continued monitoring.
-  """
-  def run do
-    Logger.info("Starting EL3202 RTD Temperature Test...")
-
+    # Open master and discover slaves
     {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
     Logger.info("Discovered #{length(slaves)} slaves")
 
-    # Find EL3202 - typically at position 3, but flexible
-    el3202 = Enum.at(slaves, 3) || List.last(slaves)
+    # Get EL3202 (should be at position 3)
+    el3202 = Enum.at(slaves, 3)
+    assert el3202 != nil, "EL3202 not found at position 3"
 
-    if el3202 == nil do
-      Logger.error("No slaves found. Check hardware setup.")
-      {:error, :no_slaves_found}
-    else
-      config = %{
-        ch1_limit1: 180,
-        ch1_limit2: 280,
-        ch1_enable_limit1: true,
-        ch1_enable_limit2: true,
-        ch1_enable_filter: true,
-        ch1_filter_settings: 10,
-        ch2_limit1: 0,
-        ch2_limit2: 500,
-        ch2_enable_limit1: true,
-        ch2_enable_limit2: true,
-        ch2_enable_filter: true,
-        ch2_filter_settings: 10
-      }
+    # Configure with empty config to use defaults (no SDO configuration)
+    Logger.info("Configuring EL3202 with default settings...")
+    {:ok, available_pdos} = EtherCAT.configure_slave(el3202, %{})
+    Logger.info("Available PDOs: #{inspect(available_pdos)}")
 
-      Logger.info("Configuring EL3202 with temperature limits...")
-      {:ok, available_pdos} = EtherCAT.configure_slave(el3202, config)
-      Logger.info("Available PDOs: #{inspect(available_pdos)}")
-      # Available PDOs will be [:ch1, :ch2] - each representing a complete channel
+    # Register both channels
+    Logger.info("Registering PDO channels...")
+    {:ok, pdo_handles} = EtherCAT.register_pdos(el3202, [:ch1, :ch2])
+    Logger.info("Registered #{length(pdo_handles)} PDO entries")
 
-      pdos_to_register = [
-        # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
-        :ch1,
-        # Registers all 6 entries: underrange, overrange, limit1, limit2, error, value
-        :ch2
-      ]
+    # Start cyclic communication
+    Logger.info("Starting cyclic mode...")
+    EtherCAT.start_cyclic(master)
 
-      Logger.info("Registering PDOs (each PDO contains all entries for one channel)...")
-      {:ok, pdo_handles} = EtherCAT.register_pdos(master, el3202, pdos_to_register)
+    # Wait for data to stabilize
+    :timer.sleep(2000)
 
-      Logger.info("Starting cyclic mode...")
-      EtherCAT.start_cyclic(master)
+    # Read channel 1 temperature
+    Logger.info("\n=== Channel 1 (120Ω resistor) ===")
+    ch1_value = read_pdo_entry(pdo_handles, "ch1:value")
+    ch1_error = read_pdo_entry(pdo_handles, "ch1:error")
+    ch1_underrange = read_pdo_entry(pdo_handles, "ch1:underrange")
+    ch1_overrange = read_pdo_entry(pdo_handles, "ch1:overrange")
 
-      :timer.sleep(2000)
+    if ch1_value do
+      temp_c = ch1_value / 10.0
+      Logger.info("  Value: #{ch1_value} (#{temp_c}°C)")
+      Logger.info("  Error: #{ch1_error}")
+      Logger.info("  Underrange: #{ch1_underrange}")
+      Logger.info("  Overrange: #{ch1_overrange}")
 
-      Logger.info("Reading temperature values...")
-
-      ch1_handle =
-        Enum.find(pdo_handles, fn h ->
-          String.contains?(h.unique_name, "ch1:value")
-        end)
-
-      ch2_handle =
-        Enum.find(pdo_handles, fn h ->
-          String.contains?(h.unique_name, "ch2:value")
-        end)
-
-      temp_values =
-        if ch1_handle do
-          case EtherCAT.read(ch1_handle) do
-            {:ok, raw_value} ->
-              temp_c = raw_value / 10.0
-              Logger.info("Channel 1 Temperature: #{temp_c} C (raw: #{raw_value})")
-              [{:ch1, temp_c, raw_value}]
-
-            {:error, reason} ->
-              Logger.warning("Failed to read channel 1: #{inspect(reason)}")
-              []
-          end
-        else
-          []
-        end
-
-      temp_values =
-        if ch2_handle do
-          case EtherCAT.read(ch2_handle) do
-            {:ok, raw_value} ->
-              temp_c = raw_value / 10.0
-              Logger.info("Channel 2 Temperature: #{temp_c} C (raw: #{raw_value})")
-              [{:ch2, temp_c, raw_value} | temp_values]
-
-            {:error, reason} ->
-              Logger.warning("Failed to read channel 2: #{inspect(reason)}")
-              temp_values
-          end
-        else
-          temp_values
-        end
-
-      Logger.info("Subscribing to temperature changes...")
-      if ch1_handle, do: EtherCAT.watch(ch1_handle)
-      if ch2_handle, do: EtherCAT.watch(ch2_handle)
-
-      Logger.info("Monitoring temperature for 5 seconds...")
-      monitor_temperature(5000)
-
-      Logger.info("Test completed successfully!")
-      {:ok, master, temp_values}
+      # For 120Ω PT100, expect around 50°C
+      assert temp_c > 45.0 and temp_c < 55.0,
+             "CH1 temperature #{temp_c}°C outside expected range (45-55°C for 120Ω)"
     end
+
+    # Read channel 2 temperature
+    Logger.info("\n=== Channel 2 (100Ω resistor) ===")
+    ch2_value = read_pdo_entry(pdo_handles, "ch2:value")
+    ch2_error = read_pdo_entry(pdo_handles, "ch2:error")
+    ch2_underrange = read_pdo_entry(pdo_handles, "ch2:underrange")
+    ch2_overrange = read_pdo_entry(pdo_handles, "ch2:overrange")
+
+    if ch2_value do
+      temp_c = ch2_value / 10.0
+      Logger.info("  Value: #{ch2_value} (#{temp_c}°C)")
+      Logger.info("  Error: #{ch2_error}")
+      Logger.info("  Underrange: #{ch2_underrange}")
+      Logger.info("  Overrange: #{ch2_overrange}")
+
+      # For 100Ω PT100, expect around 0°C (allowing for measurement offset)
+      assert temp_c > -5.0 and temp_c < 5.0,
+             "CH2 temperature #{temp_c}°C outside expected range (-5 to 5°C for 100Ω)"
+    end
+
+    # Cleanup
+    Logger.info("\n=== Test Complete ===\n")
+    EtherCAT.close(master)
   end
 
-  defp monitor_temperature(duration) do
-    start_time = System.monotonic_time(:millisecond)
-    monitor_loop(start_time, duration)
-  end
+  # Helper to read a PDO entry by name pattern
+  defp read_pdo_entry(handles, name_pattern) do
+    handle = Enum.find(handles, fn h -> String.contains?(h.unique_name, name_pattern) end)
 
-  defp monitor_loop(start_time, duration) do
-    elapsed = System.monotonic_time(:millisecond) - start_time
-
-    if elapsed < duration do
-      receive do
-        {:data_changed, name, value} ->
-          temp_c = value / 10.0
-          Logger.info("Temperature changed: #{name} = #{temp_c} C (raw: #{value})")
-          monitor_loop(start_time, duration)
-      after
-        1000 ->
-          monitor_loop(start_time, duration)
+    if handle do
+      case EtherCAT.read(handle) do
+        {:ok, value} -> value
+        {:error, _reason} -> nil
       end
     else
-      :ok
+      nil
     end
   end
 end
