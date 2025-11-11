@@ -387,20 +387,15 @@ The refactored implementation performs configuration incrementally:
 
 ```elixir
 %Slave{
-  # Tracks which entries are registered per PDO
-  pdo_registrations: %{
-    ch1: %{domain: :fast, entries: MapSet.new([:value, :error])}
-  },
-
-  # Tracks sync manager to domain mapping
-  sync_manager_domains: %{
-    3 => :fast_domain  # SM3 assigned to :fast_domain
-  },
-
-  # Tracks which sync managers have been configured
-  configured_sync_managers: MapSet.new([3])
+  # Tracks which PDO indices have been assigned to sync managers
+  assigned_pdos: MapSet.new([0x1A00, 0x1A01])
 }
 ```
+
+**Simplifications:**
+- All sync managers are configured upfront in `configure/2` (no incremental tracking needed)
+- Only track which PDOs have been assigned (by PDO index)
+- Domain tracks registered entries (slave doesn't need to duplicate this)
 
 ### State Machine Guards
 

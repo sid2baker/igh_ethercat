@@ -3,7 +3,7 @@ defmodule EtherCAT do
   EtherCAT industrial I/O interface for the IgH EtherCAT Master.
   """
 
-  alias EtherCAT.{Master, Slave, Domain, PDO}
+  alias EtherCAT.{Master, Slave, Domain, PDOEntry}
   require Logger
 
   @doc "Opens master, connects, and discovers slaves. Returns `{:ok, master, [slaves]}`."
@@ -94,14 +94,13 @@ defmodule EtherCAT do
   This is the **granular entry-level API** - register only specific entries you need.
 
   ## Parameters
-  - `master` - Master process PID
   - `slave` - Slave process PID
   - `pdo_name` - PDO name from `configure_slave/2` (e.g., `:ch1`)
   - `entry_name` - Entry name within the PDO (e.g., `:value`, `:error`)
   - `domain` - Domain identifier (default: `:default_domain`)
 
   ## Returns
-  - `{:ok, %PDO{}}` - PDO handle for read/write/watch operations
+  - `{:ok, %PDOEntry{}}` - PDO entry handle for read/write/watch operations
   - `{:error, reason}` - Error if registration fails
 
   ## Multi-Domain Support
@@ -111,15 +110,15 @@ defmodule EtherCAT do
   ## Example
 
       # Register only the temperature value, skip other entries
-      {:ok, temp_handle} = EtherCAT.register_entry(master, slave, :ch1, :value)
+      {:ok, temp_handle} = EtherCAT.register_entry(slave, :ch1, :value)
       {:ok, temp} = EtherCAT.read(temp_handle)
   """
-  @spec register_entry(pid(), pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
-          {:ok, PDO.t()} | {:error, term()}
-  def register_entry(master, slave, pdo_name, entry_name, domain \\ :default_domain) do
+  @spec register_entry(pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
+          {:ok, PDOEntry.t()} | {:error, term()}
+  def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain) do
     case Slave.register_entry(slave, pdo_name, entry_name, domain) do
-      {:ok, unique_name} ->
-        {:ok, PDO.new(domain, unique_name, master)}
+      {:ok, {unique_name, domain_pid}} ->
+        {:ok, PDOEntry.new(domain_pid, unique_name)}
 
       {:error, _reason} = error ->
         error
@@ -132,19 +131,18 @@ defmodule EtherCAT do
   Convenience function for registering several specific entries at once.
 
   ## Parameters
-  - `master` - Master process PID
   - `slave` - Slave process PID
   - `entries` - List of `{pdo_name, entry_name}` or `{pdo_name, entry_name, domain}` tuples
   - `default_domain` - Domain to use when not specified per entry (default: `:default_domain`)
 
   ## Returns
-  - `{:ok, [%PDO{}]}` - List of PDO handles on success
+  - `{:ok, [%PDOEntry{}]}` - List of PDO entry handles on success
   - `{:error, reason}` - Error if any registration fails
 
   ## Example
 
       # Register specific entries from different PDOs
-      {:ok, handles} = EtherCAT.register_entries(master, slave, [
+      {:ok, handles} = EtherCAT.register_entries(slave, [
         {:ch1, :value},
         {:ch1, :error},
         {:ch2, :value}
@@ -152,23 +150,14 @@ defmodule EtherCAT do
 
       [temp1, temp1_err, temp2] = handles
   """
-  @spec register_entries(pid(), pid(), list(), Slave.domain()) ::
-          {:ok, [PDO.t()]} | {:error, term()}
-  def register_entries(master, slave, entries, default_domain \\ :default_domain) do
+  @spec register_entries(pid(), list(), Slave.domain()) ::
+          {:ok, [PDOEntry.t()]} | {:error, term()}
+  def register_entries(slave, entries, default_domain \\ :default_domain) do
     case Slave.register_entries(slave, entries, default_domain) do
-      {:ok, unique_names} ->
-        # Determine domain for each entry
-        handles =
-          Enum.zip(entries, unique_names)
-          |> Enum.map(fn {entry_spec, unique_name} ->
-            entry_domain =
-              case entry_spec do
-                {_pdo, _entry, domain} -> domain
-                {_pdo, _entry} -> default_domain
-              end
-
-            PDO.new(entry_domain, unique_name, master)
-          end)
+      {:ok, entry_infos} ->
+        handles = Enum.map(entry_infos, fn {unique_name, domain_pid} ->
+          PDOEntry.new(domain_pid, unique_name)
+        end)
 
         {:ok, handles}
 
@@ -183,13 +172,12 @@ defmodule EtherCAT do
   This is the **convenient PDO-level API** - register all entries in each PDO at once.
 
   ## Parameters
-  - `master` - Master process PID
   - `slave` - Slave process PID
   - `pdo_names` - List of PDO names from `configure_slave/2`
   - `domain` - Domain name (default: `:default_domain`)
 
   ## Returns
-  - `{:ok, [%PDO{}]}` - List of handles for all entries in all PDOs
+  - `{:ok, [%PDOEntry{}]}` - List of handles for all entries in all PDOs
   - `{:error, reason}` - Error if registration fails
 
   ## Multi-Domain Support
@@ -199,12 +187,12 @@ defmodule EtherCAT do
   ## Example
 
       # Register all entries from channel 1 and channel 2 PDOs
-      {:ok, handles} = EtherCAT.register_pdos(master, slave, [:ch1, :ch2])
+      {:ok, handles} = EtherCAT.register_pdos(slave, [:ch1, :ch2])
       # Returns handles for all 12 entries (6 per channel)
   """
-  @spec register_pdos(pid(), pid(), [Slave.pdo_name()], Slave.domain()) ::
-          {:ok, [PDO.t()]} | {:error, term()}
-  def register_pdos(master, slave, pdo_names, domain \\ :default_domain) do
+  @spec register_pdos(pid(), [Slave.pdo_name()], Slave.domain()) ::
+          {:ok, [PDOEntry.t()]} | {:error, term()}
+  def register_pdos(slave, pdo_names, domain \\ :default_domain) do
     # Register each PDO individually using the PDO-level API
     results =
       Enum.map(pdo_names, fn pdo_name ->
@@ -217,54 +205,40 @@ defmodule EtherCAT do
         error
 
       nil ->
-        # Each result contains {:ok, [entry_name1, entry_name2, ...]}, so flatten the list
-        unique_names =
-          results
-          |> Enum.flat_map(fn {:ok, names} -> names end)
-
+        # Each result contains {:ok, [{name, pid}, ...]}, so flatten and convert to handles
         handles =
-          Enum.map(unique_names, fn unique_name ->
-            PDO.new(domain, unique_name, master)
+          results
+          |> Enum.flat_map(fn {:ok, entry_infos} -> entry_infos end)
+          |> Enum.map(fn {unique_name, domain_pid} ->
+            PDOEntry.new(domain_pid, unique_name)
           end)
 
         {:ok, handles}
     end
   end
 
-  @doc "Reads PDO value from handle."
-  @spec read(PDO.t()) :: {:ok, term()} | {:error, term()}
-  def read(%PDO{domain: domain_name, unique_name: name, master: master}) do
-    case Domain.find_domain(master, domain_name) do
-      {:ok, domain} -> Domain.get_pdo_value(domain, name)
-      error -> error
-    end
+  @doc "Reads PDO entry value from handle."
+  @spec read(PDOEntry.t()) :: {:ok, term()} | {:error, term()}
+  def read(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
+    Domain.get_pdo_value(domain_pid, name)
   end
 
-  @doc "Writes value to PDO handle."
-  @spec write(PDO.t(), term()) :: :ok | {:error, term()}
-  def write(%PDO{domain: domain_name, unique_name: name, master: master}, value) do
-    case Domain.find_domain(master, domain_name) do
-      {:ok, domain} -> Domain.set_pdo_value(domain, name, value)
-      error -> error
-    end
+  @doc "Writes value to PDO entry handle."
+  @spec write(PDOEntry.t(), term()) :: :ok | {:error, term()}
+  def write(%PDOEntry{domain_pid: domain_pid, unique_name: name}, value) do
+    Domain.set_pdo_value(domain_pid, name, value)
   end
 
-  @doc "Subscribes to PDO change notifications."
-  @spec watch(PDO.t()) :: :ok | {:error, term()}
-  def watch(%PDO{domain: domain_name, unique_name: name, master: master}) do
-    case Domain.find_domain(master, domain_name) do
-      {:ok, domain} -> Domain.subscribe(domain, self(), name)
-      error -> error
-    end
+  @doc "Subscribes to PDO entry change notifications."
+  @spec watch(PDOEntry.t()) :: :ok | {:error, term()}
+  def watch(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
+    Domain.subscribe(domain_pid, self(), name)
   end
 
-  @doc "Unsubscribes from PDO change notifications."
-  @spec unwatch(PDO.t()) :: :ok | {:error, term()}
-  def unwatch(%PDO{domain: domain_name, unique_name: name, master: master}) do
-    case Domain.find_domain(master, domain_name) do
-      {:ok, domain} -> Domain.unsubscribe(domain, self(), name)
-      error -> error
-    end
+  @doc "Unsubscribes from PDO entry change notifications."
+  @spec unwatch(PDOEntry.t()) :: :ok | {:error, term()}
+  def unwatch(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
+    Domain.unsubscribe(domain_pid, self(), name)
   end
 
   @doc "Starts cyclic communication. Locks configuration - no changes allowed after this."
