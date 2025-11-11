@@ -94,7 +94,6 @@ defmodule EtherCAT do
   This is the **granular entry-level API** - register only specific entries you need.
 
   ## Parameters
-  - `master` - Master process PID (not used, kept for API compatibility)
   - `slave` - Slave process PID
   - `pdo_name` - PDO name from `configure_slave/2` (e.g., `:ch1`)
   - `entry_name` - Entry name within the PDO (e.g., `:value`, `:error`)
@@ -111,12 +110,12 @@ defmodule EtherCAT do
   ## Example
 
       # Register only the temperature value, skip other entries
-      {:ok, temp_handle} = EtherCAT.register_entry(master, slave, :ch1, :value)
+      {:ok, temp_handle} = EtherCAT.register_entry(slave, :ch1, :value)
       {:ok, temp} = EtherCAT.read(temp_handle)
   """
-  @spec register_entry(pid(), pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
+  @spec register_entry(pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
           {:ok, PDOEntry.t()} | {:error, term()}
-  def register_entry(_master, slave, pdo_name, entry_name, domain \\ :default_domain) do
+  def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain) do
     case Slave.register_entry(slave, pdo_name, entry_name, domain) do
       {:ok, {unique_name, domain_pid}} ->
         {:ok, PDOEntry.new(domain_pid, unique_name)}
@@ -132,7 +131,6 @@ defmodule EtherCAT do
   Convenience function for registering several specific entries at once.
 
   ## Parameters
-  - `master` - Master process PID (not used, kept for API compatibility)
   - `slave` - Slave process PID
   - `entries` - List of `{pdo_name, entry_name}` or `{pdo_name, entry_name, domain}` tuples
   - `default_domain` - Domain to use when not specified per entry (default: `:default_domain`)
@@ -144,7 +142,7 @@ defmodule EtherCAT do
   ## Example
 
       # Register specific entries from different PDOs
-      {:ok, handles} = EtherCAT.register_entries(master, slave, [
+      {:ok, handles} = EtherCAT.register_entries(slave, [
         {:ch1, :value},
         {:ch1, :error},
         {:ch2, :value}
@@ -152,9 +150,9 @@ defmodule EtherCAT do
 
       [temp1, temp1_err, temp2] = handles
   """
-  @spec register_entries(pid(), pid(), list(), Slave.domain()) ::
+  @spec register_entries(pid(), list(), Slave.domain()) ::
           {:ok, [PDOEntry.t()]} | {:error, term()}
-  def register_entries(_master, slave, entries, default_domain \\ :default_domain) do
+  def register_entries(slave, entries, default_domain \\ :default_domain) do
     case Slave.register_entries(slave, entries, default_domain) do
       {:ok, entry_infos} ->
         handles = Enum.map(entry_infos, fn {unique_name, domain_pid} ->
@@ -174,7 +172,6 @@ defmodule EtherCAT do
   This is the **convenient PDO-level API** - register all entries in each PDO at once.
 
   ## Parameters
-  - `master` - Master process PID (not used, kept for API compatibility)
   - `slave` - Slave process PID
   - `pdo_names` - List of PDO names from `configure_slave/2`
   - `domain` - Domain name (default: `:default_domain`)
@@ -190,12 +187,12 @@ defmodule EtherCAT do
   ## Example
 
       # Register all entries from channel 1 and channel 2 PDOs
-      {:ok, handles} = EtherCAT.register_pdos(master, slave, [:ch1, :ch2])
+      {:ok, handles} = EtherCAT.register_pdos(slave, [:ch1, :ch2])
       # Returns handles for all 12 entries (6 per channel)
   """
-  @spec register_pdos(pid(), pid(), [Slave.pdo_name()], Slave.domain()) ::
+  @spec register_pdos(pid(), [Slave.pdo_name()], Slave.domain()) ::
           {:ok, [PDOEntry.t()]} | {:error, term()}
-  def register_pdos(_master, slave, pdo_names, domain \\ :default_domain) do
+  def register_pdos(slave, pdo_names, domain \\ :default_domain) do
     # Register each PDO individually using the PDO-level API
     results =
       Enum.map(pdo_names, fn pdo_name ->
