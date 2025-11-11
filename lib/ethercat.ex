@@ -155,9 +155,10 @@ defmodule EtherCAT do
   def register_entries(slave, entries, default_domain \\ :default_domain) do
     case Slave.register_entries(slave, entries, default_domain) do
       {:ok, entry_infos} ->
-        handles = Enum.map(entry_infos, fn {unique_name, domain_pid} ->
-          PDOEntry.new(domain_pid, unique_name)
-        end)
+        handles =
+          Enum.map(entry_infos, fn {unique_name, domain_pid} ->
+            PDOEntry.new(domain_pid, unique_name)
+          end)
 
         {:ok, handles}
 

@@ -9,8 +9,8 @@ defmodule Hardware.SimpleTest do
     {:ok, [input1 | _rest]} = EtherCAT.configure_slave(di1, %{})
     {:ok, [output1, _, _, _, output5 | _rest]} = EtherCAT.configure_slave(do1, %{})
 
-    {:ok, [i_pdo1]} = EtherCAT.register_pdos(master, di1, [input1])
-    {:ok, [pdo1, _pdo5]} = EtherCAT.register_pdos(master, do1, [output1, output5])
+    {:ok, [i_pdo1]} = EtherCAT.register_pdos(di1, [input1])
+    {:ok, [pdo1, _pdo5]} = EtherCAT.register_pdos(do1, [output1, output5])
 
     EtherCAT.start_cyclic(master)
     :timer.sleep(1000)

@@ -387,7 +387,8 @@ defmodule EtherCAT.Slave do
 
       {:ok, entries} = Slave.register_all_pdos(slave, :fast_domain)
   """
-  @spec register_all_pdos(pid(), domain(), timeout()) :: {:ok, [{String.t(), pid()}]} | {:error, term()}
+  @spec register_all_pdos(pid(), domain(), timeout()) ::
+          {:ok, [{String.t(), pid()}]} | {:error, term()}
   def register_all_pdos(slave, domain \\ :default_domain, timeout \\ 10_000) do
     all_pdos = list_pdos(slave, timeout)
 
@@ -547,7 +548,12 @@ defmodule EtherCAT.Slave do
 
   def unconfigured(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :unconfigured state")
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :unconfigured})
+
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
+      position: data.position,
+      state: :unconfigured
+    })
+
     :keep_state_and_data
   end
 
@@ -612,7 +618,12 @@ defmodule EtherCAT.Slave do
 
   def configured(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :configured state")
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :configured})
+
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
+      position: data.position,
+      state: :configured
+    })
+
     :keep_state_and_data
   end
 
@@ -696,7 +707,12 @@ defmodule EtherCAT.Slave do
 
   def operational(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :operational state")
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{position: data.position, state: :operational})
+
+    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
+      position: data.position,
+      state: :operational
+    })
+
     :keep_state_and_data
   end
 
@@ -817,9 +833,7 @@ defmodule EtherCAT.Slave do
     else
       available = Map.keys(pdo_info.entries) |> Enum.join(", ")
 
-      {:error,
-       {:entry_not_found, entry_name,
-        "Available entries: #{available}"}}
+      {:error, {:entry_not_found, entry_name, "Available entries: #{available}"}}
     end
   end
 

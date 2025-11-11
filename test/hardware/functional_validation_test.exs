@@ -54,7 +54,7 @@ defmodule Hardware.FunctionalValidationTest do
 
     # Register ONLY the first input PDO (the one wired to output1)
     [first_input_pdo | _] = input_pdos
-    {:ok, [input_pdo_name]} = EtherCAT.register_pdos(master, di, [first_input_pdo])
+    {:ok, [input_pdo_name]} = EtherCAT.register_pdos(di, [first_input_pdo])
     Logger.info("Registered input PDO: #{inspect(input_pdo_name)}")
 
     # Configure output slave and get available PDOs
@@ -63,7 +63,7 @@ defmodule Hardware.FunctionalValidationTest do
 
     # Register ONLY the first output PDO (the one wired to input1)
     [first_output_pdo | _] = output_pdos
-    {:ok, [output_pdo_name]} = EtherCAT.register_pdos(master, do_slave, [first_output_pdo])
+    {:ok, [output_pdo_name]} = EtherCAT.register_pdos(do_slave, [first_output_pdo])
     Logger.info("Registered output PDO: #{inspect(output_pdo_name)}")
 
     # Start cyclic operation
