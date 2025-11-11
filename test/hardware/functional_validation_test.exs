@@ -50,17 +50,21 @@ defmodule Hardware.FunctionalValidationTest do
 
     # Configure input slave and get available PDOs
     {:ok, input_pdos} = EtherCAT.configure_slave(di, %{})
-    Logger.info("Input PDOs: #{inspect(input_pdos)}")
+    Logger.info("Input PDOs available: #{length(input_pdos)}")
 
-    # Register all input PDOs and get unique names
-    {:ok, input_names} = EtherCAT.register_pdos(master, di, input_pdos)
+    # Register ONLY the first input PDO (the one wired to output1)
+    [first_input_pdo | _] = input_pdos
+    {:ok, [input_pdo_name]} = EtherCAT.register_pdos(master, di, [first_input_pdo])
+    Logger.info("Registered input PDO: #{inspect(input_pdo_name)}")
 
     # Configure output slave and get available PDOs
     {:ok, output_pdos} = EtherCAT.configure_slave(do_slave, %{})
-    Logger.info("Output PDOs: #{inspect(output_pdos)}")
+    Logger.info("Output PDOs available: #{length(output_pdos)}")
 
-    # Register all output PDOs and get unique names
-    {:ok, output_names} = EtherCAT.register_pdos(master, do_slave, output_pdos)
+    # Register ONLY the first output PDO (the one wired to input1)
+    [first_output_pdo | _] = output_pdos
+    {:ok, [output_pdo_name]} = EtherCAT.register_pdos(master, do_slave, [first_output_pdo])
+    Logger.info("Registered output PDO: #{inspect(output_pdo_name)}")
 
     # Start cyclic operation
     EtherCAT.start_cyclic(master)
@@ -84,19 +88,15 @@ defmodule Hardware.FunctionalValidationTest do
       Logger.info("=== Cleanup complete ===")
     end)
 
-    # Return context for all tests
+    # Return context for all tests - single input and output PDO
     %{
       master: master,
-      input_names: input_names,
-      output_names: output_names
+      input_pdo: input_pdo_name,
+      output_pdo: output_pdo_name
     }
   end
 
   # Helper functions
-
-  defp get_pdo_name(pdos, index) when is_list(pdos) do
-    Enum.at(pdos, index)
-  end
 
   defp assert_loopback(input_pdo, output_pdo, expected_value) do
     # Set output value using PDO handle
@@ -147,8 +147,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "1. bit-level operations - single bit toggle", context do
     Logger.info("=== Test 1: Bit-level Operations ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     Logger.info("Testing PDO pair: #{output_pdo.unique_name} -> #{input_pdo.unique_name}")
 
@@ -170,8 +170,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "2. byte-level operations - pattern validation", context do
     Logger.info("=== Test 2: Byte-level Operations ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     Logger.info("Testing PDO pair: #{output_pdo.unique_name} -> #{input_pdo.unique_name}")
 
@@ -198,8 +198,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "3. rapid state changes - stress timing", context do
     Logger.info("=== Test 3: Rapid State Changes ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     Logger.info("Performing rapid toggle sequence (100 iterations)...")
 
@@ -229,8 +229,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "4. PDO subscriptions - notification delivery", context do
     Logger.info("=== Test 4: PDO Subscriptions ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     # Subscribe to input changes using PDO handle
     Logger.info("Subscribing to PDO: #{inspect(input_pdo)}")
@@ -287,8 +287,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "5. multi-PDO concurrent operations", context do
     Logger.info("=== Test 5: Multi-PDO Concurrent Operations ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     Logger.info("Testing concurrent operations on looped-back PDO pair")
     Logger.info("  Output: #{inspect(output_pdo)}")
@@ -339,8 +339,8 @@ defmodule Hardware.FunctionalValidationTest do
   test "6. edge cases - idempotency and boundaries", context do
     Logger.info("=== Test 6: Edge Cases ===")
 
-    input_pdo = get_pdo_name(context.input_names, 0)
-    output_pdo = get_pdo_name(context.output_names, 0)
+    input_pdo = context.input_pdo
+    output_pdo = context.output_pdo
 
     # Test 6.1: Repeated writes (idempotency)
     Logger.info("Test 6.1: Repeated writes to same value")
