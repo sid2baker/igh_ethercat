@@ -75,10 +75,8 @@ defmodule EtherCAT.Slave do
     :slave_config,
     :sync_count,
     :name,
-    # Tracks registered entries per PDO: %{pdo_name => %{domain: atom(), entries: MapSet}}
-    pdo_registrations: %{},
-    # Tracks which sync managers have been configured (one-time setup)
-    configured_sync_managers: MapSet.new()
+    # Tracks which PDO indices have been assigned to sync managers
+    assigned_pdos: MapSet.new()
   ]
 
   @type t :: %__MODULE__{
@@ -94,8 +92,7 @@ defmodule EtherCAT.Slave do
           slave_config: reference() | nil,
           sync_count: non_neg_integer(),
           name: atom() | String.t() | nil,
-          pdo_registrations: %{pdo_name() => %{domain: domain(), entries: MapSet.t(atom())}},
-          configured_sync_managers: MapSet.t(non_neg_integer())
+          assigned_pdos: MapSet.t(non_neg_integer())
         }
 
   @type pdo_name :: atom() | String.t()
@@ -573,9 +570,8 @@ defmodule EtherCAT.Slave do
       {:ok, driver_state} ->
         updated_data = %{data | driver_state: driver_state}
 
-        # Clear all PDO assignments and mappings for all sync managers
-        # This prepares for incremental entry/PDO registration
-        clear_all_pdo_config(updated_data)
+        # Configure all sync managers upfront from driver PDO info
+        configure_all_sync_managers(updated_data)
 
         Logger.info("Slave #{data.position} configured, transitioning to :configured")
         {:next_state, :configured, updated_data, [{:reply, from, :ok}]}
@@ -739,29 +735,18 @@ defmodule EtherCAT.Slave do
     with {:ok, pdo_info} <- data.driver.pdo_info(data.driver_state, pdo_name),
          :ok <- validate_entry_exists(pdo_info, entry_name),
          {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
-      {sync_index, direction, watchdog} = pdo_info.sync_manager
+      {sync_index, direction, _watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
-
-      # Get the specific entry configuration
       {entry_index, entry_subindex, entry_bit_length} = pdo_info.entries[entry_name]
 
-      # Configure sync manager if first time
+      # Assign PDO to sync manager if not already assigned
       updated_data =
-        if MapSet.member?(data.configured_sync_managers, sync_index) do
+        if MapSet.member?(data.assigned_pdos, pdo_index) do
           data
         else
-          config_sync_manager_internal(data, sync_index, direction, watchdog)
-          %{data | configured_sync_managers: MapSet.put(data.configured_sync_managers, sync_index)}
+          config_pdo_assign_add_internal(data, sync_index, pdo_index)
+          %{data | assigned_pdos: MapSet.put(data.assigned_pdos, pdo_index)}
         end
-
-      # Check if this is the first entry from this PDO
-      pdo_registration = Map.get(updated_data.pdo_registrations, pdo_name)
-      first_entry_from_pdo? = is_nil(pdo_registration)
-
-      # Add PDO to sync manager assignment if first entry
-      if first_entry_from_pdo? do
-        config_pdo_assign_add_internal(updated_data, sync_index, pdo_index)
-      end
 
       # Add entry to PDO mapping
       config_pdo_mapping_add_internal(
@@ -772,8 +757,7 @@ defmodule EtherCAT.Slave do
         entry_bit_length
       )
 
-      # Register entry with domain
-      # Use semantic name if set, otherwise use "s<position>" format
+      # Generate unique name and register with domain
       slave_identifier =
         case updated_data.name do
           nil -> "s#{updated_data.position}"
@@ -792,25 +776,9 @@ defmodule EtherCAT.Slave do
         pdo_direction
       )
 
-      # Update tracking structures
-      updated_registrations =
-        Map.update(
-          updated_data.pdo_registrations,
-          pdo_name,
-          %{domain: domain_name, entries: MapSet.new([entry_name])},
-          fn reg -> %{reg | entries: MapSet.put(reg.entries, entry_name)} end
-        )
+      Logger.debug("Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})")
 
-      final_data = %{
-        updated_data
-        | pdo_registrations: updated_registrations
-      }
-
-      Logger.debug(
-        "Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})"
-      )
-
-      {:ok, unique_name, final_data}
+      {:ok, unique_name, updated_data}
     end
   end
 
@@ -855,8 +823,8 @@ defmodule EtherCAT.Slave do
     end
   end
 
-  # Prepares slave for incremental entry/PDO registration by clearing existing configuration
-  defp clear_all_pdo_config(data) do
+  # Configures all sync managers upfront based on driver PDO info
+  defp configure_all_sync_managers(data) do
     data.driver.list_pdos(data.driver_state)
     |> Enum.map(fn pdo_name ->
       {:ok, info} = data.driver.pdo_info(data.driver_state, pdo_name)
@@ -867,16 +835,15 @@ defmodule EtherCAT.Slave do
       sync_idx
     end)
     |> Enum.each(fn {sync_index, infos} ->
-      # Get sync manager config from first PDO in this sync
+      # Get sync manager config from first PDO
       {_sync_idx, direction, watchdog} = hd(infos).sync_manager
 
-      # Configure sync manager with direction and watchdog settings
+      # Configure sync manager
       config_sync_manager_internal(data, sync_index, direction, watchdog)
 
-      # Clear all PDO assignments from this sync manager
+      # Clear PDO assignments and mappings (prepare for registration)
       config_pdo_assign_clear_internal(data, sync_index)
 
-      # Clear mappings for all PDOs in this sync manager
       infos
       |> Enum.map(& &1.pdo_index)
       |> Enum.uniq()
