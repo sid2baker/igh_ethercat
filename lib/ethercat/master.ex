@@ -503,9 +503,15 @@ defmodule EtherCAT.Master do
   end
 
   # Gateway for domain operations in operational state
-  def operational({:call, from}, {:domain_set_value, domain_ref, name, value}, _data) do
+  def operational({:call, from}, {:domain_set_value, domain_ref, name, value}, _data)
+      when is_binary(value) do
     result = Nif.set_value(domain_ref, name, value)
     {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def operational({:call, from}, {:domain_set_value, _domain_ref, name, value}, _data) do
+    {:keep_state_and_data,
+     [{:reply, from, {:error, {:invalid_value_type, name, "Expected binary, got: #{inspect(value)}"}}}]}
   end
 
   def operational({:call, from}, {:domain_get_value, domain_ref, name}, _data) do

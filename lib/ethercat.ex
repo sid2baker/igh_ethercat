@@ -116,13 +116,7 @@ defmodule EtherCAT do
   @spec register_entry(pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
           {:ok, PDOEntry.t()} | {:error, term()}
   def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain) do
-    case Slave.register_entry(slave, pdo_name, entry_name, domain) do
-      {:ok, {unique_name, domain_pid}} ->
-        {:ok, PDOEntry.new(domain_pid, unique_name)}
-
-      {:error, _reason} = error ->
-        error
-    end
+    Slave.register_entry(slave, pdo_name, entry_name, domain)
   end
 
   @doc """
@@ -153,18 +147,7 @@ defmodule EtherCAT do
   @spec register_entries(pid(), list(), Slave.domain()) ::
           {:ok, [PDOEntry.t()]} | {:error, term()}
   def register_entries(slave, entries, default_domain \\ :default_domain) do
-    case Slave.register_entries(slave, entries, default_domain) do
-      {:ok, entry_infos} ->
-        handles =
-          Enum.map(entry_infos, fn {unique_name, domain_pid} ->
-            PDOEntry.new(domain_pid, unique_name)
-          end)
-
-        {:ok, handles}
-
-      {:error, _reason} = error ->
-        error
-    end
+    Slave.register_entries(slave, entries, default_domain)
   end
 
   @doc """
@@ -206,40 +189,34 @@ defmodule EtherCAT do
         error
 
       nil ->
-        # Each result contains {:ok, [{name, pid}, ...]}, so flatten and convert to handles
-        handles =
-          results
-          |> Enum.flat_map(fn {:ok, entry_infos} -> entry_infos end)
-          |> Enum.map(fn {unique_name, domain_pid} ->
-            PDOEntry.new(domain_pid, unique_name)
-          end)
-
+        # Each result contains {:ok, [pdo_entry_structs]}, so flatten
+        handles = Enum.flat_map(results, fn {:ok, pdo_entries} -> pdo_entries end)
         {:ok, handles}
     end
   end
 
   @doc "Reads PDO entry value from handle."
   @spec read(PDOEntry.t()) :: {:ok, term()} | {:error, term()}
-  def read(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
-    Domain.get_pdo_value(domain_pid, name)
+  def read(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
+    Slave.read_entry(slave_pid, pdo_name, entry_name)
   end
 
   @doc "Writes value to PDO entry handle."
   @spec write(PDOEntry.t(), term()) :: :ok | {:error, term()}
-  def write(%PDOEntry{domain_pid: domain_pid, unique_name: name}, value) do
-    Domain.set_pdo_value(domain_pid, name, value)
+  def write(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}, value) do
+    Slave.write_entry(slave_pid, pdo_name, entry_name, value)
   end
 
   @doc "Subscribes to PDO entry change notifications."
   @spec watch(PDOEntry.t()) :: :ok | {:error, term()}
-  def watch(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
-    Domain.subscribe(domain_pid, self(), name)
+  def watch(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
+    Slave.watch_entry(slave_pid, pdo_name, entry_name, self())
   end
 
   @doc "Unsubscribes from PDO entry change notifications."
   @spec unwatch(PDOEntry.t()) :: :ok | {:error, term()}
-  def unwatch(%PDOEntry{domain_pid: domain_pid, unique_name: name}) do
-    Domain.unsubscribe(domain_pid, self(), name)
+  def unwatch(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
+    Slave.unwatch_entry(slave_pid, pdo_name, entry_name, self())
   end
 
   @doc "Starts cyclic communication. Locks configuration - no changes allowed after this."

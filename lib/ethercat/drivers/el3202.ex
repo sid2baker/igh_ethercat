@@ -86,6 +86,34 @@ defmodule EtherCAT.Drivers.EL3202 do
   end
 
   # ============================================================================
+  # Encode/Decode Callbacks
+  # ============================================================================
+
+  # Decode temperature value from raw int16 to degrees Celsius
+  # The EL3202 provides temperature in units of 0.1°C
+  @impl true
+  def decode_value(_state, _pdo_name, :value, <<raw::little-signed-16>>) do
+    celsius = raw / 10.0
+    {:ok, celsius}
+  end
+
+  # All other entries use default encoding/decoding
+  @impl true
+  def decode_value(_state, _pdo_name, _entry_name, _data), do: :default
+
+  # Encode temperature value from degrees Celsius to raw int16
+  # The EL3202 expects temperature in units of 0.1°C
+  @impl true
+  def encode_value(_state, _pdo_name, :value, celsius) when is_number(celsius) do
+    raw = trunc(celsius * 10)
+    {:ok, <<raw::little-signed-16>>}
+  end
+
+  # All other entries use default encoding/decoding
+  @impl true
+  def encode_value(_state, _pdo_name, _entry_name, _value), do: :default
+
+  # ============================================================================
   # Private Configuration Helpers
   # ============================================================================
 
