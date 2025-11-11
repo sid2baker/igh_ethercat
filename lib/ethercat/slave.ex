@@ -24,18 +24,18 @@ defmodule EtherCAT.Slave do
       # Register just the temperature value from channel 1
       {:ok, handle} = Slave.register_entry(slave, :ch1, :value)
 
-      # Register multiple specific entries
+      # Register multiple specific entries (use EtherCAT module)
       {:ok, [val_handle, err_handle]} =
-        Slave.register_entries(slave, [
+        EtherCAT.register_entries(slave, [
           {:ch1, :value},
           {:ch1, :error}
         ])
 
   ### PDO-Level (Convenience)
-  Register all entries in a PDO at once:
+  Register all entries in a PDO at once (use EtherCAT module):
 
       # Register all 6 entries from channel 1
-      {:ok, handles} = Slave.register_pdo(slave, :ch1)
+      {:ok, handles} = EtherCAT.register_pdos(slave, [:ch1])
 
   ## Multi-Domain Registration
 
@@ -285,132 +285,39 @@ defmodule EtherCAT.Slave do
   ## Example
 
       # Register only the temperature value, skip error flags
-      {:ok, {name, domain_pid}} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
+      {:ok, handle} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
 
       # Use with EtherCAT.read/write/watch
-      handle = PDOEntry.new(domain_pid, name)
       {:ok, temp} = EtherCAT.read(handle)
   """
   @spec register_entry(pid(), pdo_name(), entry_name(), domain(), timeout()) ::
-          {:ok, {String.t(), pid()}} | {:error, term()}
+          {:ok, PDOEntry.t()} | {:error, term()}
   def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain, timeout \\ 10_000) do
     :gen_statem.call(slave, {:register_entry, pdo_name, entry_name, domain}, timeout)
   end
 
   @doc """
-  Registers multiple PDO entries in a single call.
+  Gets the list of entry names available in a PDO.
 
-  Convenience function for registering several entries at once.
-
-  ## Parameters
-  - `slave` - The slave process PID
-  - `entries` - List of `{pdo_name, entry_name}` or `{pdo_name, entry_name, domain}` tuples
-  - `default_domain` - Domain to use when not specified per entry (default: `:default_domain`)
-  - `timeout` - Call timeout in milliseconds (default: 10_000)
-
-  ## Returns
-  - `{:ok, [{unique_name, domain_pid}]}` - List of entry identifiers and domain pids
-  - `{:error, reason}` - Error if any registration fails
-
-  ## Example
-
-      # All to default domain
-      {:ok, entries} = Slave.register_entries(slave, [
-        {:ch1, :value},
-        {:ch1, :error},
-        {:ch2, :value}
-      ])
-
-      # Different domains per entry
-      {:ok, entries} = Slave.register_entries(slave, [
-        {:ch1, :value, :fast_domain},
-        {:ch2, :value, :slow_domain}
-      ])
-  """
-  @spec register_entries(pid(), list(), domain(), timeout()) ::
-          {:ok, [{String.t(), pid()}]} | {:error, term()}
-  def register_entries(slave, entries, default_domain \\ :default_domain, timeout \\ 10_000)
-      when is_list(entries) do
-    results =
-      Enum.map(entries, fn
-        {pdo_name, entry_name} ->
-          register_entry(slave, pdo_name, entry_name, default_domain, timeout)
-
-        {pdo_name, entry_name, domain} ->
-          register_entry(slave, pdo_name, entry_name, domain, timeout)
-      end)
-
-    # Check if any failed
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
-      {:error, _} = error -> error
-      nil -> {:ok, Enum.map(results, fn {:ok, entry_info} -> entry_info end)}
-    end
-  end
-
-  @doc """
-  Registers a PDO (with all its entries) to a domain for cyclic data exchange.
-
-  This is the convenient registration API - register all entries in a PDO at once.
-
-  This function incrementally configures the slave's sync managers and PDO mappings
-  based on the driver's configuration, then registers all PDO entries with the specified
-  domain for real-time I/O.
-
-  **IMPORTANT:**
-  - You must call `Slave.configure/2` before calling this function.
-  - This registers all entries defined in the PDO by the driver.
-  - Entries/PDOs can be registered to different domains regardless of sync manager.
-  - Each domain creates its own FMMU mapping.
+  This is a query-only function that returns the entry names without registering them.
 
   ## Parameters
   - `slave` - The slave process PID
   - `pdo_name` - PDO name (from `list_pdos/1`)
-  - `domain` - Domain identifier (default: `:default_domain`)
-  - `timeout` - Call timeout in milliseconds (default: 10_000 for configuration)
+  - `timeout` - Call timeout in milliseconds (default: 5000)
 
   ## Returns
-  - `{:ok, [{unique_name, domain_pid}]}` - List of entry info tuples for each entry
-  - `{:error, reason}` - Error if registration fails
+  - `{:ok, [entry_name]}` - List of entry names in the PDO
+  - `{:error, reason}` - Error if PDO not found
 
   ## Example
 
-      # Configure the slave first
-      :ok = Slave.configure(slave, %{})
-
-      # Register all entries in channel 1 PDO
-      {:ok, ch1_entries} = Slave.register_pdo(slave, :ch1, :fast_domain)
-      # ch1_entries = [{"slave_0:ch1:underrange", domain_pid}, {"slave_0:ch1:value", domain_pid}, ...]
+      {:ok, entries} = Slave.get_pdo_entries(slave, :ch1)
+      # entries = [:underrange, :overrange, :limit1, :limit2, :error, :value]
   """
-  @spec register_pdo(pid(), pdo_name(), domain(), timeout()) ::
-          {:ok, [{String.t(), pid()}]} | {:error, term()}
-  def register_pdo(slave, pdo_name, domain \\ :default_domain, timeout \\ 10_000) do
-    :gen_statem.call(slave, {:register_pdo, pdo_name, domain}, timeout)
-  end
-
-  @doc """
-  Convenience function to register all available PDOs to a domain.
-
-  Calls `register_pdo/3` for each PDO returned by `list_pdos/1`.
-
-  ## Returns
-  - `{:ok, [{unique_name, domain_pid}]}` - Flat list of all entry info tuples from all PDOs
-  - `{:error, reason}` - Error if any registration fails
-
-  ## Example
-
-      {:ok, entries} = Slave.register_all_pdos(slave, :fast_domain)
-  """
-  @spec register_all_pdos(pid(), domain(), timeout()) ::
-          {:ok, [{String.t(), pid()}]} | {:error, term()}
-  def register_all_pdos(slave, domain \\ :default_domain, timeout \\ 10_000) do
-    all_pdos = list_pdos(slave, timeout)
-
-    results = Enum.map(all_pdos, fn pdo -> register_pdo(slave, pdo, domain, timeout) end)
-
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
-      {:error, reason} -> {:error, reason}
-      nil -> {:ok, Enum.flat_map(results, fn {:ok, names} -> names end)}
-    end
+  @spec get_pdo_entries(pid(), pdo_name(), timeout()) :: {:ok, [entry_name()]} | {:error, term()}
+  def get_pdo_entries(slave, pdo_name, timeout \\ 5000) do
+    :gen_statem.call(slave, {:get_pdo_entries, pdo_name}, timeout)
   end
 
   @doc """
@@ -754,16 +661,6 @@ defmodule EtherCAT.Slave do
     end
   end
 
-  def configured({:call, from}, {:register_pdo, pdo_name, domain_name}, data) do
-    case do_register_pdo(pdo_name, domain_name, data) do
-      {:ok, entry_infos, updated_data} ->
-        {:keep_state, updated_data, [{:reply, from, {:ok, entry_infos}}]}
-
-      {:error, _reason} = error ->
-        {:keep_state_and_data, [{:reply, from, error}]}
-    end
-  end
-
   def configured({:call, from}, {:config_sdo, sdo_index, sdo_subindex, sdo_data}, data) do
     result =
       Master.slave_operation(
@@ -779,6 +676,17 @@ defmodule EtherCAT.Slave do
   def configured({:call, from}, :list_pdos, data) do
     pdos = data.driver.list_pdos(data.driver_state)
     {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def configured({:call, from}, {:get_pdo_entries, pdo_name}, data) do
+    case data.driver.pdo_info(data.driver_state, pdo_name) do
+      {:ok, pdo_info} ->
+        entry_names = Map.keys(pdo_info.entries)
+        {:keep_state_and_data, [{:reply, from, {:ok, entry_names}}]}
+
+      {:error, _} = error ->
+        {:keep_state_and_data, [{:reply, from, error}]}
+    end
   end
 
   def configured({:call, from}, {:get_sync_manager, sync_index}, data) do
@@ -865,6 +773,17 @@ defmodule EtherCAT.Slave do
     # Allow querying PDOs in operational state
     pdos = data.driver.list_pdos(data.driver_state)
     {:keep_state_and_data, [{:reply, from, pdos}]}
+  end
+
+  def operational({:call, from}, {:get_pdo_entries, pdo_name}, data) do
+    case data.driver.pdo_info(data.driver_state, pdo_name) do
+      {:ok, pdo_info} ->
+        entry_names = Map.keys(pdo_info.entries)
+        {:keep_state_and_data, [{:reply, from, {:ok, entry_names}}]}
+
+      {:error, _} = error ->
+        {:keep_state_and_data, [{:reply, from, error}]}
+    end
   end
 
   def operational({:call, from}, :get_name, data) do
@@ -1013,34 +932,6 @@ defmodule EtherCAT.Slave do
 
       {:ok, pdo_entry, updated_data}
     end
-  end
-
-  # Registers all entries in a PDO (convenience wrapper)
-  defp do_register_pdo(pdo_name, domain_name, data) do
-    case data.driver.pdo_info(data.driver_state, pdo_name) do
-      {:ok, pdo_info} ->
-        # Get all entry names
-        entry_names = Map.keys(pdo_info.entries)
-
-        # Register each entry
-        {final_data, entry_infos} =
-          Enum.reduce(entry_names, {data, []}, fn entry_name, {acc_data, acc_infos} ->
-            case do_register_entry(pdo_name, entry_name, domain_name, acc_data) do
-              {:ok, entry_info, updated_data} ->
-                {updated_data, [entry_info | acc_infos]}
-
-              {:error, reason} ->
-                throw({:registration_error, reason})
-            end
-          end)
-
-        {:ok, Enum.reverse(entry_infos), final_data}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  catch
-    {:registration_error, reason} -> {:error, reason}
   end
 
   # Validates that an entry exists in the PDO
