@@ -24,9 +24,9 @@ defmodule EtherCAT.Slave do
       # Register just the temperature value from channel 1
       {:ok, handle} = Slave.register_entry(slave, :ch1, :value)
 
-      # Register multiple specific entries
+      # Register multiple specific entries (use EtherCAT module)
       {:ok, [val_handle, err_handle]} =
-        Slave.register_entries(slave, [
+        EtherCAT.register_entries(slave, [
           {:ch1, :value},
           {:ch1, :error}
         ])
@@ -285,10 +285,9 @@ defmodule EtherCAT.Slave do
   ## Example
 
       # Register only the temperature value, skip error flags
-      {:ok, {name, domain_pid}} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
+      {:ok, handle} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
 
       # Use with EtherCAT.read/write/watch
-      handle = PDOEntry.new(domain_pid, name)
       {:ok, temp} = EtherCAT.read(handle)
   """
   @spec register_entry(pid(), pdo_name(), entry_name(), domain(), timeout()) ::

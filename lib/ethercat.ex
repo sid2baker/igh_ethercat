@@ -148,12 +148,21 @@ defmodule EtherCAT do
           {:ok, [PDOEntry.t()]} | {:error, term()}
   def register_entries(slave, entries, default_domain \\ :default_domain) do
     results =
-      Enum.map(entries, fn
-        {pdo_name, entry_name} ->
-          Slave.register_entry(slave, pdo_name, entry_name, default_domain)
+      Enum.map(entries, fn entry_spec ->
+        {pdo_name, entry_name, domain} =
+          case entry_spec do
+            {pdo, entry} -> {pdo, entry, default_domain}
+            {pdo, entry, dom} -> {pdo, entry, dom}
+          end
 
-        {pdo_name, entry_name, domain} ->
-          Slave.register_entry(slave, pdo_name, entry_name, domain)
+        case Slave.register_entry(slave, pdo_name, entry_name, domain) do
+          {:ok, _} = ok ->
+            ok
+
+          {:error, reason} ->
+            # Add context about which entry failed
+            {:error, {:registration_failed, pdo_name, entry_name, reason}}
+        end
       end)
 
     # Check if any failed
@@ -197,11 +206,19 @@ defmodule EtherCAT do
           {:ok, entry_names} ->
             # Register each entry in this PDO
             Enum.map(entry_names, fn entry_name ->
-              Slave.register_entry(slave, pdo_name, entry_name, domain)
+              case Slave.register_entry(slave, pdo_name, entry_name, domain) do
+                {:ok, _} = ok ->
+                  ok
+
+                {:error, reason} ->
+                  # Add context about which entry failed
+                  {:error, {:registration_failed, pdo_name, entry_name, reason}}
+              end
             end)
 
           {:error, reason} ->
-            [{:error, reason}]
+            # Add context about PDO query failure
+            [{:error, {:pdo_query_failed, pdo_name, reason}}]
         end
       end)
 
