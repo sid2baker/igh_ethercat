@@ -160,16 +160,6 @@ defmodule EtherCAT.Domain do
     GenServer.call(domain, {:register_pdo_entry, slave_config, name, entry, direction})
   end
 
-  # Infer PDO entry type from bit size
-  defp infer_entry_type(1), do: :bool
-  # Sub-byte fields (2-7 bits) are treated as uint8
-  defp infer_entry_type(size) when size >= 2 and size < 8, do: :uint8
-  defp infer_entry_type(8), do: :uint8
-  defp infer_entry_type(16), do: :uint16
-  defp infer_entry_type(32), do: :uint32
-  defp infer_entry_type(64), do: :uint64
-  defp infer_entry_type(size), do: {:unknown, size}
-
   @doc """
   Sets a PDO value in this domain.
 
@@ -334,17 +324,18 @@ defmodule EtherCAT.Domain do
   # Accept PDO registration when domain is unlocked (configuration phase)
   @impl true
   def handle_call({:register_pdo_entry, slave_config, name, entry, direction}, _from, state) do
-    # Normalize entry to include type and direction
+    # Normalize entry to include direction
+    # Entry can be {type, index, subindex, size} or {index, subindex, size}
+    # We preserve the format and just add direction
     normalized_entry =
       case entry do
         {entry_type, entry_index, entry_subindex, entry_size} when is_atom(entry_type) ->
-          # Already has explicit type
+          # Has explicit type - preserve it
           {entry_type, entry_index, entry_subindex, entry_size, direction}
 
         {entry_index, entry_subindex, entry_size} ->
-          # Infer type from size
-          entry_type = infer_entry_type(entry_size)
-          {entry_type, entry_index, entry_subindex, entry_size, direction}
+          # No type - just add direction (Domain doesn't need type info)
+          {entry_index, entry_subindex, entry_size, direction}
       end
 
     result =

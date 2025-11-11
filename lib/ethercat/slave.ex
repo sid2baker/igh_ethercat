@@ -60,7 +60,8 @@ defmodule EtherCAT.Slave do
   require Logger
   import EtherCAT.Utils
 
-  alias EtherCAT.{Master, Domain}
+  alias EtherCAT.{Master, Domain, PDOEntry}
+  alias EtherCAT.Slave.Driver
 
   defstruct [
     :driver,
@@ -76,8 +77,19 @@ defmodule EtherCAT.Slave do
     :sync_count,
     :name,
     # Tracks which PDO indices have been assigned to sync managers
-    assigned_pdos: MapSet.new()
+    assigned_pdos: MapSet.new(),
+    # Tracks registered entries with domain routing and type info
+    # Key: {pdo_name, entry_name}, Value: entry_metadata
+    entries: %{}
   ]
+
+  @type entry_metadata :: %{
+          domain_pid: pid(),
+          unique_name: String.t(),
+          type: atom(),
+          pdo_index: non_neg_integer(),
+          entry_config: tuple()
+        }
 
   @type t :: %__MODULE__{
           driver: atom() | nil,
@@ -92,7 +104,8 @@ defmodule EtherCAT.Slave do
           slave_config: reference() | nil,
           sync_count: non_neg_integer(),
           name: atom() | String.t() | nil,
-          assigned_pdos: MapSet.t(non_neg_integer())
+          assigned_pdos: MapSet.t(non_neg_integer()),
+          entries: %{{atom(), atom()} => entry_metadata()}
         }
 
   @type pdo_name :: atom() | String.t()
@@ -401,6 +414,110 @@ defmodule EtherCAT.Slave do
   end
 
   @doc """
+  Read the current value of a registered PDO entry.
+
+  Routes to the appropriate domain and uses the driver to decode the binary data.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `pdo_name` - PDO name (e.g., `:ch1`)
+  - `entry_name` - Entry name (e.g., `:value`)
+  - `timeout` - Call timeout in milliseconds (default: 5_000)
+
+  ## Returns
+  - `{:ok, value}` - Decoded value
+  - `{:error, reason}` - Error if read fails or entry not registered
+
+  ## Example
+
+      {:ok, temp} = Slave.read_entry(slave, :ch1, :value)
+  """
+  @spec read_entry(pid(), pdo_name(), entry_name(), timeout()) ::
+          {:ok, term()} | {:error, term()}
+  def read_entry(slave, pdo_name, entry_name, timeout \\ 5_000) do
+    :gen_statem.call(slave, {:read_entry, pdo_name, entry_name}, timeout)
+  end
+
+  @doc """
+  Write a value to a registered PDO entry.
+
+  Uses the driver to encode the value to binary, then routes to the appropriate domain.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `pdo_name` - PDO name (e.g., `:ch1`)
+  - `entry_name` - Entry name (e.g., `:value`)
+  - `value` - Value to write (will be encoded by driver)
+  - `timeout` - Call timeout in milliseconds (default: 5_000)
+
+  ## Returns
+  - `:ok` - Write successful
+  - `{:error, reason}` - Error if write fails or entry not registered
+
+  ## Example
+
+      :ok = Slave.write_entry(slave, :ch1, :setpoint, 25.5)
+  """
+  @spec write_entry(pid(), pdo_name(), entry_name(), term(), timeout()) ::
+          :ok | {:error, term()}
+  def write_entry(slave, pdo_name, entry_name, value, timeout \\ 5_000) do
+    :gen_statem.call(slave, {:write_entry, pdo_name, entry_name, value}, timeout)
+  end
+
+  @doc """
+  Subscribe to value changes for a registered PDO entry.
+
+  The subscriber will receive `{:pdo_value_changed, unique_name, value}` messages.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `pdo_name` - PDO name (e.g., `:ch1`)
+  - `entry_name` - Entry name (e.g., `:value`)
+  - `subscriber` - PID to receive notifications (default: calling process)
+  - `timeout` - Call timeout in milliseconds (default: 5_000)
+
+  ## Returns
+  - `:ok` - Subscription successful
+  - `{:error, reason}` - Error if subscription fails or entry not registered
+
+  ## Example
+
+      :ok = Slave.watch_entry(slave, :ch1, :value)
+      receive do
+        {:pdo_value_changed, _name, new_value} -> IO.puts("Value: #{new_value}")
+      end
+  """
+  @spec watch_entry(pid(), pdo_name(), entry_name(), pid(), timeout()) ::
+          :ok | {:error, term()}
+  def watch_entry(slave, pdo_name, entry_name, subscriber \\ self(), timeout \\ 5_000) do
+    :gen_statem.call(slave, {:watch_entry, pdo_name, entry_name, subscriber}, timeout)
+  end
+
+  @doc """
+  Unsubscribe from value changes for a registered PDO entry.
+
+  ## Parameters
+  - `slave` - The slave process PID
+  - `pdo_name` - PDO name (e.g., `:ch1`)
+  - `entry_name` - Entry name (e.g., `:value`)
+  - `subscriber` - PID to unsubscribe (default: calling process)
+  - `timeout` - Call timeout in milliseconds (default: 5_000)
+
+  ## Returns
+  - `:ok` - Unsubscription successful
+  - `{:error, reason}` - Error if unsubscription fails or entry not registered
+
+  ## Example
+
+      :ok = Slave.unwatch_entry(slave, :ch1, :value)
+  """
+  @spec unwatch_entry(pid(), pdo_name(), entry_name(), pid(), timeout()) ::
+          :ok | {:error, term()}
+  def unwatch_entry(slave, pdo_name, entry_name, subscriber \\ self(), timeout \\ 5_000) do
+    :gen_statem.call(slave, {:unwatch_entry, pdo_name, entry_name, subscriber}, timeout)
+  end
+
+  @doc """
   Returns the current state of the slave.
 
   ## Returns
@@ -697,6 +814,34 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, :configured}]}
   end
 
+  def configured({:call, from}, {:read_entry, pdo_name, entry_name}, data) do
+    case do_read_entry(pdo_name, entry_name, data) do
+      {:ok, value} -> {:keep_state_and_data, [{:reply, from, {:ok, value}}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def configured({:call, from}, {:write_entry, pdo_name, entry_name, value}, data) do
+    case do_write_entry(pdo_name, entry_name, value, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def configured({:call, from}, {:watch_entry, pdo_name, entry_name, subscriber}, data) do
+    case do_watch_entry(pdo_name, entry_name, subscriber, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def configured({:call, from}, {:unwatch_entry, pdo_name, entry_name, subscriber}, data) do
+    case do_unwatch_entry(pdo_name, entry_name, subscriber, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
   def configured({:call, from}, :lock, data) do
     Logger.info("Slave #{data.position} locked, transitioning to :operational")
     {:next_state, :operational, data, [{:reply, from, :ok}]}
@@ -734,6 +879,34 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, data.slave_config}]}
   end
 
+  def operational({:call, from}, {:read_entry, pdo_name, entry_name}, data) do
+    case do_read_entry(pdo_name, entry_name, data) do
+      {:ok, value} -> {:keep_state_and_data, [{:reply, from, {:ok, value}}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def operational({:call, from}, {:write_entry, pdo_name, entry_name, value}, data) do
+    case do_write_entry(pdo_name, entry_name, value, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def operational({:call, from}, {:watch_entry, pdo_name, entry_name, subscriber}, data) do
+    case do_watch_entry(pdo_name, entry_name, subscriber, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
+  def operational({:call, from}, {:unwatch_entry, pdo_name, entry_name, subscriber}, data) do
+    case do_unwatch_entry(pdo_name, entry_name, subscriber, data) do
+      :ok -> {:keep_state_and_data, [{:reply, from, :ok}]}
+      {:error, _} = error -> {:keep_state_and_data, [{:reply, from, error}]}
+    end
+  end
+
   def operational({:call, from}, _request, data) do
     {:keep_state_and_data,
      [
@@ -757,10 +930,10 @@ defmodule EtherCAT.Slave do
       # Handle both 3-tuple and 4-tuple (with explicit type) formats
       entry = pdo_info.entries[entry_name]
 
-      {entry_index, entry_subindex, entry_bit_length} =
+      {entry_type, entry_index, entry_subindex, entry_bit_length} =
         case entry do
-          {_type, index, subindex, bit_length} -> {index, subindex, bit_length}
-          {index, subindex, bit_length} -> {index, subindex, bit_length}
+          {type, index, subindex, bit_length} -> {type, index, subindex, bit_length}
+          {index, subindex, bit_length} -> {Driver.infer_type_from_bit_length(bit_length), index, subindex, bit_length}
         end
 
       # Check if device supports PDO configuration
@@ -816,7 +989,21 @@ defmodule EtherCAT.Slave do
 
       Logger.debug("Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})")
 
-      {:ok, {unique_name, domain_pid}, updated_data}
+      # Store entry metadata in state
+      entry_metadata = %{
+        domain_pid: domain_pid,
+        unique_name: unique_name,
+        type: entry_type,
+        pdo_index: pdo_index,
+        entry_config: entry
+      }
+
+      updated_data = %{updated_data | entries: Map.put(updated_data.entries, {pdo_name, entry_name}, entry_metadata)}
+
+      # Return PDOEntry struct
+      pdo_entry = PDOEntry.new(self(), pdo_name, entry_name)
+
+      {:ok, pdo_entry, updated_data}
     end
   end
 
@@ -856,6 +1043,79 @@ defmodule EtherCAT.Slave do
       available = Map.keys(pdo_info.entries) |> Enum.join(", ")
 
       {:error, {:entry_not_found, entry_name, "Available entries: #{available}"}}
+    end
+  end
+
+  # Read entry value - routes to domain and decodes using driver
+  defp do_read_entry(pdo_name, entry_name, data) do
+    case Map.fetch(data.entries, {pdo_name, entry_name}) do
+      {:ok, metadata} ->
+        # Read binary from domain
+        case Domain.get_pdo_value(metadata.domain_pid, metadata.unique_name) do
+          {:ok, binary_data} ->
+            # Decode using driver
+            case data.driver.decode_value(data.driver_state, pdo_name, entry_name, binary_data) do
+              {:ok, value} -> {:ok, value}
+              :default -> Driver.decode_pdo_value(metadata.type, binary_data)
+              {:error, _} = error -> error
+            end
+
+          {:error, _} = error ->
+            error
+        end
+
+      :error ->
+        {:error, {:entry_not_registered, pdo_name, entry_name}}
+    end
+  end
+
+  # Write entry value - encodes using driver and routes to domain
+  defp do_write_entry(pdo_name, entry_name, value, data) do
+    case Map.fetch(data.entries, {pdo_name, entry_name}) do
+      {:ok, metadata} ->
+        # Encode using driver
+        case data.driver.encode_value(data.driver_state, pdo_name, entry_name, value) do
+          {:ok, binary_data} ->
+            # Write binary to domain
+            Domain.set_pdo_value(metadata.domain_pid, metadata.unique_name, binary_data)
+
+          :default ->
+            case Driver.encode_pdo_value(metadata.type, value) do
+              {:ok, binary_data} ->
+                Domain.set_pdo_value(metadata.domain_pid, metadata.unique_name, binary_data)
+
+              {:error, _} = error ->
+                error
+            end
+
+          {:error, _} = error ->
+            error
+        end
+
+      :error ->
+        {:error, {:entry_not_registered, pdo_name, entry_name}}
+    end
+  end
+
+  # Subscribe to entry value changes
+  defp do_watch_entry(pdo_name, entry_name, subscriber, data) do
+    case Map.fetch(data.entries, {pdo_name, entry_name}) do
+      {:ok, metadata} ->
+        Domain.subscribe(metadata.domain_pid, subscriber, metadata.unique_name)
+
+      :error ->
+        {:error, {:entry_not_registered, pdo_name, entry_name}}
+    end
+  end
+
+  # Unsubscribe from entry value changes
+  defp do_unwatch_entry(pdo_name, entry_name, subscriber, data) do
+    case Map.fetch(data.entries, {pdo_name, entry_name}) do
+      {:ok, metadata} ->
+        Domain.unsubscribe(metadata.domain_pid, subscriber, metadata.unique_name)
+
+      :error ->
+        {:error, {:entry_not_registered, pdo_name, entry_name}}
     end
   end
 

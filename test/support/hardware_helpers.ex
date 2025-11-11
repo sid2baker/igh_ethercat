@@ -30,11 +30,17 @@ defmodule HardwareHelpers do
     assert actual_value == expected_value,
            "Loopback failed: expected #{inspect(expected_value)}, got #{inspect(actual_value)}"
 
-    Logger.debug(
-      "Loopback OK: #{output_pdo.unique_name} -> #{input_pdo.unique_name} = #{inspect(expected_value)}"
-    )
+    output_name = format_pdo_name(output_pdo)
+    input_name = format_pdo_name(input_pdo)
+
+    Logger.debug("Loopback OK: #{output_name} -> #{input_name} = #{inspect(expected_value)}")
 
     :ok
+  end
+
+  # Helper to format PDOEntry for logging
+  defp format_pdo_name(%{pdo_name: pdo_name, entry_name: entry_name}) do
+    "#{pdo_name}:#{entry_name}"
   end
 
   @doc """

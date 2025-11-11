@@ -54,14 +54,15 @@ defmodule Hardware.EL3202Test do
 
     # Read channel 1 temperature
     Logger.info("\n=== Channel 1 (120Ω resistor) ===")
-    ch1_value = read_pdo_entry(pdo_handles, "ch1:value")
-    ch1_error = read_pdo_entry(pdo_handles, "ch1:error")
-    ch1_underrange = read_pdo_entry(pdo_handles, "ch1:underrange")
-    ch1_overrange = read_pdo_entry(pdo_handles, "ch1:overrange")
+    ch1_value = read_pdo_entry(pdo_handles, :ch1, :value)
+    ch1_error = read_pdo_entry(pdo_handles, :ch1, :error)
+    ch1_underrange = read_pdo_entry(pdo_handles, :ch1, :underrange)
+    ch1_overrange = read_pdo_entry(pdo_handles, :ch1, :overrange)
 
     if ch1_value do
-      temp_c = ch1_value / 10.0
-      Logger.info("  Value: #{ch1_value} (#{temp_c}°C)")
+      # Driver now returns temperature in Celsius (auto-scaled from raw int16)
+      temp_c = ch1_value
+      Logger.info("  Value: #{temp_c}°C")
       Logger.info("  Error: #{ch1_error}")
       Logger.info("  Underrange: #{ch1_underrange}")
       Logger.info("  Overrange: #{ch1_overrange}")
@@ -73,14 +74,15 @@ defmodule Hardware.EL3202Test do
 
     # Read channel 2 temperature
     Logger.info("\n=== Channel 2 (100Ω resistor) ===")
-    ch2_value = read_pdo_entry(pdo_handles, "ch2:value")
-    ch2_error = read_pdo_entry(pdo_handles, "ch2:error")
-    ch2_underrange = read_pdo_entry(pdo_handles, "ch2:underrange")
-    ch2_overrange = read_pdo_entry(pdo_handles, "ch2:overrange")
+    ch2_value = read_pdo_entry(pdo_handles, :ch2, :value)
+    ch2_error = read_pdo_entry(pdo_handles, :ch2, :error)
+    ch2_underrange = read_pdo_entry(pdo_handles, :ch2, :underrange)
+    ch2_overrange = read_pdo_entry(pdo_handles, :ch2, :overrange)
 
     if ch2_value do
-      temp_c = ch2_value / 10.0
-      Logger.info("  Value: #{ch2_value} (#{temp_c}°C)")
+      # Driver now returns temperature in Celsius (auto-scaled from raw int16)
+      temp_c = ch2_value
+      Logger.info("  Value: #{temp_c}°C")
       Logger.info("  Error: #{ch2_error}")
       Logger.info("  Underrange: #{ch2_underrange}")
       Logger.info("  Overrange: #{ch2_overrange}")
@@ -95,9 +97,10 @@ defmodule Hardware.EL3202Test do
     EtherCAT.close(master)
   end
 
-  # Helper to read a PDO entry by name pattern
-  defp read_pdo_entry(handles, name_pattern) do
-    handle = Enum.find(handles, fn h -> String.contains?(h.unique_name, name_pattern) end)
+  # Helper to read a PDO entry by pdo_name and entry_name
+  defp read_pdo_entry(handles, pdo_name, entry_name) do
+    handle =
+      Enum.find(handles, fn h -> h.pdo_name == pdo_name and h.entry_name == entry_name end)
 
     if handle do
       case EtherCAT.read(handle) do

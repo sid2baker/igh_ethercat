@@ -130,6 +130,77 @@ defmodule EtherCAT.Slave.Driver do
               {:ok, pdo_info()} | {:error, term()}
 
   @doc """
+  Encode a user value into binary format for writing to the device.
+
+  Called when writing a PDO entry value. The driver can perform custom transformations
+  like scaling, unit conversion, or calibration. Return `:default` to use standard
+  type-based encoding.
+
+  ## Parameters
+  - `state` - Current driver state (may contain calibration data, etc.)
+  - `pdo_name` - The PDO containing this entry
+  - `entry_name` - The specific entry being written
+  - `value` - User-provided value (integer, float, boolean, etc.)
+
+  ## Returns
+  - `{:ok, binary}` - Encoded binary data
+  - `:default` - Use default encoding based on entry type
+  - `{:error, reason}` - Encoding failed
+
+  ## Example
+
+      # Custom scaling for temperature sensor
+      def encode_value(_state, :ch1, :value, celsius) do
+        raw = trunc(celsius * 100)
+        {:ok, <<raw::little-signed-16>>}
+      end
+
+      # Use default encoding for other entries
+      def encode_value(_state, _pdo, _entry, _value), do: :default
+  """
+  @callback encode_value(
+              state :: state(),
+              pdo_name :: pdo_name(),
+              entry_name :: atom(),
+              value :: term()
+            ) :: {:ok, binary()} | :default | {:error, term()}
+
+  @doc """
+  Decode binary data from the device into a user value.
+
+  Called when reading a PDO entry value. The driver can perform custom transformations
+  like scaling, unit conversion, or calibration. Return `:default` to use standard
+  type-based decoding.
+
+  ## Parameters
+  - `state` - Current driver state (may contain calibration data, etc.)
+  - `pdo_name` - The PDO containing this entry
+  - `entry_name` - The specific entry being read
+  - `data` - Raw binary data from the device
+
+  ## Returns
+  - `{:ok, value}` - Decoded user value
+  - `:default` - Use default decoding based on entry type
+  - `{:error, reason}` - Decoding failed
+
+  ## Example
+
+      # Custom scaling for temperature sensor
+      def decode_value(_state, :ch1, :value, <<raw::little-signed-16>>) do
+        {:ok, raw / 100.0}
+      end
+
+      # Use default decoding for other entries
+      def decode_value(_state, _pdo, _entry, _data), do: :default
+  """
+  @callback decode_value(
+              state :: state(),
+              pdo_name :: pdo_name(),
+              entry_name :: atom(),
+              data :: binary()
+            ) :: {:ok, term()} | :default | {:error, term()}
+
+  @doc """
   Indicates whether this device supports dynamic PDO configuration.
 
   Returns true if the device supports changing PDO mappings (Enable PDO Configuration),
@@ -141,6 +212,115 @@ defmodule EtherCAT.Slave.Driver do
   @callback supports_pdo_config?(state :: state()) :: boolean()
 
   @optional_callbacks supports_pdo_config?: 1
+
+  # ========================================================================
+  # Public Helper Functions for Default Encoding/Decoding
+  # ========================================================================
+
+  @doc """
+  Default encoding for standard PDO entry types.
+
+  Used when driver returns `:default` from encode_value callback.
+  Handles common types based on bit length and signedness.
+  """
+  @spec encode_pdo_value(atom(), term()) :: {:ok, binary()} | {:error, term()}
+  def encode_pdo_value(:bool, value) when is_boolean(value) do
+    {:ok, <<if(value, do: 1, else: 0)>>}
+  end
+
+  def encode_pdo_value(:uint8, value) when is_integer(value) and value >= 0 and value <= 255 do
+    {:ok, <<value::little-unsigned-8>>}
+  end
+
+  def encode_pdo_value(:int8, value) when is_integer(value) and value >= -128 and value <= 127 do
+    {:ok, <<value::little-signed-8>>}
+  end
+
+  def encode_pdo_value(:uint16, value) when is_integer(value) and value >= 0 and value <= 65535 do
+    {:ok, <<value::little-unsigned-16>>}
+  end
+
+  def encode_pdo_value(:int16, value) when is_integer(value) and value >= -32768 and value <= 32767 do
+    {:ok, <<value::little-signed-16>>}
+  end
+
+  def encode_pdo_value(:uint32, value) when is_integer(value) and value >= 0 do
+    {:ok, <<value::little-unsigned-32>>}
+  end
+
+  def encode_pdo_value(:int32, value) when is_integer(value) do
+    {:ok, <<value::little-signed-32>>}
+  end
+
+  def encode_pdo_value(:uint64, value) when is_integer(value) and value >= 0 do
+    {:ok, <<value::little-unsigned-64>>}
+  end
+
+  def encode_pdo_value(:int64, value) when is_integer(value) do
+    {:ok, <<value::little-signed-64>>}
+  end
+
+  def encode_pdo_value(type, value) do
+    {:error, {:invalid_value_for_type, value, type}}
+  end
+
+  @doc """
+  Default decoding for standard PDO entry types.
+
+  Used when driver returns `:default` from decode_value callback.
+  Handles common types based on bit length and signedness.
+  """
+  @spec decode_pdo_value(atom(), binary()) :: {:ok, term()} | {:error, term()}
+  def decode_pdo_value(:bool, <<value>>) do
+    {:ok, value != 0}
+  end
+
+  def decode_pdo_value(:uint8, <<value::little-unsigned-8>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:int8, <<value::little-signed-8>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:uint16, <<value::little-unsigned-16>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:int16, <<value::little-signed-16>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:uint32, <<value::little-unsigned-32>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:int32, <<value::little-signed-32>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:uint64, <<value::little-unsigned-64>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(:int64, <<value::little-signed-64>>) do
+    {:ok, value}
+  end
+
+  def decode_pdo_value(type, data) do
+    {:error, {:invalid_data_for_type, byte_size(data), type}}
+  end
+
+  @doc """
+  Infer type from bit length for entries without explicit type annotation.
+  """
+  @spec infer_type_from_bit_length(pos_integer()) :: atom()
+  def infer_type_from_bit_length(1), do: :bool
+  def infer_type_from_bit_length(size) when size >= 2 and size < 8, do: :uint8
+  def infer_type_from_bit_length(8), do: :uint8
+  def infer_type_from_bit_length(16), do: :uint16
+  def infer_type_from_bit_length(32), do: :uint32
+  def infer_type_from_bit_length(64), do: :uint64
 
   @doc """
   Clean up driver resources when the slave process terminates.
@@ -164,7 +344,12 @@ defmodule EtherCAT.Slave.Driver do
       # Override this in your driver if the device has fixed PDO mappings
       def supports_pdo_config?(_state), do: true
 
-      defoverridable supports_pdo_config?: 1
+      # Default: Use standard type-based encoding/decoding
+      # Override these in your driver for custom transformations
+      def encode_value(_state, _pdo_name, _entry_name, _value), do: :default
+      def decode_value(_state, _pdo_name, _entry_name, _data), do: :default
+
+      defoverridable supports_pdo_config?: 1, encode_value: 4, decode_value: 4
 
       # ========================================================================
       # SDO Configuration Helpers

@@ -3,22 +3,24 @@ defmodule EtherCAT.PDOEntry do
   Handle for a registered PDO entry, used for read/write operations and subscriptions.
 
   Each PDOEntry represents a single registered entry within a PDO, providing direct access
-  to the domain process for efficient operations without Registry lookups.
+  to the slave process which routes to the appropriate domain and handles type conversion.
   """
 
-  defstruct [:domain_pid, :unique_name]
+  defstruct [:slave_pid, :pdo_name, :entry_name]
 
   @type t :: %__MODULE__{
-          domain_pid: pid(),
-          unique_name: String.t()
+          slave_pid: pid(),
+          pdo_name: atom(),
+          entry_name: atom()
         }
 
   @doc "Creates new PDO entry handle."
-  @spec new(pid(), String.t()) :: t()
-  def new(domain_pid, unique_name) do
+  @spec new(pid(), atom(), atom()) :: t()
+  def new(slave_pid, pdo_name, entry_name) do
     %__MODULE__{
-      domain_pid: domain_pid,
-      unique_name: unique_name
+      slave_pid: slave_pid,
+      pdo_name: pdo_name,
+      entry_name: entry_name
     }
   end
 end
