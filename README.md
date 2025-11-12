@@ -12,6 +12,30 @@ end
 
 **Requirements:** IgH EtherCAT Master (libethercat + kernel module), Zig 0.15.2, Elixir 1.19+, Linux
 
+## Configuration
+
+By default, the library looks for IgH EtherCAT headers and libraries at:
+- **Host:** `/usr/local/include` and `/usr/local/lib64`
+- **Nerves:** Auto-detected from `NERVES_SDK_SYSROOT`
+
+Override these paths in your application config if needed:
+
+```elixir
+# config/config.exs or config/host.exs
+config :ethercat,
+  igh_include_dir: "/opt/etherlab/include",
+  igh_lib_dir: "/opt/etherlab/lib"
+```
+
+For Nerves projects, paths are automatically detected from the sysroot. You can override them in `config/target.exs` if using a custom Nerves system:
+
+```elixir
+# config/target.exs
+config :ethercat,
+  igh_include_dir: "#{System.get_env("NERVES_SDK_SYSROOT")}/usr/include",
+  igh_lib_dir: "#{System.get_env("NERVES_SDK_SYSROOT")}/usr/lib"
+```
+
 ## Quick Start
 
 ```elixir
