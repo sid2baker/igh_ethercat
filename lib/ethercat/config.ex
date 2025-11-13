@@ -72,12 +72,33 @@ defmodule EtherCAT.Config do
         }
       end)
 
+    # Extract driver module from driver entity
+    driver =
+      case entity.driver do
+        nil -> nil
+        driver_entity -> driver_entity.module
+      end
+
+    # Convert expect entity to expected map format
+    expected =
+      case entity.expect do
+        nil -> nil
+        expect -> %{vendor: expect.vendor, product: expect.product}
+      end
+
+    # Extract config fields if config entity exists
+    config =
+      case entity.config do
+        nil -> %{}
+        config -> config.__fields__ || %{}
+      end
+
     %EtherCAT.Config.SlaveConfig{
       position: entity.position,
       name: entity.name,
-      driver: entity.driver,
-      expected: entity.expected,
-      config: entity.config || %{},
+      driver: driver,
+      expected: expected,
+      config: config,
       entries: entries
     }
   end
@@ -149,6 +170,21 @@ defmodule EtherCAT.Config do
                 ]
               }
             ],
+            driver: [
+              %Spark.Dsl.Entity{
+                name: :driver,
+                describe: "Driver module for this slave",
+                target: EtherCAT.Config.Dsl.Driver,
+                args: [:module],
+                schema: [
+                  module: [
+                    type: :atom,
+                    required: true,
+                    doc: "Driver module (e.g., EtherCAT.Drivers.EL3202)"
+                  ]
+                ]
+              }
+            ],
             config: [
               %Spark.Dsl.Entity{
                 name: :config,
@@ -158,9 +194,29 @@ defmodule EtherCAT.Config do
                 schema: [],
                 recursive_as: :config
               }
+            ],
+            expect: [
+              %Spark.Dsl.Entity{
+                name: :expect,
+                describe: "Expected vendor and product IDs for slave verification",
+                target: EtherCAT.Config.Dsl.Expect,
+                args: [],
+                schema: [
+                  vendor: [
+                    type: :non_neg_integer,
+                    required: true,
+                    doc: "Expected vendor ID"
+                  ],
+                  product: [
+                    type: :non_neg_integer,
+                    required: true,
+                    doc: "Expected product code"
+                  ]
+                ]
+              }
             ]
           ],
-          singleton_entity_keys: [:driver, :expected]
+          singleton_entity_keys: [:driver, :expect, :config]
         }
       ]
     }
