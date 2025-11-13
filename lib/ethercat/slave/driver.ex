@@ -11,15 +11,11 @@ defmodule EtherCAT.Slave.Driver do
 
   @typedoc """
   Sync manager configuration tuple: {sync_index, direction, watchdog_mode}
-
-  - sync_index: 0-15
-  - direction: 1 (output/write) or 2 (input/read)
-  - watchdog_mode: 0 (default), 1 (enabled), 2 (disabled)
   """
   @type sync_manager_config :: {
           sync_index :: non_neg_integer(),
-          direction :: 1 | 2,
-          watchdog_mode :: 0 | 1 | 2
+          direction :: :invalid | :output | :input | :count,
+          watchdog_mode :: :default | :enabled | :disabled
         }
 
   @typedoc """
@@ -527,9 +523,12 @@ defmodule EtherCAT.Slave.Driver do
             # Use PDO index as the identifier
             pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
 
+            direction = normalize_direction(sync_manager.dir)
+            watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+
             {pdo_name,
              %{
-               sync_manager: {sync_manager.index, sync_manager.dir, sync_manager.watchdog_mode},
+               sync_manager: {sync_manager.index, direction, watchdog_mode},
                pdo_index: pdo.index,
                entries: entries
              }}
@@ -538,6 +537,15 @@ defmodule EtherCAT.Slave.Driver do
         |> List.flatten()
         |> Map.new()
       end
+
+      defp normalize_direction(0), do: :invalid
+      defp normalize_direction(1), do: :output
+      defp normalize_direction(2), do: :input
+      defp normalize_direction(3), do: :count
+
+      defp normalize_watchdog_mode(0), do: :default
+      defp normalize_watchdog_mode(1), do: :enabled
+      defp normalize_watchdog_mode(2), do: :disabled
 
       # Get sync manager information from slave.
       defp get_sync_manager(ctx, sync_index) do
