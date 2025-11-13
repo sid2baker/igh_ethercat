@@ -846,16 +846,13 @@ defmodule EtherCAT.Slave do
       {sync_index, direction, _watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
 
-      # Handle both 3-tuple and 4-tuple (with explicit type) formats
-      entry = pdo_info.entries[entry_name]
-
-      {entry_type, entry_index, entry_subindex, entry_bit_length} =
-        case entry do
+      {entry_type, entry} =
+        case pdo_info.entries[entry_name] do
           {type, index, subindex, bit_length} ->
-            {type, index, subindex, bit_length}
+            {type, {index, subindex, bit_length}}
 
           {index, subindex, bit_length} ->
-            {Driver.infer_type_from_bit_length(bit_length), index, subindex, bit_length}
+            {Driver.infer_type_from_bit_length(bit_length), {index, subindex, bit_length}}
         end
 
       # Check if device supports PDO configuration
@@ -874,13 +871,7 @@ defmodule EtherCAT.Slave do
       updated_data =
         if supports_pdo_config do
           # Add entry to PDO mapping (dynamic configuration)
-          config_pdo_mapping_add_internal(
-            updated_data,
-            pdo_index,
-            entry_index,
-            entry_subindex,
-            entry_bit_length
-          )
+          config_pdo_mapping_add_internal(updated_data, pdo_index, entry)
 
           updated_data
         else
@@ -898,17 +889,13 @@ defmodule EtherCAT.Slave do
         end
 
       unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
-      pdo_direction = ethercat_direction_to_atom(direction)
-
-      # Pass the entry tuple without type to domain (domain only needs index/subindex/size)
-      domain_entry = {entry_index, entry_subindex, entry_bit_length}
 
       Domain.register_pdo_entry(
         domain_pid,
         updated_data.slave_config,
         unique_name,
-        domain_entry,
-        pdo_direction
+        entry,
+        direction
       )
 
       Logger.debug("Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})")
@@ -1095,7 +1082,7 @@ defmodule EtherCAT.Slave do
     ])
   end
 
-  defp config_pdo_mapping_add_internal(data, pdo_index, entry_index, entry_subindex, entry_size) do
+  defp config_pdo_mapping_add_internal(data, pdo_index, {entry_index, entry_subindex, entry_size}) do
     Master.slave_operation(data.master, data.position, :config_pdo_mapping_add, [
       data.slave_config,
       pdo_index,
@@ -1104,10 +1091,4 @@ defmodule EtherCAT.Slave do
       entry_size
     ])
   end
-
-  # Converts EtherCAT direction integer to atom for domain registration
-  # 1 = EC_DIR_OUTPUT (master writes, slave reads)
-  # 2 = EC_DIR_INPUT (master reads, slave writes)
-  defp ethercat_direction_to_atom(2), do: :input
-  defp ethercat_direction_to_atom(_), do: :output
 end

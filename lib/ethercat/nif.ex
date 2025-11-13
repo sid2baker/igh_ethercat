@@ -49,7 +49,6 @@ defmodule EtherCAT.Nif do
       slave_config_pdo_mapping_add: [],
       slave_config_pdo_mapping_clear: [],
       slave_config_reg_pdo_entry: [],
-      slave_config_reg_pdo_entry_pos: [],
       slave_config_sdo: [],
       master_get_sync_manager: [],
       master_get_pdo: [],
@@ -126,10 +125,19 @@ defmodule EtherCAT.Nif do
   // TYPE DEFINITIONS
   // ============================================================================
 
-  /// PDO direction
+  /// PDO direction (maps to ec_direction_t)
   pub const PdoDirection = enum {
-      input,
+      invalid,
       output,
+      input,
+      count,
+  };
+
+  /// Sync manager watchdog mode (maps to ec_watchdog_mode_t)
+  pub const WatchdogMode = enum {
+      default,
+      enabled,
+      disabled,
   };
 
   /// PDO entry descriptor - runtime description of a field in domain data
@@ -690,8 +698,8 @@ defmodule EtherCAT.Nif do
 
   /// Configure a sync manager for the slave
   /// Let it crash: Invalid configuration is a programming error
-  pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: ecrt.ec_direction_t, watchdog_mode: ecrt.ec_watchdog_mode_t) !void {
-      const result = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, direction, watchdog_mode);
+  pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: PdoDirection, watchdog_mode: WatchdogMode) !void {
+      const result = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, @intFromEnum(direction), @intFromEnum(watchdog_mode));
       if (result != 0) return MasterError.SlaveConfigError;
   }
 
@@ -733,7 +741,7 @@ defmodule EtherCAT.Nif do
       entry_subindex: u8,
       bit_length: usize,
       domain_accessor: DomainAccessorResource,
-      direction: beam.term
+      direction: PdoDirection
   ) !usize {
       const accessor = domain_accessor.unpack();
       var bit_position: c_uint = 0;
@@ -748,66 +756,8 @@ defmodule EtherCAT.Nif do
       if (result >= 0) {
           const bit_offset = @as(usize, @intCast(result)) * 8 + bit_position;
 
-          // Parse direction from Elixir atom by comparing with known atoms
-          const input_atom = beam.make(.input, .{});
-          const output_atom = beam.make(.output, .{});
-
-          const pdo_direction = if (beam.compare(direction, input_atom) == .eq)
-              PdoDirection.input
-          else if (beam.compare(direction, output_atom) == .eq)
-              PdoDirection.output
-          else
-              return error.InvalidDirection;
-
           // Add entry to domain layout
-          try accessor.layout.addEntry(name, bit_offset, bit_length, pdo_direction);
-
-          return bit_offset;
-      } else {
-          return MasterError.PdoRegError;
-      }
-  }
-
-  /// Register a PDO entry by position and add to domain layout
-  /// Let it crash: Invalid PDO entry position is a programming error
-  /// Returns the offset in bits within the domain data
-  pub fn slave_config_reg_pdo_entry_pos(
-      slave_config: SlaveConfigResource,
-      name: []const u8,
-      sync_index: u8,
-      pdo_pos: c_uint,
-      entry_pos: c_uint,
-      bit_length: usize,
-      domain_accessor: DomainAccessorResource,
-      direction: beam.term
-  ) !usize {
-      const accessor = domain_accessor.unpack();
-      var bit_position: c_uint = 0;
-      const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry_pos(
-          slave_config.unpack(),
-          sync_index,
-          pdo_pos,
-          entry_pos,
-          accessor.getDomain(),
-          &bit_position
-      );
-
-      if (result >= 0) {
-          const bit_offset = @as(usize, @intCast(result)) * 8 + bit_position;
-
-          // Parse direction from Elixir atom by comparing with known atoms
-          const input_atom = beam.make(.input, .{});
-          const output_atom = beam.make(.output, .{});
-
-          const pdo_direction = if (beam.compare(direction, input_atom) == .eq)
-              PdoDirection.input
-          else if (beam.compare(direction, output_atom) == .eq)
-              PdoDirection.output
-          else
-              return error.InvalidDirection;
-
-          // Add entry to domain layout
-          try accessor.layout.addEntry(name, bit_offset, bit_length, pdo_direction);
+          try accessor.layout.addEntry(name, bit_offset, bit_length, direction);
 
           return bit_offset;
       } else {

@@ -49,7 +49,7 @@ defmodule EtherCAT.Drivers.EL3202 do
       :ch1 ->
         {:ok,
          %{
-           sync_manager: {3, 2, 0},
+           sync_manager: {3, :input, :default},
            pdo_index: 0x1A00,
            entries: %{
              underrange: {0x6000, 0x01, 1},
@@ -67,7 +67,7 @@ defmodule EtherCAT.Drivers.EL3202 do
       :ch2 ->
         {:ok,
          %{
-           sync_manager: {3, 2, 0},
+           sync_manager: {3, :input, :default},
            pdo_index: 0x1A01,
            entries: %{
              underrange: {0x6010, 0x01, 1},
