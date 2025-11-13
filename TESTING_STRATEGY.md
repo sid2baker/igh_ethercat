@@ -135,17 +135,14 @@ static ec_sync_info_t syncs[] = {
     {0xff}
 };
 
-static ec_pdo_entry_info_t rx_entries[] = {
-    {0x7000, 0x01, 8}, // Input byte
+static ec_pdo_entry_info_t channel1_entries[] = {
+    {0x6000, 0x01, 8}, // Output byte (master writes)
+    {0x7000, 0x01, 8}, // Input byte (master reads)
 };
 
-static ec_pdo_entry_info_t tx_entries[] = {
-    {0x6000, 0x01, 8}, // Output byte
-};
-
-static ec_pdo_info_t pdos[] = {
-    {0x1600, 1, rx_entries}, // RxPDO
-    {0x1A00, 1, tx_entries}, // TxPDO
+static ec_pdo_info_t channel1_pdos[] = {
+    {0x1600, 1, &channel1_entries[0]}, // RxPDO (master → slave)
+    {0x1A00, 1, &channel1_entries[1]}, // TxPDO (slave → master)
 };
 
 int main(int argc, char **argv) {
@@ -153,7 +150,7 @@ int main(int argc, char **argv) {
     ec_domain_t *domain;
     uint8_t *domain_pd;
 
-    unsigned int offset_rx, offset_tx;
+    unsigned int bit_pos_rx, bit_pos_tx;
     uint8_t input_byte = 0;
 
     printf("[FakeSlave] Starting simple I/O slave (0x%04X:0x%04X)\n",
@@ -182,9 +179,29 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // Assign PDOs
-    if (ecrt_slave_config_pdos(sc, EC_END, syncs)) {
-        fprintf(stderr, "[FakeSlave] Failed to configure PDOs\n");
+    // Assign PDOs to sync managers
+    if (ecrt_slave_config_pdo_assign_clear(sc, 0) < 0 ||
+        ecrt_slave_config_pdo_assign_add(sc, 0, 0x1600) < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to assign RxPDO\n");
+        return -1;
+    }
+
+    if (ecrt_slave_config_pdo_assign_clear(sc, 1) < 0 ||
+        ecrt_slave_config_pdo_assign_add(sc, 1, 0x1A00) < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to assign TxPDO\n");
+        return -1;
+    }
+
+    // Configure PDO mappings
+    if (ecrt_slave_config_pdo_mapping_clear(sc, 0x1600) < 0 ||
+        ecrt_slave_config_pdo_mapping_add(sc, 0x1600, 0x6000, 0x01, 8) < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to map RxPDO\n");
+        return -1;
+    }
+
+    if (ecrt_slave_config_pdo_mapping_clear(sc, 0x1A00) < 0 ||
+        ecrt_slave_config_pdo_mapping_add(sc, 0x1A00, 0x7000, 0x01, 8) < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to map TxPDO\n");
         return -1;
     }
 
@@ -195,12 +212,22 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // Register PDO entries
-    if (ecrt_domain_reg_pdo_entry_list(domain, sc, 0, &offset_rx) ||
-        ecrt_domain_reg_pdo_entry_list(domain, sc, 1, &offset_tx)) {
-        fprintf(stderr, "[FakeSlave] Failed to register entries\n");
+    // Register PDO entries to domain
+    // Returns byte offset in domain, bit position via pointer
+    int byte_offset_rx = ecrt_slave_config_reg_pdo_entry(sc, 0x6000, 0x01, domain, &bit_pos_rx);
+    if (byte_offset_rx < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to register RxPDO entry\n");
         return -1;
     }
+
+    int byte_offset_tx = ecrt_slave_config_reg_pdo_entry(sc, 0x7000, 0x01, domain, &bit_pos_tx);
+    if (byte_offset_tx < 0) {
+        fprintf(stderr, "[FakeSlave] Failed to register TxPDO entry\n");
+        return -1;
+    }
+
+    unsigned int offset_rx = byte_offset_rx; // For simplicity, assuming byte-aligned
+    unsigned int offset_tx = byte_offset_tx;
 
     // Activate master
     if (ecrt_master_activate(master)) {
@@ -300,33 +327,47 @@ defmodule EtherCAT.VirtualHardwareTest do
     {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
 
     # Should discover our fake slave
-    assert length(slaves) == 1
-    [slave] = slaves
+    assert length(slaves) >= 1
 
-    # Verify slave identity
-    assert slave.vendor_id == 0xDEAD
-    assert slave.product_code == 0x0001
+    # Find our fake slave by vendor ID
+    fake_slave = Enum.find(slaves, fn s ->
+      s.vendor_id == 0xDEAD && s.product_code == 0x0001
+    end)
+
+    assert fake_slave != nil, "Fake slave not discovered"
 
     EtherCAT.close(master)
   end
 
   test "basic PDO I/O with fake slave" do
-    {:ok, master, [slave]} = EtherCAT.open(update_interval: 1000)
+    {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
 
-    # Register input/output entries
-    {:ok, input_entry} = EtherCAT.register_entry(
-      slave,
-      :rx_pdo, # 0x1600
-      :byte,   # 0x7000:01
-      :default_domain
-    )
+    # Find fake slave
+    fake_slave = Enum.find(slaves, fn s ->
+      s.vendor_id == 0xDEAD && s.product_code == 0x0001
+    end)
 
-    {:ok, output_entry} = EtherCAT.register_entry(
-      slave,
-      :tx_pdo, # 0x1A00
-      :byte,   # 0x6000:01
-      :default_domain
-    )
+    assert fake_slave != nil
+
+    # Configure slave (Generic driver will auto-discover PDOs)
+    {:ok, available_pdos} = EtherCAT.configure_slave(fake_slave, %{})
+    IO.inspect(available_pdos, label: "Discovered PDOs")
+
+    # Register all PDOs
+    {:ok, pdo_handles} = EtherCAT.register_pdos(fake_slave, available_pdos)
+
+    # Find input and output handles
+    # Generic driver creates pdo names from indices: pdo_1600, pdo_1A00
+    input_handle = Enum.find(pdo_handles, fn h ->
+      h.pdo_name == :pdo_1600 && h.entry_name == :"1"
+    end)
+
+    output_handle = Enum.find(pdo_handles, fn h ->
+      h.pdo_name == :pdo_1A00 && h.entry_name == :"1"
+    end)
+
+    assert input_handle != nil, "Input handle not found"
+    assert output_handle != nil, "Output handle not found"
 
     # Start cyclic communication
     {:ok, _domain} = EtherCAT.start_cyclic(master)
@@ -334,38 +375,48 @@ defmodule EtherCAT.VirtualHardwareTest do
     # Wait for operational state
     assert_receive {:master_state_changed, ^master, :operational}, 2000
 
-    # Write test value
-    :ok = EtherCAT.set_value(input_entry, <<0xAB>>)
+    # Write test value (master writes to 0x6000, fake slave echoes to 0x7000)
+    :ok = EtherCAT.write(input_handle, <<0xAB>>)
 
     # Fake slave echoes back, should see it in output
     Process.sleep(100)
-    {:ok, <<value>>} = EtherCAT.get_value(output_entry)
+    {:ok, <<value>>} = EtherCAT.read(output_handle)
     assert value == 0xAB
 
     # Try different value
-    :ok = EtherCAT.set_value(input_entry, <<0x42>>)
+    :ok = EtherCAT.write(input_handle, <<0x42>>)
     Process.sleep(100)
-    {:ok, <<value>>} = EtherCAT.get_value(output_entry)
+    {:ok, <<value>>} = EtherCAT.read(output_handle)
     assert value == 0x42
 
     EtherCAT.close(master)
   end
 
   test "watch entry changes with fake slave" do
-    {:ok, master, [slave]} = EtherCAT.open(update_interval: 1000)
+    {:ok, master, slaves} = EtherCAT.open(update_interval: 1000)
 
-    {:ok, output_entry} = EtherCAT.register_entry(
-      slave, :tx_pdo, :byte, :default_domain
-    )
+    fake_slave = Enum.find(slaves, fn s ->
+      s.vendor_id == 0xDEAD && s.product_code == 0x0001
+    end)
+
+    {:ok, available_pdos} = EtherCAT.configure_slave(fake_slave, %{})
+    {:ok, pdo_handles} = EtherCAT.register_pdos(fake_slave, available_pdos)
+
+    # Find output handle (slave → master)
+    output_handle = Enum.find(pdo_handles, fn h ->
+      h.pdo_name == :pdo_1A00
+    end)
+
+    assert output_handle != nil
 
     # Watch for changes
-    :ok = EtherCAT.watch_entry(output_entry)
+    :ok = EtherCAT.watch(output_handle)
 
     {:ok, _domain} = EtherCAT.start_cyclic(master)
     assert_receive {:master_state_changed, ^master, :operational}, 2000
 
     # Should receive initial value notification
-    assert_receive {:entry_changed, ^output_entry, <<_::8>>}, 1000
+    assert_receive {:entry_changed, ^output_handle, <<_::8>>}, 1000
 
     EtherCAT.close(master)
   end
