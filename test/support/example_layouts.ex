@@ -112,7 +112,7 @@ defmodule EtherCAT.ExampleLayouts do
         %SlaveConfig{
           position: 3,
           vendor_id: 0x00000002,
-          product_code: 0x13ed3052,
+          product_code: 0x13ED3052,
           name: :digital_output_el2008,
           alias: 0
         }

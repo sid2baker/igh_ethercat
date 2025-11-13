@@ -72,9 +72,6 @@ const MAX_PDO_ENTRY_BYTES = 8;
 /// Maximum number of PDO entries per domain to prevent unbounded growth
 const MAX_ENTRIES_PER_DOMAIN = 1024;
 
-/// Interval for yielding to BEAM scheduler (microseconds)
-const YIELD_INTERVAL_US = 100_000;
-
 // ============================================================================
 // TYPE DEFINITIONS
 // ============================================================================
@@ -834,12 +831,19 @@ pub fn slave_config_sdo(
 /// Change detection: Compares domain buffer with stored values, notifies BEAM
 /// processes for inputs. For outputs, writes stored values to domain buffer.
 ///
-/// BEAM integration: Yields every 100ms to prevent scheduler starvation.
-pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_accessors: []DomainAccessorResource, interval: u64) !void {
+/// BEAM integration: Yields at configurable intervals to prevent scheduler starvation.
+///
+/// ## Parameters
+/// - `master_pid` - PID of the master process
+/// - `master_resource` - Master resource reference
+/// - `domain_accessors` - List of domain accessor resources
+/// - `interval` - Cyclic task interval in microseconds
+/// - `nif_yield_interval` - Yielding interval in microseconds (default: 100_000 = 100ms)
+pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_accessors: []DomainAccessorResource, interval: u64, nif_yield_interval: u64) !void {
     const master = master_resource.unpack();
     var master_state: master_state_t = undefined;
     var prev_master_state: master_state_t = undefined;
-    const yield_interval = @divTrunc(YIELD_INTERVAL_US, interval); // Yield every 100ms
+    const yield_interval = @divTrunc(nif_yield_interval, interval); // Calculate yield interval in cycles
 
     // Initialize domain data pointers for all domain accessors
     for (domain_accessors) |domain_accessor_resource| {

@@ -20,45 +20,6 @@ defmodule EtherCAT.HardwareLayoutTest do
     end
   end
 
-  describe "generate_module/2" do
-    test "generates valid Elixir source code" do
-      layout = simple_io_layout()
-      source = HardwareLayout.generate_module(layout, module_name: "TestLayout")
-
-      assert source =~ "defmodule TestLayout"
-      assert source =~ "%EtherCAT.HardwareLayout{"
-      assert source =~ "vendor_id: 0xDEADBEEF"
-      assert source =~ "product_code: 0x1"
-      assert source =~ "def layout do"
-    end
-
-    test "includes timestamp in generated code" do
-      layout = simple_io_layout()
-      source = HardwareLayout.generate_module(layout)
-
-      assert source =~ "Generated at:"
-      assert source =~ "Auto-generated hardware layout"
-    end
-
-    test "handles multi-slave layouts" do
-      layout = multi_slave_layout()
-      source = HardwareLayout.generate_module(layout, module_name: "MultiSlaveLayout")
-
-      assert source =~ "position: 0"
-      assert source =~ "position: 1"
-      assert source =~ "position: 2"
-      assert source =~ "position: 3"
-    end
-
-    test "handles custom indentation" do
-      layout = simple_io_layout()
-      source = HardwareLayout.generate_module(layout, indent: "    ")
-
-      # Should have 4-space indentation
-      assert source =~ "    %EtherCAT.SlaveConfig{"
-    end
-  end
-
   describe "example layouts" do
     test "simple_io_layout/0 returns valid layout" do
       layout = simple_io_layout()

@@ -171,7 +171,6 @@ defmodule EtherCAT.TestHelpersTest do
 
       # This pattern requires actual hardware
       assert function_exported?(EtherCAT.HardwareLayout, :from_slaves, 1)
-      assert function_exported?(EtherCAT.HardwareLayout, :generate_module, 2)
     end
   end
 end

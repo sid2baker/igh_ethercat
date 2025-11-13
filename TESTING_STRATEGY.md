@@ -70,11 +70,8 @@ test "discover and document current hardware" do
   # Generate layout from discovered hardware
   layout = EtherCAT.HardwareLayout.from_slaves(slaves)
 
-  # Save for future use
-  source = EtherCAT.HardwareLayout.generate_module(layout,
-    module_name: "MyApp.DiscoveredLayout"
-  )
-  File.write!("test/fixtures/my_layout.ex", source)
+  # Inspect and save for future use
+  IO.inspect(layout)
 
   EtherCAT.close(master)
 end
