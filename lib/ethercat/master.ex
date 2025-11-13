@@ -180,16 +180,32 @@ defmodule EtherCAT.Master do
       # look at https://github.com/E-xyza/zigler/issues/571 for more information
       Process.exit(task_pid, :kill)
 
-      # wait till cyclic_task dies
-      :ok =
+      # FIX H5: Add timeout handling to prevent deadlocks
+      # Wait for EXIT signal with timeout
+      exit_result =
         receive do
-          {:EXIT, ^task_pid, reason} -> :ok
+          {:EXIT, ^task_pid, _exit_reason} -> :ok
+        after
+          3000 ->
+            Logger.error("Timeout waiting for cyclic task EXIT signal")
+            :timeout
         end
 
-      :ok =
-        receive do
-          :cyclic_task_died -> :ok
-        end
+      # Wait for cyclic_task_died confirmation with timeout
+      case exit_result do
+        :ok ->
+          receive do
+            :cyclic_task_died -> :ok
+          after
+            2000 ->
+              Logger.error("Timeout waiting for cyclic_task_died message")
+              :timeout
+          end
+
+        :timeout ->
+          Logger.warning("Skipping cyclic_task_died wait due to EXIT timeout")
+          :timeout
+      end
     end
 
     Logger.info("EtherCAT Master cleanup completed")
