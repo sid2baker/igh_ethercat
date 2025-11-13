@@ -4,21 +4,21 @@ defmodule EtherCAT.Nif do
   @nerves_sysroot System.get_env("NERVES_SDK_SYSROOT")
 
   @default_include_dir if @nerves_sysroot,
-                          do: Path.join(@nerves_sysroot, "usr/include"),
-                          else: "/usr/local/include"
+                         do: Path.join(@nerves_sysroot, "usr/include"),
+                         else: "/usr/local/include"
 
   @default_lib_dir if @nerves_sysroot,
-                      do: Path.join(@nerves_sysroot, "usr/lib"),
-                      else: "/usr/local/lib64"
+                     do: Path.join(@nerves_sysroot, "usr/lib"),
+                     else: "/usr/local/lib64"
 
-  @include_dir Application.compile_env(:ethercat, :igh_include_dir, @default_include_dir)
-  @lib_dir Application.compile_env(:ethercat, :igh_lib_dir, @default_lib_dir)
+  @igh_include_dir Application.compile_env(:ethercat, :igh_include_dir, @default_include_dir)
+  @igh_lib_dir Application.compile_env(:ethercat, :igh_lib_dir, @default_lib_dir)
 
   use Zig,
     otp_app: :ethercat,
     c: [
-      include_dirs: @include_dir,
-      library_dirs: [@lib_dir],
+      include_dirs: [@igh_include_dir],
+      library_dirs: [@igh_lib_dir],
       link_lib: {:system, "ethercat"}
     ],
     nifs: [

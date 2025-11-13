@@ -84,7 +84,6 @@ defmodule Hardware.FunctionalValidationTest do
         Logger.info("Master process already terminated, skipping close")
       end
 
-      :erlang.garbage_collect()
       Logger.info("=== Cleanup complete ===")
     end)
 
