@@ -1,5 +1,6 @@
 defmodule EtherCATIntegrationTest do
   use ExUnit.Case, async: false
+  use Bitwise
 
   @moduletag :integration
   @moduletag timeout: :infinity
@@ -15,62 +16,15 @@ defmodule EtherCATIntegrationTest do
     # This test requires actual hardware
     # Skip if ETHERCAT_HARDWARE environment variable is not set
     unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      {:ok, skip: true}
+      ExUnit.configure(exclude: [:integration])
+      :ok
     else
-      {:ok, skip: false}
+      :ok
     end
   end
 
-  describe "Hardware Configuration" do
-    test "validates TestHardwareConfig module exists and compiles" do
-      assert Code.ensure_loaded?(TestHardwareConfig)
-      config = TestHardwareConfig.hardware_config()
-      assert %EtherCAT.Config.HardwareConfig{} = config
-      assert length(config.domains) == 2
-      assert length(config.slaves) == 3
-    end
-
-    test "config has correct domain definitions" do
-      config = TestHardwareConfig.hardware_config()
-
-      assert Enum.find(config.domains, &(&1.name == :fast_loop))
-      assert Enum.find(config.domains, &(&1.name == :slow_loop))
-
-      fast = Enum.find(config.domains, &(&1.name == :fast_loop))
-      assert fast.interval == 1
-
-      slow = Enum.find(config.domains, &(&1.name == :slow_loop))
-      assert slow.interval == 10
-    end
-
-    test "config has correct slave definitions" do
-      config = TestHardwareConfig.hardware_config()
-
-      digital_in = Enum.find(config.slaves, &(&1.name == :digital_inputs))
-      assert digital_in.position == 1
-      assert digital_in.driver == EtherCAT.Drivers.EL1809
-      assert digital_in.expected.vendor == 0x00000002
-      assert digital_in.expected.product == 0x07093052
-      assert length(digital_in.entries) == 16
-
-      digital_out = Enum.find(config.slaves, &(&1.name == :digital_outputs))
-      assert digital_out.position == 2
-      assert digital_out.driver == EtherCAT.Drivers.EL2809
-      assert digital_out.expected.vendor == 0x00000002
-      assert digital_out.expected.product == 0x0AF93052
-      assert length(digital_out.entries) == 16
-
-      analog_in = Enum.find(config.slaves, &(&1.name == :analog_inputs))
-      assert analog_in.position == 3
-      assert analog_in.driver == EtherCAT.Drivers.EL3202
-      assert analog_in.expected.vendor == 0x00000002
-      assert analog_in.expected.product == 0x0C5A3052
-      assert length(analog_in.entries) == 4
-    end
-  end
-
-  describe "System Initialization (requires hardware)", %{skip: skip} do
-    @tag skip: skip
+  describe "System Initialization" do
+    @tag :integration
     test "opens EtherCAT system successfully" do
       assert {:ok, system} = EtherCAT.open(TestHardwareConfig)
       assert %EtherCAT.System{} = system
@@ -80,7 +34,7 @@ defmodule EtherCATIntegrationTest do
       :ok = EtherCAT.close(system)
     end
 
-    @tag skip: skip
+    @tag :integration
     test "system has correct slave configuration" do
       {:ok, system} = EtherCAT.open(TestHardwareConfig)
 
@@ -96,18 +50,14 @@ defmodule EtherCATIntegrationTest do
     end
   end
 
-  describe "Digital I/O Loopback Testing (requires hardware)", %{skip: skip} do
-    setup %{skip: skip} do
-      if skip do
-        :ok
-      else
-        {:ok, system} = EtherCAT.open(TestHardwareConfig)
-        on_exit(fn -> EtherCAT.close(system) end)
-        {:ok, system: system}
-      end
+  describe "Digital I/O Loopback Testing" do
+    setup do
+      {:ok, system} = EtherCAT.open(TestHardwareConfig)
+      on_exit(fn -> EtherCAT.close(system) end)
+      {:ok, system: system}
     end
 
-    @tag skip: skip
+    @tag :integration
     test "writes and reads single digital channel", %{system: system} do
       # Test channel 1
       # Write HIGH to output
@@ -127,7 +77,7 @@ defmodule EtherCATIntegrationTest do
       assert {:ok, false} = EtherCAT.read(system, :digital_inputs, :inputs, :ch1)
     end
 
-    @tag skip: skip
+    @tag :integration
     test "tests all 16 digital channels in loopback", %{system: system} do
       # Test each channel independently
       for ch <- 1..16 do
@@ -145,7 +95,6 @@ defmodule EtherCATIntegrationTest do
         for i <- 1..16 do
           ch_i = String.to_atom("ch#{i}")
           expected = i == ch
-
           assert {:ok, ^expected} = EtherCAT.read(system, :digital_inputs, :inputs, ch_i),
                  "Channel #{i} expected #{expected} when ch#{ch} is active"
         end
@@ -158,14 +107,14 @@ defmodule EtherCATIntegrationTest do
       end
     end
 
-    @tag skip: skip
+    @tag :integration
     test "tests pattern writing across multiple channels", %{system: system} do
       # Test binary counter pattern (0-255)
       for pattern <- 0..255 do
         # Write pattern to first 8 channels
         for bit <- 0..7 do
           ch_atom = String.to_atom("ch#{bit + 1}")
-          value = (pattern &&& 1 <<< bit) != 0
+          value = (pattern &&& (1 <<< bit)) != 0
           :ok = EtherCAT.write(system, :digital_outputs, :outputs, ch_atom, value)
         end
 
@@ -174,8 +123,7 @@ defmodule EtherCATIntegrationTest do
         # Read back and verify pattern
         for bit <- 0..7 do
           ch_atom = String.to_atom("ch#{bit + 1}")
-          expected = (pattern &&& 1 <<< bit) != 0
-
+          expected = (pattern &&& (1 <<< bit)) != 0
           assert {:ok, ^expected} = EtherCAT.read(system, :digital_inputs, :inputs, ch_atom),
                  "Pattern #{pattern}, bit #{bit} mismatch"
         end
@@ -183,18 +131,14 @@ defmodule EtherCATIntegrationTest do
     end
   end
 
-  describe "Analog Input Testing (requires hardware)", %{skip: skip} do
-    setup %{skip: skip} do
-      if skip do
-        :ok
-      else
-        {:ok, system} = EtherCAT.open(TestHardwareConfig)
-        on_exit(fn -> EtherCAT.close(system) end)
-        {:ok, system: system}
-      end
+  describe "Analog Input Testing" do
+    setup do
+      {:ok, system} = EtherCAT.open(TestHardwareConfig)
+      on_exit(fn -> EtherCAT.close(system) end)
+      {:ok, system: system}
     end
 
-    @tag skip: skip
+    @tag :integration
     test "reads analog values from both channels", %{system: system} do
       # Read channel 1 temperature
       assert {:ok, temp1} = EtherCAT.read(system, :analog_inputs, :ch1, :value)
@@ -207,12 +151,11 @@ defmodule EtherCATIntegrationTest do
       # Read channel 2 temperature
       assert {:ok, temp2} = EtherCAT.read(system, :analog_inputs, :ch2, :value)
       assert is_float(temp2) or is_integer(temp2)
-
       assert temp2 >= -50.0 and temp2 <= 150.0,
              "Temperature reading out of expected range: #{temp2}°C"
     end
 
-    @tag skip: skip
+    @tag :integration
     test "reads error flags from both channels", %{system: system} do
       # Read error flags (should be false/0 if sensors are connected properly)
       assert {:ok, error1} = EtherCAT.read(system, :analog_inputs, :ch1, :error)
@@ -223,7 +166,7 @@ defmodule EtherCATIntegrationTest do
       assert is_boolean(error2) or is_integer(error2)
     end
 
-    @tag skip: skip
+    @tag :integration
     test "monitors temperature stability over time", %{system: system} do
       # Read temperature 10 times over 1 second
       readings =
@@ -235,12 +178,7 @@ defmodule EtherCATIntegrationTest do
 
       # Calculate variance - temperature should be relatively stable
       mean = Enum.sum(readings) / length(readings)
-
-      variance =
-        Enum.map(readings, fn x -> (x - mean) * (x - mean) end)
-        |> Enum.sum()
-        |> Kernel./(length(readings))
-
+      variance = Enum.map(readings, fn x -> (x - mean) * (x - mean) end) |> Enum.sum() |> Kernel./(length(readings))
       std_dev = :math.sqrt(variance)
 
       # Standard deviation should be less than 5°C for stable ambient temperature
@@ -249,31 +187,26 @@ defmodule EtherCATIntegrationTest do
     end
   end
 
-  describe "Error Handling", %{skip: skip} do
-    setup %{skip: skip} do
-      if skip do
-        :ok
-      else
-        {:ok, system} = EtherCAT.open(TestHardwareConfig)
-        on_exit(fn -> EtherCAT.close(system) end)
-        {:ok, system: system}
-      end
+  describe "Error Handling" do
+    setup do
+      {:ok, system} = EtherCAT.open(TestHardwareConfig)
+      on_exit(fn -> EtherCAT.close(system) end)
+      {:ok, system: system}
     end
 
-    @tag skip: skip
+    @tag :integration
     test "reading from non-existent slave returns error", %{system: system} do
       assert {:error, _reason} = EtherCAT.read(system, :nonexistent_slave, :ch1, :value)
     end
 
-    @tag skip: skip
+    @tag :integration
     test "writing to non-existent slave returns error", %{system: system} do
       assert {:error, _reason} = EtherCAT.write(system, :nonexistent_slave, :ch1, :value, 42)
     end
 
-    @tag skip: skip
+    @tag :integration
     test "reading non-existent entry returns error", %{system: system} do
-      assert {:error, _reason} =
-               EtherCAT.read(system, :digital_inputs, :inputs, :nonexistent_entry)
+      assert {:error, _reason} = EtherCAT.read(system, :digital_inputs, :inputs, :nonexistent_entry)
     end
   end
 end

@@ -43,8 +43,11 @@ defmodule EtherCAT.Config do
   """
   @spec build(module()) :: EtherCAT.Config.HardwareConfig.t()
   def build(module) do
-    domains = Spark.Dsl.Extension.get_entities(module, [:hardware, :domains])
-    slaves = Spark.Dsl.Extension.get_entities(module, [:hardware, :slaves])
+    domains = Spark.Dsl.Extension.get_entities(module, [:hardware])
+              |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Domain))
+
+    slaves = Spark.Dsl.Extension.get_entities(module, [:hardware])
+             |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Slave))
 
     %EtherCAT.Config.HardwareConfig{
       domains: Enum.map(domains, &build_domain/1),
