@@ -19,8 +19,7 @@ This document outlines a progressive testing strategy for the `igh_ethercat` lib
 ### What We Have Now
 
 **✅ Hardware Verification System**
-- `EtherCAT.HardwareLayout` - Declarative hardware configuration
-- `EtherCAT.HardwareVerifier` - Automatic verification with detailed error reporting
+- `EtherCAT.HardwareLayout` - Declarative hardware configuration with built-in verification
 - `EtherCAT.SlaveConfig` - Slave specification struct
 - Discovery mode: `EtherCAT.open()` (no verification)
 - Strict mode: `EtherCAT.open(expected: layout, match: :exact)` (fails on mismatch)

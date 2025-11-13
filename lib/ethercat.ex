@@ -62,7 +62,7 @@ defmodule EtherCAT do
   defp verify_hardware(nil, _slaves, _match_strategy), do: :ok
 
   defp verify_hardware(expected_layout, slaves, match_strategy) do
-    case EtherCAT.HardwareVerifier.verify(expected_layout, slaves, match: match_strategy) do
+    case EtherCAT.HardwareLayout.verify(expected_layout, slaves, match: match_strategy) do
       :ok ->
         :ok
 

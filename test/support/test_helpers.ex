@@ -69,7 +69,7 @@ defmodule EtherCAT.TestHelpers do
   """
   @spec assert_hardware_matches!(HardwareLayout.t(), [pid()]) :: :ok
   def assert_hardware_matches!(%HardwareLayout{} = expected, slaves) do
-    case EtherCAT.HardwareVerifier.verify(expected, slaves, match: :exact) do
+    case EtherCAT.HardwareLayout.verify(expected, slaves, match: :exact) do
       :ok ->
         :ok
 
