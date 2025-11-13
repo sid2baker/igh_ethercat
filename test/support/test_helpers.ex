@@ -80,38 +80,6 @@ defmodule EtherCAT.TestHelpers do
   end
 
   @doc """
-  Waits for a specific number of slaves to be discovered.
-
-  Useful when slaves might take time to enumerate.
-
-  ## Parameters
-
-  - `master` - Master PID
-  - `expected_count` - Number of slaves to wait for
-  - `timeout` - Timeout in milliseconds (default: 5000)
-
-  ## Example
-
-      {:ok, master, _} = EtherCAT.open()
-      slaves = wait_for_slaves(master, 3, timeout: 10_000)
-  """
-  @spec wait_for_slaves(pid(), non_neg_integer(), keyword()) :: [pid()] | {:error, :timeout}
-  def wait_for_slaves(master, expected_count, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 5000)
-    interval = Keyword.get(opts, :interval, 100)
-
-    wait_until(timeout, interval, fn ->
-      # Get current slaves from master
-      # This is a simplified implementation - you may need to adjust
-      # based on how your Master tracks slaves
-      case get_current_slaves(master) do
-        slaves when length(slaves) >= expected_count -> {:ok, slaves}
-        _ -> :continue
-      end
-    end)
-  end
-
-  @doc """
   Creates a minimal test layout with N generic slaves.
 
   Useful for quickly setting up test fixtures.
@@ -167,27 +135,5 @@ defmodule EtherCAT.TestHelpers do
       end)
 
     "Hardware configuration mismatch:\n#{errors}"
-  end
-
-  defp wait_until(timeout, _interval, _func) when timeout <= 0 do
-    {:error, :timeout}
-  end
-
-  defp wait_until(timeout, interval, func) do
-    case func.() do
-      {:ok, result} ->
-        result
-
-      :continue ->
-        Process.sleep(interval)
-        wait_until(timeout - interval, interval, func)
-    end
-  end
-
-  # Placeholder - you'll need to implement this based on your Master module
-  defp get_current_slaves(_master) do
-    # This is a placeholder. You might need to add a function to Master
-    # to get the current list of slaves, or track them differently
-    []
   end
 end

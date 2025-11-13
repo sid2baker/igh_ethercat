@@ -29,7 +29,6 @@ This document outlines a progressive testing strategy for the `igh_ethercat` lib
 - `find_slave/3` - Find slave by vendor/product ID
 - `find_slaves_by_vendor/2` - Find all slaves from a vendor
 - `assert_hardware_matches!/2` - Assert layout matches with helpful errors
-- `wait_for_slaves/3` - Wait for slaves to enumerate
 - `minimal_layout/2` - Create test fixtures quickly
 
 **✅ Example Layouts** (`test/support/example_layouts.ex`)

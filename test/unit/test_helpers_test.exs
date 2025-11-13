@@ -86,19 +86,6 @@ defmodule EtherCAT.TestHelpersTest do
     end
   end
 
-  describe "wait_for_slaves/3 usage pattern" do
-    test "documents expected behavior" do
-      # In a real test with master process:
-      #
-      # {:ok, master, _} = EtherCAT.open()
-      # slaves = TestHelpers.wait_for_slaves(master, 3, timeout: 10_000)
-      # assert length(slaves) == 3
-      #
-      assert function_exported?(TestHelpers, :wait_for_slaves, 2)
-      assert function_exported?(TestHelpers, :wait_for_slaves, 3)
-    end
-  end
-
   describe "integration patterns" do
     test "example: testing with simple I/O layout" do
       # This demonstrates the full pattern developers would use:
