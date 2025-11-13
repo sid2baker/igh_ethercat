@@ -738,7 +738,8 @@ defmodule EtherCAT.Nif do
       const entry = accessor.layout.findEntry(name) orelse
           return DomainError.InvalidOffset;
 
-      const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
+      const domain = try accessor.getDomain();
+      const domain_size = ecrt.ecrt_domain_size(domain);
       const max_bit_offset = domain_size * 8;
 
       if (entry.bit_offset >= max_bit_offset) return DomainError.OutOfBounds;
@@ -821,11 +822,12 @@ defmodule EtherCAT.Nif do
   ) !usize {
       const accessor = domain_accessor.unpack();
       var bit_position: c_uint = 0;
+      const domain = try accessor.getDomain();
       const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(
           slave_config.unpack(),
           entry_index,
           entry_subindex,
-          accessor.getDomain(),
+          domain,
           &bit_position
       );
 
@@ -1036,7 +1038,8 @@ defmodule EtherCAT.Nif do
 
               // Adaptive recovery: skip cycles if severely overrun (> 50% of cycle period)
               const overrun_ns: u64 = @intCast(-sleep_ns);
-              if (overrun_ns > cycle_period_ns / 2) {
+              const half_cycle: u64 = @intCast(@divTrunc(cycle_period_ns, 2));
+              if (overrun_ns > half_cycle) {
                   const cycles_to_skip: u32 = @intCast(@divTrunc(overrun_ns, cycle_period_ns));
                   next_cycle_time += @as(i128, @intCast(cycles_to_skip)) * cycle_period_ns;
                   std.log.warn("Skipping {d} cycles to resync", .{cycles_to_skip});

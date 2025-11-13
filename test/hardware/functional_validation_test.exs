@@ -78,10 +78,15 @@ defmodule Hardware.FunctionalValidationTest do
     on_exit(fn ->
       Logger.info("=== Cleaning up EtherCAT master ===")
 
-      if Process.alive?(master) do
-        EtherCAT.close(master)
-      else
-        Logger.info("Master process already terminated, skipping close")
+      try do
+        if Process.alive?(master) do
+          EtherCAT.close(master)
+        else
+          Logger.info("Master process already terminated, skipping close")
+        end
+      catch
+        :exit, reason ->
+          Logger.info("Master already stopped during cleanup: #{inspect(reason)}")
       end
 
       Logger.info("=== Cleanup complete ===")

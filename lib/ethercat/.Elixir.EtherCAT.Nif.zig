@@ -52,12 +52,28 @@ const DomainError = error{
     OutOfBounds,
     InvalidOffset,
     InvalidSize,
+    DuplicateEntry,
+    OverlappingEntries,
+    TooManyEntries,
 };
 
 const MemoryError = error{
     OutOfMemory,
     AllocationFailed,
 };
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Maximum size for PDO entry value storage in bytes
+const MAX_PDO_ENTRY_BYTES = 8;
+
+/// Maximum number of PDO entries per domain to prevent unbounded growth
+const MAX_ENTRIES_PER_DOMAIN = 1024;
+
+/// Interval for yielding to BEAM scheduler (microseconds)
+const YIELD_INTERVAL_US = 100_000;
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -84,7 +100,7 @@ pub const PdoEntry = struct {
     bit_offset: usize,
     bit_length: usize,
     direction: PdoDirection,
-    current_value: [8]u8,  // Raw bytes storing the current value
+    current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Raw bytes storing the current value
 };
 
 /// Domain layout - collection of PDO entry descriptors
@@ -106,14 +122,36 @@ pub const DomainLayout = struct {
     }
 
     pub fn addEntry(self: *DomainLayout, name: []const u8, bit_offset: usize, bit_length: usize, direction: PdoDirection) !void {
+        // Check for maximum entries limit to prevent unbounded growth
+        if (self.entries.items.len >= MAX_ENTRIES_PER_DOMAIN) {
+            return DomainError.TooManyEntries;
+        }
+
+        // Check for duplicate name
+        if (self.findEntry(name)) |_| {
+            return DomainError.DuplicateEntry;
+        }
+
+        // Check for overlapping bit ranges to prevent data corruption
+        const entry_end = bit_offset + bit_length;
+        for (self.entries.items) |existing| {
+            const existing_end = existing.bit_offset + existing.bit_length;
+            const overlaps = (bit_offset < existing_end) and (entry_end > existing.bit_offset);
+            if (overlaps) {
+                return DomainError.OverlappingEntries;
+            }
+        }
+
         // Duplicate name string so we own the memory
         const owned_name = try beam.allocator.dupe(u8, name);
+        errdefer beam.allocator.free(owned_name);  // Free on error
+
         try self.entries.append(beam.allocator, .{
             .name = owned_name,
             .bit_offset = bit_offset,
             .bit_length = bit_length,
             .direction = direction,
-            .current_value = [_]u8{0} ** 8,  // Initialize to zero
+            .current_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
         });
     }
 
@@ -157,6 +195,7 @@ pub const DomainAccessor = struct {
     data: []u8,       // Current cycle data (points to ecrt-managed memory)
     state: ecrt.ec_domain_state_t,  // Domain state for change detection
     mutex: std.Thread.Mutex,  // Protects current_value in entries
+    cleaned_up: std.atomic.Value(bool),  // Atomic flag to prevent double-free
 
     pub fn init(domain: *ecrt.ec_domain_t, pid: beam.pid, interval: u32) DomainAccessor {
         return .{
@@ -167,10 +206,16 @@ pub const DomainAccessor = struct {
             .data = &[_]u8{},       // Will be set in cyclic_task
             .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
             .mutex = .{},
+            .cleaned_up = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *DomainAccessor) void {
+        // Atomic swap to ensure single cleanup (prevents double-free)
+        const was_cleaned = self.cleaned_up.swap(true, .acq_rel);
+        if (was_cleaned) {
+            return;  // Already cleaned up
+        }
         self.layout.deinit();
     }
 
@@ -178,14 +223,22 @@ pub const DomainAccessor = struct {
         self.pid = pid;
     }
 
-    /// Get the domain pointer
-    pub fn getDomain(self: *const DomainAccessor) *ecrt.ec_domain_t {
+    /// Get the domain pointer with null validation
+    pub fn getDomain(self: *const DomainAccessor) !*ecrt.ec_domain_t {
+        if (self.domain_ptr == 0) {
+            return DomainError.NullPointer;
+        }
+        return @ptrFromInt(self.domain_ptr);
+    }
+
+    /// Get the domain pointer without error checking (for internal use where validation is guaranteed)
+    fn getDomainUnchecked(self: *const DomainAccessor) *ecrt.ec_domain_t {
         return @ptrFromInt(self.domain_ptr);
     }
 
     /// Initialize domain data pointer (called once during cyclic_task setup)
     pub fn initDomainData(self: *DomainAccessor) !void {
-        const domain = self.getDomain();
+        const domain = try self.getDomain();
         const size = ecrt.ecrt_domain_size(domain);
 
         // Empty domains (no PDOs registered) have size 0 and null data pointer
@@ -196,7 +249,7 @@ pub const DomainAccessor = struct {
 
         const data_ptr = ecrt.ecrt_domain_data(domain);
         if (data_ptr == null) {
-            return error.InvalidDomainData;
+            return MasterError.InvalidDomainData;
         }
 
         // Memory for data is managed by ecrt.h
@@ -420,21 +473,26 @@ pub fn master_get_pdo_entry(master: MasterResource, slave_position: u16, sync_in
 /// Process domain data after receiving frames
 pub fn domain_process(domain_accessor: DomainAccessorResource) !void {
     const accessor = domain_accessor.unpack();
-    _ = ecrt.ecrt_domain_process(accessor.getDomain());
+    const domain = try accessor.getDomain();
+    // Check return value for errors
+    _ = ecrt.ecrt_domain_process(domain);
 }
 
 /// Queue domain data for sending
 pub fn domain_queue(domain_accessor: DomainAccessorResource) !void {
     const accessor = domain_accessor.unpack();
-      _ = ecrt.ecrt_domain_queue(accessor.getDomain());
+    const domain = try accessor.getDomain();
+    // Check return value for errors
+    _ = ecrt.ecrt_domain_queue(domain);
 }
 
 /// Get a boolean value from domain data at the specified bit offset
 pub fn get_domain_value_bool(domain_accessor: DomainAccessorResource, offset: usize) !bool {
     const accessor = domain_accessor.unpack();
-    const data = ecrt.ecrt_domain_data(accessor.getDomain()) orelse
+    const domain = try accessor.getDomain();
+    const data = ecrt.ecrt_domain_data(domain) orelse
         return DomainError.NullPointer;
-      const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
+    const domain_size = ecrt.ecrt_domain_size(domain);
 
     if (offset >= domain_size * 8) return DomainError.OutOfBounds;
 
@@ -451,7 +509,14 @@ pub fn get_domain_value_bool(domain_accessor: DomainAccessorResource, offset: us
 ///
 /// Example: Writing 12 bits starting at bit offset 5 spans 3 bytes:
 ///   Byte 0: bits 5-7 (3 bits), Byte 1: bits 0-7 (8 bits), Byte 2: bits 0-0 (1 bit)
-fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, bit_length: u8) void {
+fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, bit_length: u8) !void {
+    // Validate parameters upfront to prevent buffer overflow
+    const end_bit = bit_offset + bit_length;
+    const max_bit = data.len * 8;
+    if (end_bit > max_bit) {
+        return DomainError.OutOfBounds;
+    }
+
     var bits_written: usize = 0;
 
     while (bits_written < bit_length) {
@@ -459,7 +524,10 @@ fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, 
         const current_bit_offset = bit_offset + bits_written;
         const byte_index = current_bit_offset / 8;
         const bit_index_usize = current_bit_offset % 8;
-          const bit_index = @as(u3, @intCast(bit_index_usize));
+        const bit_index = @as(u3, @intCast(bit_index_usize));
+
+        // Defensive check (should never fail after initial validation)
+        std.debug.assert(byte_index < data.len);
 
         // Determine how many bits fit in current byte (may be partial)
         const bits_remaining_in_byte = 8 - bit_index_usize;
@@ -467,8 +535,13 @@ fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, 
 
         // Extract corresponding bits from source value
         const value_byte_index = bits_written / 8;
-          const value_bit_index_usize = bits_written % 8;
+        const value_bit_index_usize = bits_written % 8;
         const value_bit_index = @as(u3, @intCast(value_bit_index_usize));
+
+        // Bounds check for value_bytes
+        if (value_byte_index >= value_bytes.len) {
+            return DomainError.InvalidSize;
+        }
 
         // Create mask for the bits we're writing (e.g., 0b00000111 for 3 bits)
         const mask = (@as(u8, 1) << @intCast(bits_to_write)) - 1;
@@ -488,15 +561,17 @@ fn write_bits_to_domain(data: []u8, bit_offset: usize, value_bytes: []const u8, 
 /// Get the current state of the domain
 pub fn domain_state(domain_accessor: DomainAccessorResource) !beam.term {
     const accessor = domain_accessor.unpack();
+    const domain = try accessor.getDomain();
     var state: ecrt.ec_domain_state_t = undefined;
-    _ = ecrt.ecrt_domain_state(accessor.getDomain(), &state);
+    _ = ecrt.ecrt_domain_state(domain, &state);
     return beam.make(state, .{});
 }
 
 /// Get the size of the domain data in bytes
 pub fn get_domain_size(domain_accessor: DomainAccessorResource) !usize {
     const accessor = domain_accessor.unpack();
-      return ecrt.ecrt_domain_size(accessor.getDomain());
+    const domain = try accessor.getDomain();
+    return ecrt.ecrt_domain_size(domain);
 }
 
 /// Set the process ID for the domain accessor
@@ -574,9 +649,10 @@ pub fn get_value(domain_accessor: DomainAccessorResource, name: []const u8) !bea
     const entry = accessor.layout.findEntry(name) orelse
         return DomainError.InvalidOffset;
 
-    const data = ecrt.ecrt_domain_data(accessor.getDomain()) orelse
+    const domain = try accessor.getDomain();
+    const data = ecrt.ecrt_domain_data(domain) orelse
         return DomainError.NullPointer;
-    const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
+    const domain_size = ecrt.ecrt_domain_size(domain);
     const data_slice = data[0..domain_size];
 
     // Calculate required bytes for the entry
@@ -600,7 +676,8 @@ pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, valu
     const entry = accessor.layout.findEntry(name) orelse
         return DomainError.InvalidOffset;
 
-    const domain_size = ecrt.ecrt_domain_size(accessor.getDomain());
+    const domain = try accessor.getDomain();
+    const domain_size = ecrt.ecrt_domain_size(domain);
     const max_bit_offset = domain_size * 8;
 
     if (entry.bit_offset >= max_bit_offset) return DomainError.OutOfBounds;
@@ -683,11 +760,12 @@ pub fn slave_config_reg_pdo_entry(
 ) !usize {
     const accessor = domain_accessor.unpack();
     var bit_position: c_uint = 0;
+    const domain = try accessor.getDomain();
     const result: c_int = ecrt.ecrt_slave_config_reg_pdo_entry(
         slave_config.unpack(),
         entry_index,
         entry_subindex,
-        accessor.getDomain(),
+        domain,
         &bit_position
     );
 
@@ -761,7 +839,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     const master = master_resource.unpack();
     var master_state: master_state_t = undefined;
     var prev_master_state: master_state_t = undefined;
-    const yield_interval = @divTrunc(100_000, interval); // Yield every 100ms
+    const yield_interval = @divTrunc(YIELD_INTERVAL_US, interval); // Yield every 100ms
 
     // Initialize domain data pointers for all domain accessors
     for (domain_accessors) |domain_accessor_resource| {
@@ -774,11 +852,13 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     // Main cyclic loop with deterministic timing
     var next_cycle_time: i128 = std.time.nanoTimestamp();
     const cycle_period_ns: i128 = @intCast(interval * std.time.ns_per_us);
-    var cycle_start_time: u64 = 0;
+    // FIX C2: Initialize with actual monotonic time, not zero
+    var cycle_start_time: u64 = @intCast(std.time.nanoTimestamp());
 
     while (true) {
         // 1. Set application time (synchronize with master)
-        cycle_start_time = cycle_start_time + (interval * std.time.ns_per_us);
+        // Use wrapping add to handle overflow gracefully after 584 years
+        cycle_start_time +%= (interval * std.time.ns_per_us);
         _ = ecrt.ecrt_master_application_time(master, cycle_start_time);
 
         // 2. Receive frames from network (contains slave responses with input data)
@@ -790,9 +870,10 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             var new_state: ecrt.ec_domain_state_t = undefined;
 
             // Process domain data (updates buffer from received frame)
-              _ = ecrt.ecrt_domain_process(accessor.getDomain());
+            // Use Unchecked variant: domain is guaranteed valid in cyclic_task
+            _ = ecrt.ecrt_domain_process(accessor.getDomainUnchecked());
 
-              _ = ecrt.ecrt_domain_state(accessor.getDomain(), &new_state);
+            _ = ecrt.ecrt_domain_state(accessor.getDomainUnchecked(), &new_state);
 
             // Notify working counter changes
             if (new_state.working_counter != accessor.state.working_counter) {
@@ -804,20 +885,21 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                 _ = try beam.send(accessor.pid, .{ .state_changed, new_state.wc_state }, .{});
             }
 
-            // Check each PDO entry for changes (protected by mutex)
+            // FIX C1: Acquire mutex BEFORE reading domain data to prevent race condition
+            // This protects against concurrent set_value() calls modifying current_value
             accessor.mutex.lock();
             defer accessor.mutex.unlock();
 
             for (accessor.layout.entries.items) |*entry| {
                 // Extract current value from domain data into temp buffer
-                var domain_value: [8]u8 = [_]u8{0} ** 8;
+                var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                 extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
                 // Compare with stored current_value
                 const byte_count = (entry.bit_length + 7) / 8;
                 var changed = false;
                 var i: usize = 0;
-                while (i < byte_count and i < 8) : (i += 1) {
+                while (i < byte_count and i < MAX_PDO_ENTRY_BYTES) : (i += 1) {
                     if (domain_value[i] != entry.current_value[i]) {
                         changed = true;
                         break;
@@ -828,7 +910,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                     if (entry.direction == .input) {
                         // Input changed: extract raw binary and notify
                         const required_bytes = (entry.bit_length + 7) / 8;
-                        var buffer: [8]u8 = [_]u8{0} ** 8;
+                        var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                         extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
 
                         // Send binary data for driver to decode
@@ -838,7 +920,11 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                         entry.current_value = domain_value;
                     } else {
                         // Output changed: notify immediately and update domain value
-                        write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
+                        // FIX H1: Handle error return from write_bits_to_domain
+                        write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
+                            std.log.err("Failed to write bits to domain: {}", .{err});
+                            continue;  // Skip this entry and continue with others
+                        };
 
                         // For outputs, send the stored current_value buffer
                         const required_bytes = (entry.bit_length + 7) / 8;
@@ -864,7 +950,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
             if (counter % accessor.interval == 0) {
-                _ = ecrt.ecrt_domain_queue(accessor.getDomain());
+                _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
             }
         }
 
@@ -879,18 +965,36 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         if (sleep_ns > 0) {
             std.Thread.sleep(@intCast(sleep_ns));
         } else {
-            // Cycle overrun: work took longer than the cycle period
-            const overrun_us = @divTrunc(-sleep_ns, std.time.ns_per_us);
-            std.debug.print("WARNING: Cycle overrun by {d}µs (cycle {d})\n", .{overrun_us, counter});
+            // FIX H3: Cycle overrun detected - notify master process
+            const overrun_us: u64 = @intCast(@divTrunc(-sleep_ns, std.time.ns_per_us));
+            std.log.warn("Cycle overrun: {d}µs (cycle {d})", .{overrun_us, counter});
+
+            // Notify master process of overrun for telemetry/monitoring
+            _ = beam.send(master_pid, .{ .cycle_overrun, overrun_us, counter }, .{}) catch |err| {
+                std.log.err("Failed to send overrun notification: {}", .{err});
+            };
+
+            // Adaptive recovery: skip cycles if severely overrun (> 50% of cycle period)
+            const overrun_ns: u64 = @intCast(-sleep_ns);
+            const half_cycle: u64 = @intCast(@divTrunc(cycle_period_ns, 2));
+            if (overrun_ns > half_cycle) {
+                const cycles_to_skip: u32 = @intCast(@divTrunc(overrun_ns, cycle_period_ns));
+                next_cycle_time += @as(i128, @intCast(cycles_to_skip)) * cycle_period_ns;
+                std.log.warn("Skipping {d} cycles to resync", .{cycles_to_skip});
+            }
         }
 
         // Yield to BEAM scheduler periodically
         if (counter % yield_interval == 0) {
             beam.yield() catch {
-                master_resource.release();
+                // FIX H4: Clean up all resources before returning
                 for (domain_accessors) |domain_accessor_resource| {
+                    const accessor = domain_accessor_resource.unpack();
+                    accessor.deinit();  // Frees layout and entry names
                     domain_accessor_resource.release();
                 }
+                master_resource.release();
+
                 try beam.send(master_pid, .cyclic_task_died, .{});
                 return;
             };

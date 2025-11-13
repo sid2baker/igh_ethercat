@@ -197,9 +197,7 @@ defmodule EtherCAT.Master do
 
       # Verify we got both required messages
       unless :exit_received in results and :died_received in results do
-        Logger.error(
-          "Incomplete cyclic task shutdown - received: #{inspect(results)}"
-        )
+        Logger.error("Incomplete cyclic task shutdown - received: #{inspect(results)}")
       end
     end
 
