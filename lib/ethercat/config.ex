@@ -82,6 +82,7 @@ defmodule EtherCAT.Config do
   @sections [
     %Spark.Dsl.Section{
       name: :hardware,
+      top_level?: true,
       describe: "Hardware configuration for the EtherCAT system",
       entities: [
         %Spark.Dsl.Entity{
