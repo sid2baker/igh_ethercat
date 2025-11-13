@@ -646,11 +646,14 @@ pub fn get_value(domain_accessor: DomainAccessorResource, name: []const u8) !bea
     const entry = accessor.layout.findEntry(name) orelse
         return DomainError.InvalidOffset;
 
-    const domain = try accessor.getDomain();
-    const data = ecrt.ecrt_domain_data(domain) orelse
-        return DomainError.NullPointer;
-    const domain_size = ecrt.ecrt_domain_size(domain);
-    const data_slice = data[0..domain_size];
+    // Use the cached data pointer from accessor instead of getting a fresh one
+    // This ensures we read from the same memory that the cyclic task updates
+    const data_slice = accessor.data;
+
+    if (data_slice.len == 0) {
+        // Domain not initialized yet - this shouldn't happen in operational mode
+        return DomainError.InvalidOffset;
+    }
 
     // Calculate required bytes for the entry
     const required_bytes = (entry.bit_length + 7) / 8;

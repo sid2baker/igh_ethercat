@@ -33,4 +33,9 @@ defmodule EtherCAT.Drivers.Generic do
 
   @impl true
   def terminate(_state), do: :ok
+
+  @impl true
+  # Generic driver uses EEPROM configuration - PDO mappings are typically fixed
+  # Devices with fixed mappings cannot have their PDO entry lists modified
+  def supports_pdo_config?(_state), do: false
 end

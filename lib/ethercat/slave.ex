@@ -76,6 +76,9 @@ defmodule EtherCAT.Slave do
     :slave_config,
     :sync_count,
     :name,
+    # Tracks which sync managers have been configured for THIS slave (sync_index set)
+    # Each slave has independent sync manager configuration
+    configured_sync_managers: MapSet.new(),
     # Tracks which PDO indices have been assigned to sync managers
     assigned_pdos: MapSet.new(),
     # Tracks registered entries with domain routing and type info
@@ -104,6 +107,7 @@ defmodule EtherCAT.Slave do
           slave_config: reference() | nil,
           sync_count: non_neg_integer(),
           name: atom() | String.t() | nil,
+          configured_sync_managers: MapSet.t(non_neg_integer()),
           assigned_pdos: MapSet.t(non_neg_integer()),
           entries: %{{atom(), atom()} => entry_metadata()}
         }
@@ -912,7 +916,7 @@ defmodule EtherCAT.Slave do
     with {:ok, pdo_info} <- data.driver.pdo_info(data.driver_state, pdo_name),
          :ok <- validate_entry_exists(pdo_info, entry_name),
          {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
-      {sync_index, direction, _watchdog} = pdo_info.sync_manager
+      {sync_index, direction, watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
 
       {entry_type, entry} =
@@ -927,13 +931,31 @@ defmodule EtherCAT.Slave do
       # Check if device supports PDO configuration
       supports_pdo_config = data.driver.supports_pdo_config?(data.driver_state)
 
-      # Assign PDO to sync manager if not already assigned (always needed)
+      # Configure sync manager if not already configured
+      # This tells the master which sync manager to use for PDO data exchange
       updated_data =
-        if MapSet.member?(data.assigned_pdos, pdo_index) do
+        if MapSet.member?(data.configured_sync_managers, sync_index) do
           data
         else
-          config_pdo_assign_add_internal(data, sync_index, pdo_index)
-          %{data | assigned_pdos: MapSet.put(data.assigned_pdos, pdo_index)}
+          # Configure sync manager with direction and watchdog mode
+          config_sync_manager_internal(data, sync_index, direction, watchdog)
+          Logger.debug("Configured SM#{sync_index} dir=#{direction} watchdog=#{watchdog}")
+
+          %{
+            data
+            | configured_sync_managers: MapSet.put(data.configured_sync_managers, sync_index)
+          }
+        end
+
+      # Assign PDO to sync manager if not already assigned
+      # This is required so the master knows which PDOs are active
+      updated_data =
+        if MapSet.member?(updated_data.assigned_pdos, pdo_index) do
+          updated_data
+        else
+          config_pdo_assign_add_internal(updated_data, sync_index, pdo_index)
+          Logger.debug("Assigned PDO 0x#{Integer.to_string(pdo_index, 16)} to SM#{sync_index}")
+          %{updated_data | assigned_pdos: MapSet.put(updated_data.assigned_pdos, pdo_index)}
         end
 
       # Only configure PDO entry mappings for devices that support it
