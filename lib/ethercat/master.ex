@@ -350,13 +350,11 @@ defmodule EtherCAT.Master do
         for {slave_config, pdo_entries} <- pending_entries,
             {name, {entry_index, entry_subindex, entry_size, direction}} <- pdo_entries do
           # Infer type for NIF registration
-          entry_type = EtherCAT.Slave.Driver.infer_type_from_bit_length(entry_size)
 
           offset =
             Nif.slave_config_reg_pdo_entry(
               slave_config,
               name,
-              entry_type,
               entry_index,
               entry_subindex,
               entry_size,
@@ -365,7 +363,7 @@ defmodule EtherCAT.Master do
             )
 
           Logger.debug(
-            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, type=#{entry_type}, direction=#{direction}"
+            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, direction=#{direction}"
           )
 
           {name, {offset, entry_size}}

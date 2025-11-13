@@ -126,19 +126,6 @@ defmodule EtherCAT.Nif do
   // TYPE DEFINITIONS
   // ============================================================================
 
-  /// PDO entry data types
-  pub const PdoEntryType = enum {
-      bool,
-      int8,
-      uint8,
-      int16,
-      uint16,
-      int32,
-      uint32,
-      int64,
-      uint64,
-  };
-
   /// PDO direction
   pub const PdoDirection = enum {
       input,
@@ -148,7 +135,6 @@ defmodule EtherCAT.Nif do
   /// PDO entry descriptor - runtime description of a field in domain data
   pub const PdoEntry = struct {
       name: []const u8,
-      entry_type: PdoEntryType,
       bit_offset: usize,
       bit_length: usize,
       direction: PdoDirection,
@@ -173,12 +159,11 @@ defmodule EtherCAT.Nif do
           self.entries.deinit(beam.allocator);
       }
 
-      pub fn addEntry(self: *DomainLayout, name: []const u8, entry_type: PdoEntryType, bit_offset: usize, bit_length: usize, direction: PdoDirection) !void {
+      pub fn addEntry(self: *DomainLayout, name: []const u8, bit_offset: usize, bit_length: usize, direction: PdoDirection) !void {
           // Duplicate name string so we own the memory
           const owned_name = try beam.allocator.dupe(u8, name);
           try self.entries.append(beam.allocator, .{
               .name = owned_name,
-              .entry_type = entry_type,
               .bit_offset = bit_offset,
               .bit_length = bit_length,
               .direction = direction,
@@ -744,7 +729,6 @@ defmodule EtherCAT.Nif do
   pub fn slave_config_reg_pdo_entry(
       slave_config: SlaveConfigResource,
       name: []const u8,
-      entry_type: PdoEntryType,
       entry_index: u16,
       entry_subindex: u8,
       bit_length: usize,
@@ -776,7 +760,7 @@ defmodule EtherCAT.Nif do
               return error.InvalidDirection;
 
           // Add entry to domain layout
-          try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length, pdo_direction);
+          try accessor.layout.addEntry(name, bit_offset, bit_length, pdo_direction);
 
           return bit_offset;
       } else {
@@ -790,7 +774,6 @@ defmodule EtherCAT.Nif do
   pub fn slave_config_reg_pdo_entry_pos(
       slave_config: SlaveConfigResource,
       name: []const u8,
-      entry_type: PdoEntryType,
       sync_index: u8,
       pdo_pos: c_uint,
       entry_pos: c_uint,
@@ -824,7 +807,7 @@ defmodule EtherCAT.Nif do
               return error.InvalidDirection;
 
           // Add entry to domain layout
-          try accessor.layout.addEntry(name, entry_type, bit_offset, bit_length, pdo_direction);
+          try accessor.layout.addEntry(name, bit_offset, bit_length, pdo_direction);
 
           return bit_offset;
       } else {
