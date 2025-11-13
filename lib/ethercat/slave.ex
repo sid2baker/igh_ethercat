@@ -515,6 +515,33 @@ defmodule EtherCAT.Slave do
     :gen_statem.call(slave, :get_slave_config)
   end
 
+  @doc """
+  Gets basic information about the slave device.
+
+  Returns a map containing the slave's identity and configuration details.
+  This is useful for hardware verification and introspection.
+
+  ## Returns
+
+  A map with the following keys:
+  - `:position` - Bus position (0-based)
+  - `:alias` - Alias address
+  - `:vendor_id` - Vendor identification
+  - `:product_code` - Product code
+  - `:revision` - Revision number
+  - `:serial` - Serial number
+  - `:name` - Semantic name (if set, otherwise nil)
+
+  ## Example
+
+      info = Slave.get_info(slave)
+      #=> %{position: 0, vendor_id: 0xDEAD, product_code: 0x0001, ...}
+  """
+  @spec get_info(pid()) :: map()
+  def get_info(slave) do
+    :gen_statem.call(slave, :get_info)
+  end
+
   # Callbacks
 
   @impl true
@@ -632,6 +659,20 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, :unconfigured}]}
   end
 
+  def unconfigured({:call, from}, :get_info, data) do
+    info = %{
+      position: data.position,
+      alias: data.alias,
+      vendor_id: data.vendor_id,
+      product_code: data.product_code,
+      revision: data.revision,
+      serial: data.serial,
+      name: data.name
+    }
+
+    {:keep_state_and_data, [{:reply, from, info}]}
+  end
+
   def unconfigured({:call, from}, _request, data) do
     {:keep_state_and_data,
      [{:reply, from, {:error, {:invalid_state, :unconfigured, "Call configure/2 first"}}}]}
@@ -706,6 +747,20 @@ defmodule EtherCAT.Slave do
 
   def configured({:call, from}, :get_slave_config, data) do
     {:keep_state_and_data, [{:reply, from, data.slave_config}]}
+  end
+
+  def configured({:call, from}, :get_info, data) do
+    info = %{
+      position: data.position,
+      alias: data.alias,
+      vendor_id: data.vendor_id,
+      product_code: data.product_code,
+      revision: data.revision,
+      serial: data.serial,
+      name: data.name
+    }
+
+    {:keep_state_and_data, [{:reply, from, info}]}
   end
 
   def configured({:call, from}, {:set_name, name}, data) do
@@ -796,6 +851,20 @@ defmodule EtherCAT.Slave do
 
   def operational({:call, from}, :get_slave_config, data) do
     {:keep_state_and_data, [{:reply, from, data.slave_config}]}
+  end
+
+  def operational({:call, from}, :get_info, data) do
+    info = %{
+      position: data.position,
+      alias: data.alias,
+      vendor_id: data.vendor_id,
+      product_code: data.product_code,
+      revision: data.revision,
+      serial: data.serial,
+      name: data.name
+    }
+
+    {:keep_state_and_data, [{:reply, from, info}]}
   end
 
   def operational({:call, from}, {:read_entry, pdo_name, entry_name}, data) do
