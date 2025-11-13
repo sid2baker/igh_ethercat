@@ -27,7 +27,8 @@ defmodule EtherCAT.MixProject do
   defp deps do
     [
       {:zigler, "~> 0.15", runtime: false},
-      {:telemetry, "~> 1.2"}
+      {:telemetry, "~> 1.2"},
+      {:spark, "~> 2.0"}
     ]
   end
 end

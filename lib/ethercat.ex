@@ -1,354 +1,298 @@
 defmodule EtherCAT do
   @moduledoc """
-  EtherCAT industrial I/O interface for the IgH EtherCAT Master.
+  Declarative EtherCAT industrial I/O interface for the IgH EtherCAT Master.
+
+  ## Quick Start
+
+  Define your hardware configuration using the Spark DSL:
+
+      defmodule MyMachine do
+        use EtherCAT.Config
+
+        domain :fast_loop, interval: 1
+        domain :slow_loop, interval: 10
+
+        slave position: 0, name: :temp_sensor do
+          driver EtherCAT.Drivers.EL3202
+          expect vendor: 0x00000002, product: 0x0C5A3052
+
+          config do
+            limit1 1000
+            limit2 2000
+          end
+
+          entry :ch1, :value, domain: :fast_loop
+          entry :ch1, :error, domain: :slow_loop
+        end
+      end
+
+  Then open and use the system:
+
+      {:ok, system} = EtherCAT.open(MyMachine)
+      {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
+      :ok = EtherCAT.write(system, :output_slave, :ch1, :value, true)
+      EtherCAT.close(system)
+
+  ## Discovery Mode
+
+  If you don't have a configuration yet, use discovery mode:
+
+      {:ok, system} = EtherCAT.open()
+      config = EtherCAT.generate_config(system)
+
+      # Inspect the config to create your Spark module
+      IO.inspect(config, pretty: true)
+
+  ## Architecture
+
+  - **Declarative**: Define hardware config once, reuse everywhere
+  - **Type-safe**: Spark DSL validates at compile time
+  - **Semantic names**: Use `:temp_sensor` instead of position 0
+  - **Multi-domain**: Different update rates for critical vs diagnostic data
   """
 
-  alias EtherCAT.{Master, Slave, Domain, PDOEntry}
-  require Logger
+  alias EtherCAT.{System, Master, Slave}
+  alias EtherCAT.Config.HardwareConfig
 
   @doc """
-  Opens master, connects, and discovers slaves.
+  Opens an EtherCAT system with a hardware configuration.
 
-  ## Options
-
-  All options supported by `Master.start_link/1`, plus:
-
-  - `:expected` - Expected hardware layout (`%EtherCAT.HardwareLayout{}`).
-    If provided, discovered slaves will be verified against this layout.
-  - `:match` - Match strategy for verification (default: `:exact`).
-    Currently only `:exact` is supported.
+  ## Parameters
+  - `config_module` - Module using `EtherCAT.Config` DSL
+  - `opts` - Options:
+    - `:index` - EtherCAT master index (default: 0)
+    - Other options passed to the NIF layer
 
   ## Returns
-
-  - `{:ok, master, slaves}` - Master PID and list of discovered slave PIDs
-  - `{:error, {:config_mismatch, mismatches}}` - Hardware doesn't match expected layout
-  - `{:error, reason}` - Other errors (connection failure, etc.)
+  - `{:ok, system}` - System handle for I/O operations
+  - `{:error, reason}` - Configuration or hardware error
 
   ## Examples
 
-      # Discovery mode (no verification)
-      {:ok, master, slaves} = EtherCAT.open()
+      # Using a Spark DSL module
+      {:ok, system} = EtherCAT.open(MyMachine)
 
-      # With hardware verification
-      layout = %EtherCAT.HardwareLayout{slaves: [...]}
-      {:ok, master, slaves} = EtherCAT.open(expected: layout, match: :exact)
-
-      # Verification failure
-      {:error, {:config_mismatch, mismatches}} = EtherCAT.open(expected: layout)
+      # Specifying master index
+      {:ok, system} = EtherCAT.open(MyMachine, index: 1)
   """
-  @spec open(keyword()) :: {:ok, pid(), [pid()]} | {:error, term()}
-  def open(opts \\ []) do
-    expected_layout = Keyword.get(opts, :expected)
-    match_strategy = Keyword.get(opts, :match, :exact)
+  @spec open(module(), keyword()) :: {:ok, System.t()} | {:error, term()}
+  def open(config_module, opts \\ []) when is_atom(config_module) do
+    config = config_module.hardware_config()
+    System.open(config, opts)
+  end
 
-    case Master.start_link(opts) do
-      {:ok, master} ->
-        with :ok <- Master.connect(master),
-             {:ok, slaves} <- Master.sync_slaves(master),
-             :ok <- verify_hardware(expected_layout, slaves, match_strategy) do
-          {:ok, master, slaves}
-        else
-          error ->
-            Master.stop(master)
-            error
-        end
+  @doc """
+  Opens an EtherCAT system in discovery mode (no configuration).
 
-      error ->
-        error
+  Use this to discover connected hardware and generate a configuration.
+  After discovery, call `generate_config/1` to create a config struct.
+
+  ## Parameters
+  - `opts` - Options:
+    - `:index` - EtherCAT master index (default: 0)
+
+  ## Returns
+  - `{:ok, system}` - System handle with discovered slaves
+  - `{:error, reason}` - Connection error
+
+  ## Example
+
+      {:ok, system} = EtherCAT.open()
+      config = EtherCAT.generate_config(system)
+      # Use config to create your Spark DSL module
+  """
+  @spec open(keyword()) :: {:ok, System.t()} | {:error, term()}
+  def open(opts) when is_list(opts) do
+    # Discovery mode - open with empty config
+    config = %HardwareConfig{domains: [], slaves: []}
+    System.open(config, opts)
+  end
+
+  @doc """
+  Closes the EtherCAT system and releases all resources.
+
+  ## Parameters
+  - `system` - System handle from `open/1` or `open/2`
+
+  ## Example
+
+      {:ok, system} = EtherCAT.open(MyMachine)
+      # ... do work ...
+      EtherCAT.close(system)
+  """
+  @spec close(System.t()) :: :ok
+  def close(system), do: System.close(system)
+
+  @doc """
+  Reads a PDO entry value from the system.
+
+  ## Parameters
+  - `system` - System handle
+  - `slave_name` - Slave name from configuration (atom)
+  - `pdo_name` - PDO identifier (atom)
+  - `entry_name` - Entry identifier (atom)
+
+  ## Returns
+  - `{:ok, value}` - Decoded entry value
+  - `{:error, reason}` - Read error or entry not found
+
+  ## Example
+
+      {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
+      {:ok, error_flag} = EtherCAT.read(system, :temp_sensor, :ch1, :error)
+  """
+  @spec read(System.t(), atom(), atom(), atom()) :: {:ok, term()} | {:error, term()}
+  def read(%System{} = system, slave_name, pdo_name, entry_name) do
+    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.read_entry(entry.slave_pid, entry.pdo_name, entry.entry_name)
     end
   end
 
-  # Verifies hardware layout if expected configuration is provided
-  defp verify_hardware(nil, _slaves, _match_strategy), do: :ok
+  @doc """
+  Writes a value to a PDO entry in the system.
 
-  defp verify_hardware(expected_layout, slaves, match_strategy) do
-    case EtherCAT.HardwareLayout.verify(expected_layout, slaves, match: match_strategy) do
-      :ok ->
-        :ok
+  ## Parameters
+  - `system` - System handle
+  - `slave_name` - Slave name from configuration (atom)
+  - `pdo_name` - PDO identifier (atom)
+  - `entry_name` - Entry identifier (atom)
+  - `value` - Value to write (will be encoded by driver)
 
-      {:error, mismatches} ->
-        Logger.error("Hardware configuration mismatch detected:")
+  ## Returns
+  - `:ok` - Write successful
+  - `{:error, reason}` - Write error or entry not found
 
-        Enum.each(mismatches, fn
-          {:missing_slave, details} ->
-            Logger.error(
-              "  Missing slave at position #{details.position}: " <>
-                "expected #{format_device(details.expected_vendor, details.expected_product)} " <>
-                "(#{inspect(details.expected_name)})"
-            )
+  ## Example
 
-          {:extra_slave, details} ->
-            Logger.error(
-              "  Extra slave at position #{details.position}: " <>
-                "found #{format_device(details.actual_vendor, details.actual_product)}"
-            )
-
-          {:wrong_vendor, details} ->
-            Logger.error(
-              "  Wrong vendor at position #{details.position}: " <>
-                "expected 0x#{Integer.to_string(details.expected, 16)}, " <>
-                "got 0x#{Integer.to_string(details.actual, 16)}"
-            )
-
-          {:wrong_product, details} ->
-            Logger.error(
-              "  Wrong product at position #{details.position}: " <>
-                "expected 0x#{Integer.to_string(details.expected, 16)}, " <>
-                "got 0x#{Integer.to_string(details.actual, 16)}"
-            )
-        end)
-
-        {:error, {:config_mismatch, mismatches}}
+      :ok = EtherCAT.write(system, :valve_outputs, :ch1, :value, true)
+      :ok = EtherCAT.write(system, :motor_drive, :setpoint, :velocity, 1500)
+  """
+  @spec write(System.t(), atom(), atom(), atom(), term()) :: :ok | {:error, term()}
+  def write(%System{} = system, slave_name, pdo_name, entry_name, value) do
+    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.write_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, value)
     end
   end
 
-  defp format_device(vendor_id, product_code) do
-    "0x#{Integer.to_string(vendor_id, 16)}:0x#{Integer.to_string(product_code, 16)}"
-  end
-
-  @doc "Closes master and cleans up all resources."
-  @spec close(pid()) :: :ok
-  def close(master) do
-    Master.stop(master)
-  end
-
-  @doc "Creates domain with name and interval multiplier."
-  @spec create_domain(pid(), atom(), pos_integer()) :: {:ok, reference()} | {:error, term()}
-  def create_domain(master, name, interval), do: Master.create_domain(master, name, interval)
-
   @doc """
-  Sets a semantic name for a slave device.
+  Subscribes to value change notifications for a PDO entry.
 
-  The name is used to generate human-readable unique identifiers for PDO entries.
-  This is optional - if not set, slaves will use "s<position>" format (e.g., "s0", "s1").
+  The calling process will receive `{:pdo_value_changed, unique_name, value}`
+  messages when the entry value changes.
 
   ## Parameters
-  - `slave` - Slave process PID
-  - `name` - Atom or string to identify the slave
+  - `system` - System handle
+  - `slave_name` - Slave name from configuration (atom)
+  - `pdo_name` - PDO identifier (atom)
+  - `entry_name` - Entry identifier (atom)
 
   ## Returns
-  - `:ok` on success
+  - `:ok` - Subscription successful
+  - `{:error, reason}` - Subscription error or entry not found
 
   ## Example
 
-      {:ok, master, [slave1, slave2]} = EtherCAT.open(index: 0)
+      :ok = EtherCAT.watch(system, :temp_sensor, :ch1, :value)
 
-      # Set semantic names
-      EtherCAT.set_slave_name(slave1, :temp_sensor)
-      EtherCAT.set_slave_name(slave2, :pressure_sensor)
-
-      # Register entries - now uses semantic names
-      {:ok, temp} = EtherCAT.register_entry(master, slave1, :ch1, :value)
-      # unique_name = "temp_sensor:ch1:value" (instead of "s0:ch1:value")
+      receive do
+        {:pdo_value_changed, _name, temp} ->
+          IO.puts("Temperature changed: \#{temp}")
+      end
   """
-  @spec set_slave_name(pid(), atom() | String.t()) :: :ok
-  def set_slave_name(slave, name), do: Slave.set_name(slave, name)
-
-  @doc """
-  Gets the semantic name of a slave device, if set.
-
-  ## Parameters
-  - `slave` - Slave process PID
-
-  ## Returns
-  - `{:ok, name}` if name is set
-  - `{:ok, nil}` if no name is set
-
-  ## Example
-
-      EtherCAT.set_slave_name(slave, :temp_sensor)
-      {:ok, :temp_sensor} = EtherCAT.get_slave_name(slave)
-  """
-  @spec get_slave_name(pid()) :: {:ok, atom() | String.t() | nil}
-  def get_slave_name(slave), do: Slave.get_name(slave)
-
-  @doc "Configures slave and returns available PDO names."
-  @spec configure_slave(pid(), map()) :: {:ok, list()}
-  def configure_slave(slave, config) do
-    :ok = Slave.configure(slave, config)
-    {:ok, Slave.list_pdos(slave)}
+  @spec watch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
+  def watch(%System{} = system, slave_name, pdo_name, entry_name) do
+    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.watch_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, self())
+    end
   end
 
   @doc """
-  Registers a single PDO entry and returns a handle for I/O operations.
-
-  This is the **granular entry-level API** - register only specific entries you need.
+  Unsubscribes from value change notifications for a PDO entry.
 
   ## Parameters
-  - `slave` - Slave process PID
-  - `pdo_name` - PDO name from `configure_slave/2` (e.g., `:ch1`)
-  - `entry_name` - Entry name within the PDO (e.g., `:value`, `:error`)
-  - `domain` - Domain identifier (default: `:default_domain`)
+  - `system` - System handle
+  - `slave_name` - Slave name from configuration (atom)
+  - `pdo_name` - PDO identifier (atom)
+  - `entry_name` - Entry identifier (atom)
 
   ## Returns
-  - `{:ok, %PDOEntry{}}` - PDO entry handle for read/write/watch operations
-  - `{:error, reason}` - Error if registration fails
-
-  ## Multi-Domain Support
-  Entries from the same sync manager can be registered to different domains.
-  Each domain creates its own FMMU mapping of the sync manager memory.
+  - `:ok` - Unsubscription successful
+  - `{:error, reason}` - Unsubscription error or entry not found
 
   ## Example
 
-      # Register only the temperature value, skip other entries
-      {:ok, temp_handle} = EtherCAT.register_entry(slave, :ch1, :value)
-      {:ok, temp} = EtherCAT.read(temp_handle)
+      :ok = EtherCAT.unwatch(system, :temp_sensor, :ch1, :value)
   """
-  @spec register_entry(pid(), Slave.pdo_name(), Slave.entry_name(), Slave.domain()) ::
-          {:ok, PDOEntry.t()} | {:error, term()}
-  def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain) do
-    Slave.register_entry(slave, pdo_name, entry_name, domain)
+  @spec unwatch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
+  def unwatch(%System{} = system, slave_name, pdo_name, entry_name) do
+    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.unwatch_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, self())
+    end
   end
 
   @doc """
-  Registers multiple PDO entries and returns handles for I/O operations.
+  Generates a HardwareConfig from a running system.
 
-  Convenience function for registering several specific entries at once.
+  Use this after opening in discovery mode to create a configuration
+  that can be saved and used to build a Spark DSL module.
 
   ## Parameters
-  - `slave` - Slave process PID
-  - `entries` - List of `{pdo_name, entry_name}` or `{pdo_name, entry_name, domain}` tuples
-  - `default_domain` - Domain to use when not specified per entry (default: `:default_domain`)
+  - `system` - System handle from discovery mode
 
   ## Returns
-  - `{:ok, [%PDOEntry{}]}` - List of PDO entry handles on success
-  - `{:error, reason}` - Error if any registration fails
+  - `HardwareConfig` struct representing the discovered hardware
 
   ## Example
 
-      # Register specific entries from different PDOs
-      {:ok, handles} = EtherCAT.register_entries(slave, [
-        {:ch1, :value},
-        {:ch1, :error},
-        {:ch2, :value}
-      ])
+      {:ok, system} = EtherCAT.open()
+      config = EtherCAT.generate_config(system)
 
-      [temp1, temp1_err, temp2] = handles
+      IO.puts(\"\"\"
+      defmodule MyMachine do
+        use EtherCAT.Config
+
+        # TODO: Add domains
+        domain :default_domain, interval: 1
+
+        # Discovered slaves:
+        \"\"\")
+
+      Enum.each(config.slaves, fn slave ->
+        IO.puts("  slave position: \#{slave.position}, name: :\#{slave.name || "s\#{slave.position}"}")
+      end)
   """
-  @spec register_entries(pid(), list(), Slave.domain()) ::
-          {:ok, [PDOEntry.t()]} | {:error, term()}
-  def register_entries(slave, entries, default_domain \\ :default_domain) do
-    results =
-      Enum.map(entries, fn entry_spec ->
-        {pdo_name, entry_name, domain} =
-          case entry_spec do
-            {pdo, entry} -> {pdo, entry, default_domain}
-            {pdo, entry, dom} -> {pdo, entry, dom}
-          end
+  @spec generate_config(System.t()) :: HardwareConfig.t()
+  def generate_config(%System{master: master}) do
+    # Get all slaves
+    {:ok, slaves} = Master.get_slaves(master)
 
-        case Slave.register_entry(slave, pdo_name, entry_name, domain) do
-          {:ok, _} = ok ->
-            ok
+    slave_configs =
+      Enum.map(slaves, fn slave_pid ->
+        info = Slave.get_info(slave_pid)
+        pdos = Slave.list_pdos(slave_pid)
 
-          {:error, reason} ->
-            # Add context about which entry failed
-            {:error, {:registration_failed, pdo_name, entry_name, reason}}
-        end
+        # Generate basic slave config (user will need to add entries)
+        %EtherCAT.Config.SlaveConfig{
+          position: info.position,
+          name: info.name,
+          driver: nil,
+          # TODO: Driver detection
+          expected: %{
+            vendor: info.vendor_id,
+            product: info.product_code
+          },
+          config: %{},
+          entries: []
+          # User needs to fill this in
+        }
       end)
 
-    # Check if any failed
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
-      {:error, _} = error -> error
-      nil -> {:ok, Enum.map(results, fn {:ok, entry} -> entry end)}
-    end
-  end
-
-  @doc """
-  Registers PDOs (with all their entries) to domain and returns handles.
-
-  This is the **convenient PDO-level API** - register all entries in each PDO at once.
-
-  ## Parameters
-  - `slave` - Slave process PID
-  - `pdo_names` - List of PDO names from `configure_slave/2`
-  - `domain` - Domain name (default: `:default_domain`)
-
-  ## Returns
-  - `{:ok, [%PDOEntry{}]}` - List of handles for all entries in all PDOs
-  - `{:error, reason}` - Error if registration fails
-
-  ## Multi-Domain Support
-  PDOs and entries can be registered to different domains regardless of sync manager.
-  Each domain creates its own FMMU for accessing the sync manager memory.
-
-  ## Example
-
-      # Register all entries from channel 1 and channel 2 PDOs
-      {:ok, handles} = EtherCAT.register_pdos(slave, [:ch1, :ch2])
-      # Returns handles for all 12 entries (6 per channel)
-  """
-  @spec register_pdos(pid(), [Slave.pdo_name()], Slave.domain()) ::
-          {:ok, [PDOEntry.t()]} | {:error, term()}
-  def register_pdos(slave, pdo_names, domain \\ :default_domain) do
-    # For each PDO, get its entries and register them all
-    results =
-      Enum.flat_map(pdo_names, fn pdo_name ->
-        case Slave.get_pdo_entries(slave, pdo_name) do
-          {:ok, entry_names} ->
-            # Register each entry in this PDO
-            Enum.map(entry_names, fn entry_name ->
-              case Slave.register_entry(slave, pdo_name, entry_name, domain) do
-                {:ok, _} = ok ->
-                  ok
-
-                {:error, reason} ->
-                  # Add context about which entry failed
-                  {:error, {:registration_failed, pdo_name, entry_name, reason}}
-              end
-            end)
-
-          {:error, reason} ->
-            # Add context about PDO query failure
-            [{:error, {:pdo_query_failed, pdo_name, reason}}]
-        end
-      end)
-
-    # Check if any failed
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
-      {:error, _} = error ->
-        error
-
-      nil ->
-        # Extract all PDOEntry structs
-        handles = Enum.map(results, fn {:ok, entry} -> entry end)
-        {:ok, handles}
-    end
-  end
-
-  @doc "Reads PDO entry value from handle."
-  @spec read(PDOEntry.t()) :: {:ok, term()} | {:error, term()}
-  def read(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
-    Slave.read_entry(slave_pid, pdo_name, entry_name)
-  end
-
-  @doc "Writes value to PDO entry handle."
-  @spec write(PDOEntry.t(), term()) :: :ok | {:error, term()}
-  def write(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}, value) do
-    Slave.write_entry(slave_pid, pdo_name, entry_name, value)
-  end
-
-  @doc "Subscribes to PDO entry change notifications."
-  @spec watch(PDOEntry.t()) :: :ok | {:error, term()}
-  def watch(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
-    Slave.watch_entry(slave_pid, pdo_name, entry_name, self())
-  end
-
-  @doc "Unsubscribes from PDO entry change notifications."
-  @spec unwatch(PDOEntry.t()) :: :ok | {:error, term()}
-  def unwatch(%PDOEntry{slave_pid: slave_pid, pdo_name: pdo_name, entry_name: entry_name}) do
-    Slave.unwatch_entry(slave_pid, pdo_name, entry_name, self())
-  end
-
-  @doc "Starts cyclic communication. Locks configuration - no changes allowed after this."
-  @spec start_cyclic(pid()) :: :ok
-  def start_cyclic(master), do: Master.start_cyclic_mode(master)
-
-  @doc "Gets domain update interval."
-  @spec get_domain_interval(pid(), atom()) :: {:ok, pos_integer()} | {:error, term()}
-  def get_domain_interval(master, domain_name) do
-    case Domain.find_domain(master, domain_name) do
-      {:ok, domain} -> {:ok, Domain.get_interval(domain)}
-      error -> error
-    end
+    %HardwareConfig{
+      domains: [
+        # Default domain - user should customize
+        %EtherCAT.Config.DomainConfig{name: :default_domain, interval: 1}
+      ],
+      slaves: slave_configs
+    }
   end
 end

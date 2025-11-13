@@ -911,12 +911,14 @@ defmodule EtherCAT.Slave do
 
   # Private helpers
 
-  # Registers a single entry from a PDO
+  # Registers a single entry from a PDO to a domain
+  # NOTE: PDO configuration (assignments/mappings) is already done during configure_slave
+  # This function ONLY handles domain registration
   defp do_register_entry(pdo_name, entry_name, domain_name, data) do
     with {:ok, pdo_info} <- data.driver.pdo_info(data.driver_state, pdo_name),
          :ok <- validate_entry_exists(pdo_info, entry_name),
          {:ok, domain_pid} <- Domain.find_domain(data.master, domain_name) do
-      {sync_index, direction, watchdog} = pdo_info.sync_manager
+      {_sync_index, direction, _watchdog} = pdo_info.sync_manager
       pdo_index = pdo_info.pdo_index
 
       {entry_type, entry} =
@@ -928,68 +930,26 @@ defmodule EtherCAT.Slave do
             {Driver.infer_type_from_bit_length(bit_length), {index, subindex, bit_length}}
         end
 
-      # Check if device supports PDO configuration
-      supports_pdo_config = data.driver.supports_pdo_config?(data.driver_state)
-
-      # Configure sync manager if not already configured
-      # This tells the master which sync manager to use for PDO data exchange
-      updated_data =
-        if MapSet.member?(data.configured_sync_managers, sync_index) do
-          data
-        else
-          # Configure sync manager with direction and watchdog mode
-          config_sync_manager_internal(data, sync_index, direction, watchdog)
-          Logger.debug("Configured SM#{sync_index} dir=#{direction} watchdog=#{watchdog}")
-
-          %{
-            data
-            | configured_sync_managers: MapSet.put(data.configured_sync_managers, sync_index)
-          }
-        end
-
-      # Assign PDO to sync manager if not already assigned
-      # This is required so the master knows which PDOs are active
-      updated_data =
-        if MapSet.member?(updated_data.assigned_pdos, pdo_index) do
-          updated_data
-        else
-          config_pdo_assign_add_internal(updated_data, sync_index, pdo_index)
-          Logger.debug("Assigned PDO 0x#{Integer.to_string(pdo_index, 16)} to SM#{sync_index}")
-          %{updated_data | assigned_pdos: MapSet.put(updated_data.assigned_pdos, pdo_index)}
-        end
-
-      # Only configure PDO entry mappings for devices that support it
-      updated_data =
-        if supports_pdo_config do
-          # Add entry to PDO mapping (dynamic configuration)
-          config_pdo_mapping_add_internal(updated_data, pdo_index, entry)
-
-          updated_data
-        else
-          # For fixed PDO mappings, skip entry mapping configuration
-          # The device will use its default PDO mapping
-          updated_data
-        end
-
       # Generate unique name and register with domain
       slave_identifier =
-        case updated_data.name do
-          nil -> "s#{updated_data.position}"
+        case data.name do
+          nil -> "s#{data.position}"
           name when is_atom(name) -> Atom.to_string(name)
           name when is_binary(name) -> name
         end
 
       unique_name = "#{slave_identifier}:#{pdo_name}:#{entry_name}"
 
+      # Register entry with domain for cyclic data exchange
       Domain.register_pdo_entry(
         domain_pid,
-        updated_data.slave_config,
+        data.slave_config,
         unique_name,
         entry,
         direction
       )
 
-      Logger.debug("Registered entry #{unique_name} to domain #{domain_name} (SM#{sync_index})")
+      Logger.debug("Registered entry #{unique_name} to domain #{domain_name}")
 
       # Store entry metadata in state
       entry_metadata = %{
@@ -1001,8 +961,8 @@ defmodule EtherCAT.Slave do
       }
 
       updated_data = %{
-        updated_data
-        | entries: Map.put(updated_data.entries, {pdo_name, entry_name}, entry_metadata)
+        data
+        | entries: Map.put(data.entries, {pdo_name, entry_name}, entry_metadata)
       }
 
       # Return PDOEntry struct
@@ -1097,7 +1057,11 @@ defmodule EtherCAT.Slave do
   end
 
   # Configures all sync managers upfront based on driver PDO info
+  # Follows EtherLab pattern: config SM, clear assigns, add assigns, clear mappings, add mappings
   defp configure_all_sync_managers(data) do
+    # Check if device supports PDO configuration
+    supports_pdo_config = data.driver.supports_pdo_config?(data.driver_state)
+
     data.driver.list_pdos(data.driver_state)
     |> Enum.map(fn pdo_name ->
       {:ok, info} = data.driver.pdo_info(data.driver_state, pdo_name)
@@ -1107,20 +1071,47 @@ defmodule EtherCAT.Slave do
       {sync_idx, _dir, _wd} = info.sync_manager
       sync_idx
     end)
-    |> Enum.each(fn {sync_index, infos} ->
+    |> Enum.each(fn {sync_index, pdo_infos} ->
       # Get sync manager config from first PDO
-      {_sync_idx, direction, watchdog} = hd(infos).sync_manager
+      {_sync_idx, direction, watchdog} = hd(pdo_infos).sync_manager
 
-      # Configure sync manager
+      # Step 1: Configure sync manager
       config_sync_manager_internal(data, sync_index, direction, watchdog)
 
-      # Clear PDO assignments and mappings (prepare for registration)
+      # Step 2: Clear PDO assignments
       config_pdo_assign_clear_internal(data, sync_index)
 
-      infos
+      # Step 3: Add ALL PDO assignments for this sync manager
+      pdo_infos
       |> Enum.map(& &1.pdo_index)
       |> Enum.uniq()
-      |> Enum.each(&config_pdo_mapping_clear_internal(data, &1))
+      |> Enum.each(fn pdo_index ->
+        config_pdo_assign_add_internal(data, sync_index, pdo_index)
+      end)
+
+      # Step 4 & 5: For each PDO, clear and add mappings (only if device supports it)
+      if supports_pdo_config do
+        Enum.each(pdo_infos, fn pdo_info ->
+          pdo_index = pdo_info.pdo_index
+
+          # Clear mappings for this PDO
+          config_pdo_mapping_clear_internal(data, pdo_index)
+
+          # Add ALL entry mappings for this PDO
+          Enum.each(pdo_info.entries, fn {_entry_name, entry_config} ->
+            entry_tuple =
+              case entry_config do
+                {_type, index, subindex, bit_length} ->
+                  {index, subindex, bit_length}
+
+                {index, subindex, bit_length} ->
+                  {index, subindex, bit_length}
+              end
+
+            config_pdo_mapping_add_internal(data, pdo_index, entry_tuple)
+          end)
+        end)
+      end
     end)
   end
 
