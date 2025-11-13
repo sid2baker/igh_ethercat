@@ -8,7 +8,7 @@ defmodule EtherCAT.Master do
 
   alias EtherCAT.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval]
+  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval, :nif_yield_interval]
 
   @type t :: %__MODULE__{
           master_ref: reference(),
@@ -16,7 +16,9 @@ defmodule EtherCAT.Master do
           domains: [Domain.t()],
           task_pid: pid(),
           # in us
-          update_interval: integer()
+          update_interval: integer(),
+          # NIF yielding interval in us (default 100_000 = 100ms)
+          nif_yield_interval: integer()
         }
 
   # Client API
@@ -37,13 +39,28 @@ defmodule EtherCAT.Master do
     }
   end
 
-  @doc "Starts master process in `:offline` state."
+  @doc """
+  Starts master process in `:offline` state.
+
+  ## Options
+  - `:master_index` - EtherCAT master index (default: 0)
+  - `:update_interval` - Master update interval in microseconds (default: 10_000)
+  - `:nif_yield_interval` - NIF yielding interval in microseconds (default: 100_000 = 100ms)
+  - `:name` - Registered process name (default: `EtherCAT.Master`)
+  """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
     update_interval = Keyword.get(opts, :update_interval, 10_000)
+    nif_yield_interval = Keyword.get(opts, :nif_yield_interval, 100_000)
     name = Keyword.get(opts, :name, __MODULE__)
-    :gen_statem.start_link({:local, name}, __MODULE__, {master_index, update_interval}, [])
+
+    :gen_statem.start_link(
+      {:local, name},
+      __MODULE__,
+      {master_index, update_interval, nif_yield_interval},
+      []
+    )
   end
 
   @doc """
@@ -126,7 +143,7 @@ defmodule EtherCAT.Master do
   def callback_mode(), do: [:state_functions, :state_enter]
 
   @impl true
-  def init({master_index, update_interval}) do
+  def init({master_index, update_interval, nif_yield_interval}) do
     # Trap exits to ensure graceful cleanup
     Process.flag(:trap_exit, true)
 
@@ -135,7 +152,8 @@ defmodule EtherCAT.Master do
         # Register this master in the Registry for process discovery
         case Registry.register(EtherCAT.Registry, {:master, master_index}, %{
                master_index: master_index,
-               update_interval: update_interval
+               update_interval: update_interval,
+               nif_yield_interval: nif_yield_interval
              }) do
           {:ok, _} ->
             :ok
@@ -153,7 +171,8 @@ defmodule EtherCAT.Master do
               domains: [domain_pid],
               slaves: [],
               task_pid: nil,
-              update_interval: update_interval
+              update_interval: update_interval,
+              nif_yield_interval: nif_yield_interval
             }
 
             Logger.info("EtherCAT Master #{master_index} initialized successfully")
@@ -469,7 +488,13 @@ defmodule EtherCAT.Master do
 
         task_pid =
           spawn_link(fn ->
-            Nif.cyclic_task(parent_pid, data.master_ref, domain_resources, data.update_interval)
+            Nif.cyclic_task(
+              parent_pid,
+              data.master_ref,
+              domain_resources,
+              data.update_interval,
+              data.nif_yield_interval
+            )
           end)
 
         duration = System.monotonic_time() - start_time
