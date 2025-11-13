@@ -1,0 +1,6 @@
+defmodule EtherCAT.Config.Dsl.Domain do
+  @moduledoc false
+  # Entity target for domain DSL
+
+  defstruct [:name, :interval]
+end

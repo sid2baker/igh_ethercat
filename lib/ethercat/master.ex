@@ -90,6 +90,12 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :sync_slaves, timeout)
   end
 
+  @doc "Gets list of all slave PIDs."
+  @spec get_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
+  def get_slaves(master, timeout \\ 5000) do
+    :gen_statem.call(master, :get_slaves, timeout)
+  end
+
   @doc "Creates domain with independent update interval."
   @spec create_domain(GenServer.server(), atom(), pos_integer(), timeout()) ::
           {:ok, reference()} | {:error, term()}
@@ -433,6 +439,10 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, data.master_ref}]}
   end
 
+  def synced({:call, from}, :get_slaves, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
+  end
+
   def synced(:state_timeout, :update_master_state, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
@@ -536,6 +546,10 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :get_ref, data) do
     actions = [{:reply, from, data.master_ref}]
     {:keep_state_and_data, actions}
+  end
+
+  def operational({:call, from}, :get_slaves, data) do
+    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
   # Gateway for domain operations in operational state
