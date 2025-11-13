@@ -106,15 +106,21 @@ defmodule EtherCAT.HardwareLayout do
       |> Enum.map(fn slave_pid ->
         # Get slave info from the process
         # The Slave GenStatem stores this in its data
-        info = EtherCAT.Slave.get_info(slave_pid)
+        try do
+          info = EtherCAT.Slave.get_info(slave_pid)
 
-        %SlaveConfig{
-          position: info.position,
-          vendor_id: info.vendor_id,
-          product_code: info.product_code,
-          name: info.name,
-          alias: info.alias
-        }
+          %SlaveConfig{
+            position: info.position,
+            vendor_id: info.vendor_id,
+            product_code: info.product_code,
+            name: info.name,
+            alias: info.alias
+          }
+        catch
+          :exit, reason ->
+            # Slave process died or couldn't be reached
+            raise "Failed to get info from slave #{inspect(slave_pid)}: #{inspect(reason)}"
+        end
       end)
 
     %__MODULE__{slaves: slave_configs}

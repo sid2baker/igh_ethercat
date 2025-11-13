@@ -659,6 +659,20 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, :unconfigured}]}
   end
 
+  def unconfigured({:call, from}, :get_info, data) do
+    info = %{
+      position: data.position,
+      alias: data.alias,
+      vendor_id: data.vendor_id,
+      product_code: data.product_code,
+      revision: data.revision,
+      serial: data.serial,
+      name: data.name
+    }
+
+    {:keep_state_and_data, [{:reply, from, info}]}
+  end
+
   def unconfigured({:call, from}, _request, data) do
     {:keep_state_and_data,
      [{:reply, from, {:error, {:invalid_state, :unconfigured, "Call configure/2 first"}}}]}
