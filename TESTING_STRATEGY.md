@@ -8,11 +8,159 @@ This document outlines a progressive testing strategy for the `igh_ethercat` lib
 - **Comprehensive coverage** of edge cases and state machines
 - **Living documentation** through test examples
 
-**Core Approach:** Use FakeEtherCAT (libfakeethercat) for virtual slave simulation, preserving full NIF integration while enabling hardware-free testing. Start with minimal CI setup, progressively expand coverage over time.
+**Current Approach (Phase 1):** Start with simple Elixir test helpers and hardware verification infrastructure. This provides immediate value with minimal complexity while keeping the door open for FakeEtherCAT integration later.
+
+**Future Consideration:** FakeEtherCAT (libfakeethercat) for full virtual slave simulation. Deferred until the complexity is justified by testing needs.
 
 ---
 
-## Current State Analysis
+## Current Implementation (Phase 1: Test Infrastructure)
+
+### What We Have Now
+
+**✅ Hardware Verification System**
+- `EtherCAT.HardwareLayout` - Declarative hardware configuration
+- `EtherCAT.HardwareVerifier` - Automatic verification with detailed error reporting
+- `EtherCAT.SlaveConfig` - Slave specification struct
+- Discovery mode: `EtherCAT.open()` (no verification)
+- Strict mode: `EtherCAT.open(expected: layout, match: :exact)` (fails on mismatch)
+
+**✅ Test Helpers** (`test/support/test_helpers.ex`)
+- `find_slave/3` - Find slave by vendor/product ID
+- `find_slaves_by_vendor/2` - Find all slaves from a vendor
+- `assert_hardware_matches!/2` - Assert layout matches with helpful errors
+- `wait_for_slaves/3` - Wait for slaves to enumerate
+- `minimal_layout/2` - Create test fixtures quickly
+
+**✅ Example Layouts** (`test/support/example_layouts.ex`)
+- `simple_io_layout/0` - Single generic I/O slave
+- `beckhoff_temperature_layout/0` - Real Beckhoff EL3202 device
+- `multi_slave_layout/0` - 4-slave mixed vendor bus
+- `aliased_layout/0` - Demonstrates alias addressing
+- `large_bus_layout/0` - 16-slave performance testing
+
+**✅ Example Tests**
+- `test/unit/hardware_layout_test.exs` - Tests for layout generation and verification
+- `test/unit/test_helpers_test.exs` - Demonstrates usage patterns
+
+### Usage Patterns
+
+#### Pattern 1: Hardware Verification
+```elixir
+defmodule MyApp.ProductionTest do
+  use ExUnit.Case
+  import EtherCAT.ExampleLayouts
+
+  test "production hardware matches expected layout" do
+    layout = multi_slave_layout()
+
+    # Fails fast if hardware doesn't match
+    {:ok, master, slaves} = EtherCAT.open(expected: layout, match: :exact)
+
+    # Continue with tests...
+    EtherCAT.close(master)
+  end
+end
+```
+
+#### Pattern 2: Hardware Discovery
+```elixir
+test "discover and document current hardware" do
+  # Connect without expectations
+  {:ok, master, slaves} = EtherCAT.open()
+
+  # Generate layout from discovered hardware
+  layout = EtherCAT.HardwareLayout.from_slaves(slaves)
+
+  # Save for future use
+  source = EtherCAT.HardwareLayout.generate_module(layout,
+    module_name: "MyApp.DiscoveredLayout"
+  )
+  File.write!("test/fixtures/my_layout.ex", source)
+
+  EtherCAT.close(master)
+end
+```
+
+#### Pattern 3: Selective Testing
+```elixir
+test "works with any Beckhoff temperature sensor" do
+  import EtherCAT.TestHelpers
+
+  {:ok, master, slaves} = EtherCAT.open()
+
+  # Find specific devices
+  beckhoff_slaves = find_slaves_by_vendor(slaves, 0x00000002)
+  temp_sensor = find_slave(slaves, 0x00000002, 0x0C823052)
+
+  # Test with found devices...
+  EtherCAT.close(master)
+end
+```
+
+#### Pattern 4: Quick Test Fixtures
+```elixir
+test "handles 5-slave bus" do
+  import EtherCAT.TestHelpers
+
+  # Generate minimal test layout
+  layout = minimal_layout(5, vendor_id: 0xDEAD, product_code: 0x0001)
+
+  # Use for testing (still requires real hardware for now)
+  # ...
+end
+```
+
+### Benefits of Current Approach
+
+1. **Immediate Value**: Works with existing hardware tests right now
+2. **Simple**: Pure Elixir, no C compilation, no complex setup
+3. **Self-Documenting**: Hardware requirements are explicit in code
+4. **Fail-Fast**: Wrong hardware detected at startup, not during test execution
+5. **Maintainable**: Easy to understand and modify
+6. **Foundation**: Infrastructure ready for future FakeEtherCAT integration
+
+### Limitations
+
+- Still requires real hardware or hardware abstraction for full CI/CD
+- Cannot test master/slave state machine transitions in isolation
+- PDO I/O testing needs physical devices
+
+### Next Steps
+
+Consider FakeEtherCAT integration when:
+- Need to test without any hardware (full CI/CD automation)
+- Want to test error conditions that are hard to reproduce with real hardware
+- Need to test timing-sensitive scenarios
+- Want to simulate hardware failures
+
+---
+
+## Future Option: FakeEtherCAT Integration (Deferred)
+
+> **Note:** The sections below describe a more complex testing approach using FakeEtherCAT
+> (libfakeethercat) for full virtual slave simulation. This approach has been **deferred**
+> in favor of the simpler Elixir test helpers described above. The information is preserved
+> for future reference when the complexity is justified.
+
+### Why Deferred?
+
+FakeEtherCAT requires:
+- Two separate processes (master application + fake slave application)
+- RtIPC shared memory setup and direction swapping
+- C compilation for fake slave programs
+- Complex debugging across process boundaries
+- Additional build system integration
+
+**Decision:** Start simple with Elixir helpers. Revisit FakeEtherCAT when we need:
+- Full CI/CD without any hardware
+- Error injection testing
+- Hardware failure simulation
+- State machine isolation testing
+
+---
+
+## Historical Context: Original Analysis
 
 ### Existing Tests
 - ✅ **1 unit test** (`test/ethercat_test.exs`) - Basic API surface
