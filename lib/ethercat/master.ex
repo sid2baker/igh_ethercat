@@ -181,30 +181,25 @@ defmodule EtherCAT.Master do
       Process.exit(task_pid, :kill)
 
       # FIX H5: Add timeout handling to prevent deadlocks
-      # Wait for EXIT signal with timeout
-      exit_result =
-        receive do
-          {:EXIT, ^task_pid, _exit_reason} -> :ok
-        after
-          3000 ->
-            Logger.error("Timeout waiting for cyclic task EXIT signal")
-            :timeout
-        end
-
-      # Wait for cyclic_task_died confirmation with timeout
-      case exit_result do
-        :ok ->
+      # Wait for BOTH messages (order is non-deterministic)
+      # NIF sends :cyclic_task_died before task exits, but EXIT signal timing varies
+      results =
+        for _ <- 1..2 do
           receive do
-            :cyclic_task_died -> :ok
+            {:EXIT, ^task_pid, _exit_reason} -> :exit_received
+            :cyclic_task_died -> :died_received
           after
-            2000 ->
-              Logger.error("Timeout waiting for cyclic_task_died message")
+            3000 ->
+              Logger.error("Timeout waiting for cyclic task termination message")
               :timeout
           end
+        end
 
-        :timeout ->
-          Logger.warning("Skipping cyclic_task_died wait due to EXIT timeout")
-          :timeout
+      # Verify we got both required messages
+      unless :exit_received in results and :died_received in results do
+        Logger.error(
+          "Incomplete cyclic task shutdown - received: #{inspect(results)}"
+        )
       end
     end
 
