@@ -6,13 +6,46 @@ defmodule EtherCAT do
   alias EtherCAT.{Master, Slave, Domain, PDOEntry}
   require Logger
 
-  @doc "Opens master, connects, and discovers slaves. Returns `{:ok, master, [slaves]}`."
+  @doc """
+  Opens master, connects, and discovers slaves.
+
+  ## Options
+
+  All options supported by `Master.start_link/1`, plus:
+
+  - `:expected` - Expected hardware layout (`%EtherCAT.HardwareLayout{}`).
+    If provided, discovered slaves will be verified against this layout.
+  - `:match` - Match strategy for verification (default: `:exact`).
+    Currently only `:exact` is supported.
+
+  ## Returns
+
+  - `{:ok, master, slaves}` - Master PID and list of discovered slave PIDs
+  - `{:error, {:config_mismatch, mismatches}}` - Hardware doesn't match expected layout
+  - `{:error, reason}` - Other errors (connection failure, etc.)
+
+  ## Examples
+
+      # Discovery mode (no verification)
+      {:ok, master, slaves} = EtherCAT.open()
+
+      # With hardware verification
+      layout = %EtherCAT.HardwareLayout{slaves: [...]}
+      {:ok, master, slaves} = EtherCAT.open(expected: layout, match: :exact)
+
+      # Verification failure
+      {:error, {:config_mismatch, mismatches}} = EtherCAT.open(expected: layout)
+  """
   @spec open(keyword()) :: {:ok, pid(), [pid()]} | {:error, term()}
   def open(opts \\ []) do
+    expected_layout = Keyword.get(opts, :expected)
+    match_strategy = Keyword.get(opts, :match, :exact)
+
     case Master.start_link(opts) do
       {:ok, master} ->
         with :ok <- Master.connect(master),
-             {:ok, slaves} <- Master.sync_slaves(master) do
+             {:ok, slaves} <- Master.sync_slaves(master),
+             :ok <- verify_hardware(expected_layout, slaves, match_strategy) do
           {:ok, master, slaves}
         else
           error ->
@@ -23,6 +56,54 @@ defmodule EtherCAT do
       error ->
         error
     end
+  end
+
+  # Verifies hardware layout if expected configuration is provided
+  defp verify_hardware(nil, _slaves, _match_strategy), do: :ok
+
+  defp verify_hardware(expected_layout, slaves, match_strategy) do
+    case EtherCAT.HardwareVerifier.verify(expected_layout, slaves, match: match_strategy) do
+      :ok ->
+        :ok
+
+      {:error, mismatches} ->
+        Logger.error("Hardware configuration mismatch detected:")
+
+        Enum.each(mismatches, fn
+          {:missing_slave, details} ->
+            Logger.error(
+              "  Missing slave at position #{details.position}: " <>
+                "expected #{format_device(details.expected_vendor, details.expected_product)} " <>
+                "(#{inspect(details.expected_name)})"
+            )
+
+          {:extra_slave, details} ->
+            Logger.error(
+              "  Extra slave at position #{details.position}: " <>
+                "found #{format_device(details.actual_vendor, details.actual_product)}"
+            )
+
+          {:wrong_vendor, details} ->
+            Logger.error(
+              "  Wrong vendor at position #{details.position}: " <>
+                "expected 0x#{Integer.to_string(details.expected, 16)}, " <>
+                "got 0x#{Integer.to_string(details.actual, 16)}"
+            )
+
+          {:wrong_product, details} ->
+            Logger.error(
+              "  Wrong product at position #{details.position}: " <>
+                "expected 0x#{Integer.to_string(details.expected, 16)}, " <>
+                "got 0x#{Integer.to_string(details.actual, 16)}"
+            )
+        end)
+
+        {:error, {:config_mismatch, mismatches}}
+    end
+  end
+
+  defp format_device(vendor_id, product_code) do
+    "0x#{Integer.to_string(vendor_id, 16)}:0x#{Integer.to_string(product_code, 16)}"
   end
 
   @doc "Closes master and cleans up all resources."
