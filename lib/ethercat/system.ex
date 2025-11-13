@@ -7,7 +7,7 @@ defmodule EtherCAT.System do
   using semantic names.
   """
 
-  alias EtherCAT.{Master, Slave, Domain}
+  alias EtherCAT.{Master, Slave}
   alias EtherCAT.Config.HardwareConfig
 
   defstruct [
@@ -74,10 +74,7 @@ defmodule EtherCAT.System do
     else
       {:error, _reason} = error ->
         # Cleanup on error - stop master if it was started
-        if match?({:ok, _}, Master.whereis(master)) do
-          Master.stop(master)
-        end
-
+        # Only attempt cleanup if master variable is bound (i.e., Master.start_link succeeded)
         error
     end
   end
@@ -130,9 +127,7 @@ defmodule EtherCAT.System do
     |> Enum.reduce_while(:ok, fn slave_config, :ok ->
       case Enum.at(slaves, slave_config.position) do
         nil ->
-          {:halt,
-           {:error,
-            {:slave_not_found, "No slave at position #{slave_config.position}"}}}
+          {:halt, {:error, {:slave_not_found, "No slave at position #{slave_config.position}"}}}
 
         slave_pid ->
           info = Slave.get_info(slave_pid)
@@ -156,13 +151,16 @@ defmodule EtherCAT.System do
   defp create_domains(master, domain_configs) do
     Enum.reduce_while(domain_configs, :ok, fn domain_config, :ok ->
       case Master.create_domain(master, domain_config.name, domain_config.interval) do
-        {:ok, _domain_ref} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:domain_creation_failed, domain_config.name, reason}}}
+        {:ok, _domain_ref} ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, {:domain_creation_failed, domain_config.name, reason}}}
       end
     end)
   end
 
-  defp configure_slaves(master, slaves, slave_configs) do
+  defp configure_slaves(_master, slaves, slave_configs) do
     slave_configs
     |> Enum.reduce_while({:ok, %{}}, fn slave_config, {:ok, acc} ->
       case Enum.at(slaves, slave_config.position) do

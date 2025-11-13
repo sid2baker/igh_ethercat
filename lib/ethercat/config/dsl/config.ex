@@ -3,7 +3,7 @@ defmodule EtherCAT.Config.Dsl.Config do
   # Entity target for config DSL block
   # Captures driver-specific configuration as a map
 
-  defstruct [:__fields__]
+  defstruct [:__fields__, :__spark_metadata__]
 
   def new(fields) when is_list(fields) do
     %__MODULE__{__fields__: Map.new(fields)}

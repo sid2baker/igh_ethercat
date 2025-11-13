@@ -76,7 +76,7 @@ defmodule EtherCAT do
       {:ok, system} = EtherCAT.open(MyMachine, index: 1)
   """
   @spec open(module(), keyword()) :: {:ok, System.t()} | {:error, term()}
-  def open(config_module, opts \\ []) when is_atom(config_module) do
+  def open(config_module, opts) when is_atom(config_module) and is_list(opts) do
     config = config_module.hardware_config()
     System.open(config, opts)
   end
@@ -106,6 +106,10 @@ defmodule EtherCAT do
     # Discovery mode - open with empty config
     config = %HardwareConfig{domains: [], slaves: []}
     System.open(config, opts)
+  end
+
+  def open(config_module) when is_atom(config_module) do
+    open(config_module, [])
   end
 
   @doc """
@@ -269,7 +273,7 @@ defmodule EtherCAT do
     slave_configs =
       Enum.map(slaves, fn slave_pid ->
         info = Slave.get_info(slave_pid)
-        pdos = Slave.list_pdos(slave_pid)
+        _pdos = Slave.list_pdos(slave_pid)
 
         # Generate basic slave config (user will need to add entries)
         %EtherCAT.Config.SlaveConfig{

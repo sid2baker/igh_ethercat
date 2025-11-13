@@ -58,7 +58,6 @@ defmodule EtherCAT.Slave do
 
   @behaviour :gen_statem
   require Logger
-  import EtherCAT.Utils
 
   alias EtherCAT.{Master, Domain, PDOEntry}
   alias EtherCAT.Slave.Driver
@@ -677,7 +676,7 @@ defmodule EtherCAT.Slave do
     {:keep_state_and_data, [{:reply, from, info}]}
   end
 
-  def unconfigured({:call, from}, _request, data) do
+  def unconfigured({:call, from}, _request, _data) do
     {:keep_state_and_data,
      [{:reply, from, {:error, {:invalid_state, :unconfigured, "Call configure/2 first"}}}]}
   end

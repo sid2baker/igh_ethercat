@@ -8,6 +8,7 @@ defmodule EtherCAT.Config.Dsl.Slave do
     :driver,
     :expected,
     :config,
+    :__spark_metadata__,
     entries: []
   ]
 end

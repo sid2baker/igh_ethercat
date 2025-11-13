@@ -79,10 +79,6 @@ defmodule EtherCAT.Config do
     }
   end
 
-  use Spark.Dsl.Extension,
-    sections: @sections,
-    transformers: [EtherCAT.Config.Transformer]
-
   @sections [
     %Spark.Dsl.Section{
       name: :hardware,
@@ -165,6 +161,10 @@ defmodule EtherCAT.Config do
       ]
     }
   ]
+
+  use Spark.Dsl.Extension,
+    sections: @sections,
+    transformers: [EtherCAT.Config.Transformer]
 
   defmacro __using__(_opts) do
     quote do
