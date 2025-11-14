@@ -653,7 +653,12 @@ defmodule EtherCAT.Master do
         position: slave_position,
         driver: driver,
         slave_config: slave_config,
-        sync_count: slave_info.sync_count
+        sync_count: slave_info.sync_count,
+        vendor_id: slave_info.vendor_id,
+        product_code: slave_info.product_code,
+        alias: slave_info.alias,
+        revision: slave_info.revision_number,
+        serial: slave_info.serial_number
       )
     end
   end

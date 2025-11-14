@@ -132,6 +132,11 @@ defmodule EtherCAT.Slave do
     - `:driver` - The driver module implementing `EtherCAT.Slave.Driver`
     - `:slave_config` - The slave configuration reference from the NIF
     - `:sync_count` - Number of sync managers available on the device
+    - `:vendor_id` - Vendor identification number (from hardware)
+    - `:product_code` - Product code (from hardware)
+    - `:alias` - Alias address (default: 0)
+    - `:revision` - Revision number (default: 0)
+    - `:serial` - Serial number (default: 0)
     - `:name` - Optional semantic name for the slave (atom or string)
 
   ## Returns
@@ -146,6 +151,8 @@ defmodule EtherCAT.Slave do
         driver: EtherCAT.Drivers.EL3202,
         slave_config: config_ref,
         sync_count: 4,
+        vendor_id: 0x00000002,
+        product_code: 0x0C5A3052,
         name: :temp_sensor_1
       )
 
@@ -155,7 +162,9 @@ defmodule EtherCAT.Slave do
         position: 1,
         driver: EtherCAT.Drivers.Generic,
         slave_config: config_ref,
-        sync_count: 4
+        sync_count: 4,
+        vendor_id: 0x00000002,
+        product_code: 0x12345678
       )
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
@@ -165,11 +174,17 @@ defmodule EtherCAT.Slave do
     driver = Keyword.fetch!(opts, :driver)
     slave_config = Keyword.fetch!(opts, :slave_config)
     sync_count = Keyword.fetch!(opts, :sync_count)
+    vendor_id = Keyword.fetch!(opts, :vendor_id)
+    product_code = Keyword.fetch!(opts, :product_code)
+    alias = Keyword.get(opts, :alias, 0)
+    revision = Keyword.get(opts, :revision, 0)
+    serial = Keyword.get(opts, :serial, 0)
     name = Keyword.get(opts, :name)
 
     :gen_statem.start_link(
       __MODULE__,
-      {master, position, driver, slave_config, sync_count, name},
+      {master, position, driver, slave_config, sync_count, vendor_id, product_code, alias,
+       revision, serial, name},
       []
     )
   end
@@ -554,7 +569,10 @@ defmodule EtherCAT.Slave do
   def callback_mode(), do: [:state_functions, :state_enter]
 
   @impl true
-  def init({master, position, driver, slave_config, sync_count, name}) do
+  def init(
+        {master, position, driver, slave_config, sync_count, vendor_id, product_code, alias,
+         revision, serial, name}
+      ) do
     # Register this slave in the Registry for process discovery
     Registry.register(EtherCAT.Registry, {:slave, master, position}, %{
       master: master,
@@ -567,12 +585,12 @@ defmodule EtherCAT.Slave do
       driver: driver,
       driver_state: %{},
       master: master,
-      alias: 0,
+      alias: alias,
       position: position,
-      vendor_id: nil,
-      product_code: nil,
-      revision: 0,
-      serial: 0,
+      vendor_id: vendor_id,
+      product_code: product_code,
+      revision: revision,
+      serial: serial,
       slave_config: slave_config,
       sync_count: sync_count,
       name: name
