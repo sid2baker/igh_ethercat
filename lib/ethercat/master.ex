@@ -15,6 +15,7 @@ defmodule EtherCAT.Master do
     :task_pid,
     :update_interval,
     :nif_yield_interval,
+    :pending_caller,
     slaves_operational?: false
   ]
 
@@ -30,6 +31,8 @@ defmodule EtherCAT.Master do
           update_interval: integer(),
           # NIF yielding interval in us (default 100_000 = 100ms)
           nif_yield_interval: integer(),
+          # Caller waiting for start_cyclic_mode to complete (slaves reach OP)
+          pending_caller: :gen_statem.from() | nil,
           # True when at least one slave has reached OP state (PDO communication ready)
           slaves_operational?: boolean()
         }
@@ -471,7 +474,8 @@ defmodule EtherCAT.Master do
         end)
 
         Logger.info("Cyclic mode activation complete, transitioning to :operational")
-        {:next_state, :operational, data, [{:reply, from, :ok}]}
+        # DON'T reply yet - store caller and reply when slaves reach OP state
+        {:next_state, :operational, %{data | pending_caller: from}, []}
 
       {:error, _reason} = error ->
         Logger.error("Failed to start cyclic mode: #{inspect(error)}")
@@ -598,18 +602,29 @@ defmodule EtherCAT.Master do
         )
 
         # Check if slaves are already in OP state (fast transition case)
-        slaves_ready =
-          case Nif.get_master_state(data.master_ref) do
-            {:ok, state} when state.al_state_op > 0 ->
-              Logger.info("Slaves already in operational state - PDO communication ready")
-              true
+        case Nif.get_master_state(data.master_ref) do
+          {:ok, state} when state.al_state_op > 0 ->
+            Logger.info("Slaves already in operational state - PDO communication ready")
 
-            _ ->
-              Logger.debug("Waiting for slaves to reach operational state...")
-              false
-          end
+            # Reply immediately to pending caller
+            actions =
+              if data.pending_caller do
+                [{:reply, data.pending_caller, :ok}]
+              else
+                []
+              end
 
-        {:keep_state, %{data | task_pid: task_pid, slaves_operational?: slaves_ready}, []}
+            {:keep_state,
+             %{data | task_pid: task_pid, slaves_operational?: true, pending_caller: nil},
+             actions}
+
+          _ ->
+            Logger.debug("Waiting for slaves to reach operational state...")
+
+            # Set timeout - slaves should reach OP within 10 seconds
+            {:keep_state, %{data | task_pid: task_pid, slaves_operational?: false},
+             [{:state_timeout, 10_000, :slave_op_timeout}]}
+        end
 
       {:error, reason} ->
         duration = System.monotonic_time() - start_time
@@ -633,10 +648,41 @@ defmodule EtherCAT.Master do
     # This indicates PDO communication is ready
     if master_state.al_state_op > 0 and not data.slaves_operational? do
       Logger.info("Slaves reached operational state - PDO communication ready")
-      {:keep_state, %{data | slaves_operational?: true}, []}
+
+      # Reply to pending caller if waiting
+      actions =
+        if data.pending_caller do
+          Logger.info("Replying to start_cyclic_mode caller - system ready")
+          [{:reply, data.pending_caller, :ok}, {:state_timeout, :cancel}]
+        else
+          [{:state_timeout, :cancel}]
+        end
+
+      {:keep_state, %{data | slaves_operational?: true, pending_caller: nil}, actions}
     else
       {:keep_state_and_data, []}
     end
+  end
+
+  def operational(:state_timeout, :slave_op_timeout, data) do
+    Logger.error(
+      "Timeout waiting for slaves to reach OP state - slaves may be misconfigured or hardware issue"
+    )
+
+    # Reply with error to pending caller
+    actions =
+      if data.pending_caller do
+        [
+          {:reply, data.pending_caller,
+           {:error,
+            {:slave_op_timeout,
+             "Slaves did not reach operational state within 10 seconds. Check slave configuration and hardware connections."}}}
+        ]
+      else
+        []
+      end
+
+    {:keep_state, %{data | pending_caller: nil}, actions}
   end
 
   def operational(:info, {_domain, :data_changed, _domain_data, data_changes}, _data) do
