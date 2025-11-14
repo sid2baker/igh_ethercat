@@ -641,6 +641,14 @@ defmodule EtherCAT.Nif do
       return beam.make(.ok, .{});
   }
 
+  /// Initialize domain data pointer (must be called before cyclic task starts)
+  /// This should be called synchronously after master activation to ensure
+  /// domain data is ready before any I/O operations are attempted.
+  pub fn domain_init_data(domain_accessor: DomainAccessorResource) !void {
+      const accessor = domain_accessor.unpack();
+      try accessor.initDomainData();
+  }
+
   // ============================================================================
   // TYPED ACCESSOR FUNCTIONS (Name-based access using layout)
   // ============================================================================
@@ -910,11 +918,8 @@ defmodule EtherCAT.Nif do
       var prev_master_state: master_state_t = undefined;
       const yield_interval = @divTrunc(nif_yield_interval, interval); // Calculate yield interval in cycles
 
-      // Initialize domain data pointers for all domain accessors
-      for (domain_accessors) |domain_accessor_resource| {
-          const accessor = domain_accessor_resource.unpack();
-          try accessor.initDomainData();
-      }
+      // NOTE: Domain data initialization is now done synchronously before this task starts
+      // See domain_init_data() which must be called for each domain before spawning cyclic_task
 
       var counter: u32 = 0;
 

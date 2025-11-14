@@ -8,7 +8,16 @@ defmodule EtherCAT.Master do
 
   alias EtherCAT.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval, :nif_yield_interval]
+  defstruct [
+    :master_ref,
+    :slaves,
+    :domains,
+    :task_pid,
+    :update_interval,
+    :nif_yield_interval,
+    :pending_caller,
+    slaves_operational?: false
+  ]
 
   @type domain_info :: %{name: atom(), ref: reference()}
 
@@ -21,7 +30,11 @@ defmodule EtherCAT.Master do
           # in us
           update_interval: integer(),
           # NIF yielding interval in us (default 100_000 = 100ms)
-          nif_yield_interval: integer()
+          nif_yield_interval: integer(),
+          # Caller waiting for start_cyclic_mode to complete (slaves reach OP)
+          pending_caller: :gen_statem.from() | nil,
+          # True when at least one slave has reached OP state (PDO communication ready)
+          slaves_operational?: boolean()
         }
 
   # Client API
@@ -75,10 +88,27 @@ defmodule EtherCAT.Master do
   - Release the EtherCAT master resource
 
   The process terminates normally via OTP's supervision tree.
+
+  Returns `:ok` even if the process is already dead (idempotent).
   """
   @spec stop(GenServer.server(), timeout()) :: :ok
   def stop(master, timeout \\ 5000) do
-    :gen_statem.stop(master, :normal, timeout)
+    case :gen_statem.stop(master, :normal, timeout) do
+      :ok -> :ok
+      # Process already dead or doesn't exist - that's fine
+      {:error, :noproc} -> :ok
+      {:error, {:noproc, _}} -> :ok
+      # Let other errors propagate
+      {:error, _} = error -> error
+    end
+  rescue
+    # Catch exit signals from dead processes
+    e in ArgumentError ->
+      if Exception.message(e) =~ "no process" do
+        :ok
+      else
+        reraise e, __STACKTRACE__
+      end
   end
 
   @doc "Connects to EtherCAT network, transitions to `:stale`."
@@ -444,7 +474,8 @@ defmodule EtherCAT.Master do
         end)
 
         Logger.info("Cyclic mode activation complete, transitioning to :operational")
-        {:next_state, :operational, data, [{:reply, from, :ok}]}
+        # DON'T reply yet - store caller and reply when slaves reach OP state
+        {:next_state, :operational, %{data | pending_caller: from}, []}
 
       {:error, _reason} = error ->
         Logger.error("Failed to start cyclic mode: #{inspect(error)}")
@@ -534,6 +565,23 @@ defmodule EtherCAT.Master do
           |> Map.values()
           |> Enum.map(& &1.ref)
 
+        # CRITICAL: Initialize all domain data pointers synchronously BEFORE spawning cyclic task
+        # This ensures domain data is ready for I/O operations immediately
+        Logger.debug("Initializing domain data for #{length(domain_resources)} domains")
+
+        Enum.each(domain_resources, fn domain_ref ->
+          case Nif.domain_init_data(domain_ref) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.error("Failed to initialize domain data: #{inspect(reason)}")
+              raise "Domain initialization failed: #{inspect(reason)}"
+          end
+        end)
+
+        Logger.debug("Domain data initialization complete")
+
         task_pid =
           spawn_link(fn ->
             Nif.cyclic_task(
@@ -553,7 +601,30 @@ defmodule EtherCAT.Master do
           %{domains: map_size(data.domains), slaves: length(data.slaves)}
         )
 
-        {:keep_state, %{data | task_pid: task_pid}, []}
+        # Check if slaves are already in OP state (fast transition case)
+        case Nif.get_master_state(data.master_ref) do
+          {:ok, state} when state.al_state_op > 0 ->
+            Logger.info("Slaves already in operational state - PDO communication ready")
+
+            # Reply immediately to pending caller
+            actions =
+              if data.pending_caller do
+                [{:reply, data.pending_caller, :ok}]
+              else
+                []
+              end
+
+            {:keep_state,
+             %{data | task_pid: task_pid, slaves_operational?: true, pending_caller: nil},
+             actions}
+
+          _ ->
+            Logger.debug("Waiting for slaves to reach operational state...")
+
+            # Set timeout - slaves should reach OP within 10 seconds
+            {:keep_state, %{data | task_pid: task_pid, slaves_operational?: false},
+             [{:state_timeout, 10_000, :slave_op_timeout}]}
+        end
 
       {:error, reason} ->
         duration = System.monotonic_time() - start_time
@@ -569,10 +640,49 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational(:info, {:master_state_changed, master_state}, _data) do
+  def operational(:info, {:master_state_changed, master_state}, data) do
     require Logger
     Logger.info("Master State Changed: #{inspect(master_state)}")
-    {:keep_state_and_data, []}
+
+    # Check if at least one slave has reached OP state (al_state_op > 0)
+    # This indicates PDO communication is ready
+    if master_state.al_state_op > 0 and not data.slaves_operational? do
+      Logger.info("Slaves reached operational state - PDO communication ready")
+
+      # Reply to pending caller if waiting
+      actions =
+        if data.pending_caller do
+          Logger.info("Replying to start_cyclic_mode caller - system ready")
+          [{:reply, data.pending_caller, :ok}, {:state_timeout, :cancel}]
+        else
+          [{:state_timeout, :cancel}]
+        end
+
+      {:keep_state, %{data | slaves_operational?: true, pending_caller: nil}, actions}
+    else
+      {:keep_state_and_data, []}
+    end
+  end
+
+  def operational(:state_timeout, :slave_op_timeout, data) do
+    Logger.error(
+      "Timeout waiting for slaves to reach OP state - slaves may be misconfigured or hardware issue"
+    )
+
+    # Reply with error to pending caller
+    actions =
+      if data.pending_caller do
+        [
+          {:reply, data.pending_caller,
+           {:error,
+            {:slave_op_timeout,
+             "Slaves did not reach operational state within 10 seconds. Check slave configuration and hardware connections."}}}
+        ]
+      else
+        []
+      end
+
+    {:keep_state, %{data | pending_caller: nil}, actions}
   end
 
   def operational(:info, {_domain, :data_changed, _domain_data, data_changes}, _data) do
@@ -590,17 +700,32 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
+  def operational({:call, from}, :start_cyclic_mode, _data) do
+    {:keep_state_and_data,
+     [{:reply, from,
+       {:error, {:already_operational, "Cyclic mode is already running"}}}]}
+  end
+
   # Gateway for domain operations in operational state
   # Domain identifies itself by PID; we look up its NIF reference
   def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
       when is_binary(value) do
-    case Map.get(data.domains, domain_pid) do
-      nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    # Check if slaves have reached OP state before allowing PDO writes
+    unless data.slaves_operational? do
+      {:keep_state_and_data,
+       [{:reply, from,
+         {:error,
+          {:slaves_not_operational,
+           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+    else
+      case Map.get(data.domains, domain_pid) do
+        nil ->
+          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-      domain_info ->
-        result = Nif.set_value(domain_info.ref, name, value)
-        {:keep_state_and_data, [{:reply, from, result}]}
+        domain_info ->
+          result = Nif.set_value(domain_info.ref, name, value)
+          {:keep_state_and_data, [{:reply, from, result}]}
+      end
     end
   end
 
@@ -613,18 +738,27 @@ defmodule EtherCAT.Master do
   end
 
   def operational({:call, from}, {:domain_get_value, domain_pid, name}, data) do
-    case Map.get(data.domains, domain_pid) do
-      nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    # Check if slaves have reached OP state before allowing PDO reads
+    unless data.slaves_operational? do
+      {:keep_state_and_data,
+       [{:reply, from,
+         {:error,
+          {:slaves_not_operational,
+           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+    else
+      case Map.get(data.domains, domain_pid) do
+        nil ->
+          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-      domain_info ->
-        result =
-          case Nif.get_value(domain_info.ref, name) do
-            {:error, _} = error -> error
-            value -> {:ok, value}
-          end
+        domain_info ->
+          result =
+            case Nif.get_value(domain_info.ref, name) do
+              {:error, _} = error -> error
+              value -> {:ok, value}
+            end
 
-        {:keep_state_and_data, [{:reply, from, result}]}
+          {:keep_state_and_data, [{:reply, from, result}]}
+      end
     end
   end
 
