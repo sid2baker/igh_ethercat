@@ -304,7 +304,7 @@ defmodule EtherCAT do
 
       receive do
         {:pdo_value_changed, _name, temp} ->
-          IO.puts("Temperature changed: #{temp}")
+          IO.puts("Temperature changed: \#{temp}")
       end
   """
   @spec watch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}

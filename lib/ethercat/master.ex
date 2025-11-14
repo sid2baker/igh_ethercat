@@ -517,9 +517,10 @@ defmodule EtherCAT.Master do
               "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
             )
 
-            new_data = %{data |
-              slave_fingerprint: current_fingerprint,
-              fingerprint_stable_since: now
+            new_data = %{
+              data
+              | slave_fingerprint: current_fingerprint,
+                fingerprint_stable_since: now
             }
 
             actions = [{:state_timeout, data.scan_interval, :update_master_state}]
@@ -713,9 +714,10 @@ defmodule EtherCAT.Master do
               "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
             )
 
-            new_data = %{data |
-              slave_fingerprint: current_fingerprint,
-              fingerprint_stable_since: now
+            new_data = %{
+              data
+              | slave_fingerprint: current_fingerprint,
+                fingerprint_stable_since: now
             }
 
             actions = [{:state_timeout, data.scan_interval, :update_master_state}]
@@ -762,7 +764,6 @@ defmodule EtherCAT.Master do
         {:keep_state_and_data, actions}
     end
   end
-
 
   def synced(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :synced, data)
@@ -928,11 +929,7 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :stop_cyclic_mode, data) do
     Logger.info("Stopping cyclic mode - transitioning from operational to synced")
 
-    # Stop the cyclic task properly (with :kill and wait for both messages)
-    stop_cyclic_task(data.task_pid)
-
-    # Deactivate the master
-    case Nif.master_deactivate(data.master_ref) do
+    case stop_cyclic_task(data.task_pid) do
       :ok ->
         Logger.info("Master deactivated successfully")
 
@@ -1024,7 +1021,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-
   def operational(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :operational, data)
   end
@@ -1058,9 +1054,10 @@ defmodule EtherCAT.Master do
 
     if Enum.member?(results, :timeout) do
       Logger.warning("Cyclic task termination messages incomplete: #{inspect(results)}")
+      {:error, :timeout}
+    else
+      :ok
     end
-
-    :ok
   end
 
   # Common catch-all handler for unexpected events

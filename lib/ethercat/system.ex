@@ -311,5 +311,4 @@ defmodule EtherCAT.System do
       end
     end
   end
-
 end
