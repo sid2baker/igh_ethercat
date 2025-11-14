@@ -12,7 +12,8 @@ defmodule EtherCAT.Application do
 
       config :ethercat, :master,
         master_index: 0,
-        scan_interval: 100_000  # 100ms hardware scanning
+        scan_interval: 100_000,  # 100ms hardware scanning
+        fingerprint_change_threshold: 2_000  # 2s stability before auto-reconfigure
 
   """
   use Application
@@ -39,5 +40,6 @@ defmodule EtherCAT.Application do
     Application.get_env(:ethercat, :master, [])
     |> Keyword.put_new(:master_index, 0)
     |> Keyword.put_new(:scan_interval, 100_000)
+    |> Keyword.put_new(:fingerprint_change_threshold, 2_000)
   end
 end

@@ -14,11 +14,10 @@ defmodule EtherCAT do
   ### Phase 2: Configure Hardware
 
       # Option A: Use predefined configuration
-      {:ok, system} = EtherCAT.configure_hardware(MyMachine)
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
 
-      # Option B: Discover and generate config
-      {:ok, config} = EtherCAT.generate_config()
-      {:ok, system} = EtherCAT.configure_hardware(config)
+      # Option B: Auto-detect and use current hardware
+      {:ok, system} = EtherCAT.get_system(0)
 
   ## Usage
 
@@ -27,8 +26,7 @@ defmodule EtherCAT do
 
   ## Reconfiguration
 
-      :ok = EtherCAT.stop_system(system)
-      {:ok, new_system} = EtherCAT.configure_hardware(NewConfig)
+      {:ok, new_system} = EtherCAT.configure_hardware(0, NewConfig)
 
   ## Quick Start
 
@@ -62,7 +60,7 @@ defmodule EtherCAT do
 
   Then configure and use the system:
 
-      {:ok, system} = EtherCAT.configure_hardware(MyMachine)
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
       {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
       :ok = EtherCAT.write(system, :output_slave, :ch1, :value, true)
       EtherCAT.stop_system(system)
@@ -110,32 +108,88 @@ defmodule EtherCAT do
   ## Configuration API
 
   @doc """
-  Configure hardware and create an operational System.
+  Returns the current System loaded on the Master, or creates a new one if none exists.
 
-  This is the main entry point for configuring the EtherCAT network.
+  If no system is currently configured, this will scan the hardware and automatically
+  generate a configuration based on detected slaves.
+
+  ## Parameters
+  - `master` - Master PID or index (integer)
+
+  ## Returns
+  - `{:ok, system}` - Existing or newly created system
+  - `{:error, reason}` - Error finding master or creating system
 
   ## Examples
 
-      # With module-based config
-      {:ok, system} = EtherCAT.configure_hardware(MyMachine)
+      # With master index
+      {:ok, system} = EtherCAT.get_system(0)
 
-      # With HardwareConfig struct
-      {:ok, config} = EtherCAT.generate_config()
-      {:ok, system} = EtherCAT.configure_hardware(config)
-
-  ## Options
-  - `:master_index` - Which master to use (default: 0)
+      # With master PID
+      {:ok, master_pid} = EtherCAT.find_master(0)
+      {:ok, system} = EtherCAT.get_system(master_pid)
   """
-  @spec configure_hardware(module() | HardwareConfig.t(), keyword()) ::
-          {:ok, System.t()} | {:error, term()}
-  def configure_hardware(config_or_module, opts \\ []) do
-    master_index = Keyword.get(opts, :master_index, 0)
+  @spec get_system(pid() | non_neg_integer()) :: {:ok, System.t()} | {:error, term()}
+  def get_system(master) when is_pid(master) do
+    case Master.get_current_system(master) do
+      {:ok, nil} ->
+        # No system loaded, generate config and create one
+        with {:ok, config} <- generate_config_from_master(master),
+             {:ok, system} <- System.configure(master, config) do
+          {:ok, system}
+        end
 
-    with {:ok, master} <- find_master(master_index),
-         {:ok, config} <- get_config(config_or_module),
+      {:ok, system} when is_struct(system, System) ->
+        # System already exists, return it
+        {:ok, system}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def get_system(master_index) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      get_system(master)
+    end
+  end
+
+  @doc """
+  Configure hardware and create an operational System.
+
+  If a system is already loaded on this master, it will be stopped first.
+
+  ## Parameters
+  - `master` - Master PID or index (integer)
+  - `config_or_module` - Configuration module or HardwareConfig struct
+
+  ## Returns
+  - `{:ok, system}` - Newly configured system
+  - `{:error, reason}` - Configuration error
+
+  ## Examples
+
+      # With module-based config and master index
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
+
+      # With master PID and HardwareConfig struct
+      {:ok, master} = EtherCAT.find_master(0)
+      {:ok, system} = EtherCAT.configure_hardware(master, config)
+  """
+  @spec configure_hardware(pid() | non_neg_integer(), module() | HardwareConfig.t()) ::
+          {:ok, System.t()} | {:error, term()}
+  def configure_hardware(master, config_or_module) when is_pid(master) do
+    with {:ok, config} <- get_config(config_or_module),
          :ok <- verify_hardware(master, config),
+         :ok <- stop_current_system(master),
          {:ok, system} <- System.configure(master, config) do
       {:ok, system}
+    end
+  end
+
+  def configure_hardware(master_index, config_or_module) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      configure_hardware(master, config_or_module)
     end
   end
 
@@ -150,36 +204,24 @@ defmodule EtherCAT do
   end
 
   @doc """
-  Verify that current hardware matches the configuration without applying it.
+  Find a Master process by index.
 
-  Useful for checking compatibility before reconfiguring.
+  ## Parameters
+  - `master_index` - Master index (default: 0)
+
+  ## Returns
+  - `{:ok, pid}` - Master process PID
+  - `{:error, reason}` - Master not found
+
+  ## Example
+
+      {:ok, master} = EtherCAT.find_master(0)
   """
-  @spec verify_hardware(module() | HardwareConfig.t(), keyword()) ::
-          :ok | {:error, term()}
-  def verify_hardware(config_or_module, opts \\ []) do
-    master_index = Keyword.get(opts, :master_index, 0)
-
-    with {:ok, master} <- find_master(master_index),
-         {:ok, config} <- get_config(config_or_module) do
-      verify_hardware(master, config)
-    end
-  end
-
-  @doc """
-  Generate a HardwareConfig by scanning current hardware.
-
-  Auto-detects drivers based on vendor/product IDs.
-
-  ## Options
-  - `:master_index` - Which master to scan (default: 0)
-  """
-  @spec generate_config(keyword()) :: {:ok, HardwareConfig.t()} | {:error, term()}
-  def generate_config(opts \\ []) do
-    master_index = Keyword.get(opts, :master_index, 0)
-
-    with {:ok, master} <- find_master(master_index),
-         {:ok, slaves} <- Master.get_slaves(master) do
-      System.generate_hardware_config(slaves)
+  @spec find_master(non_neg_integer()) :: {:ok, pid()} | {:error, term()}
+  def find_master(master_index \\ 0) do
+    case Registry.lookup(EtherCAT.Registry, {:master, master_index}) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, {:master_not_found, master_index}}
     end
   end
 
@@ -294,10 +336,23 @@ defmodule EtherCAT do
 
   ## Private Helpers
 
-  defp find_master(master_index) do
-    case Registry.lookup(EtherCAT.Registry, {:master, master_index}) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> {:error, {:master_not_found, master_index}}
+  defp stop_current_system(master) do
+    case Master.get_current_system(master) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, system} when is_struct(system, System) ->
+        # Stop the existing system
+        stop_system(system)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp generate_config_from_master(master) do
+    with {:ok, slaves} <- Master.get_slaves(master) do
+      System.generate_hardware_config(slaves)
     end
   end
 

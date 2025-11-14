@@ -27,7 +27,7 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "System Initialization" do
     test "successfully configures EtherCAT system" do
-      assert {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      assert {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       assert %EtherCAT.System{} = system
       assert is_pid(system.master)
 
@@ -36,7 +36,7 @@ defmodule Hardware.SlaveDetectionTest do
     end
 
     test "system transitions to operational state" do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
 
       # Give the system time to reach operational state
       Process.sleep(1000)
@@ -50,7 +50,7 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Detection" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -81,7 +81,7 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Communication" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end

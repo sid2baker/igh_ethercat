@@ -18,7 +18,10 @@ defmodule EtherCAT.Master do
     :scan_timer,
     :cycle_interval,
     :nif_yield_interval,
-    :systems,
+    :current_system,
+    :slave_fingerprint,
+    :fingerprint_stable_since,
+    :fingerprint_change_threshold,
     :pending_caller,
     slaves_operational?: false
   ]
@@ -40,8 +43,14 @@ defmodule EtherCAT.Master do
           cycle_interval: integer() | nil,
           # NIF yielding interval (set when going operational)
           nif_yield_interval: integer() | nil,
-          # Active System PIDs
-          systems: [pid()],
+          # Currently loaded System PID (only one at a time)
+          current_system: pid() | nil,
+          # Hardware fingerprint (slave count for now)
+          slave_fingerprint: non_neg_integer() | nil,
+          # Timestamp when current fingerprint became stable (monotonic milliseconds)
+          fingerprint_stable_since: integer() | nil,
+          # How long fingerprint must be stable before generating config (milliseconds)
+          fingerprint_change_threshold: pos_integer(),
           # Caller waiting for start_cyclic_mode to complete (slaves reach OP)
           pending_caller: :gen_statem.from() | nil,
           # True when at least one slave has reached OP state (PDO communication ready)
@@ -72,18 +81,20 @@ defmodule EtherCAT.Master do
   ## Options
   - `:master_index` - EtherCAT master index (default: 0)
   - `:scan_interval` - Hardware change detection interval in microseconds (default: 100_000 = 100ms)
+  - `:fingerprint_change_threshold` - How long hardware must be stable before regenerating config in ms (default: 2_000)
   - `:name` - Registered process name (default: `EtherCAT.Master`)
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
     scan_interval = Keyword.get(opts, :scan_interval, 100_000)
+    fingerprint_change_threshold = Keyword.get(opts, :fingerprint_change_threshold, 2_000)
     name = Keyword.get(opts, :name, __MODULE__)
 
     :gen_statem.start_link(
       {:local, name},
       __MODULE__,
-      {master_index, scan_interval},
+      {master_index, scan_interval, fingerprint_change_threshold},
       []
     )
   end
@@ -194,23 +205,35 @@ defmodule EtherCAT.Master do
   end
 
   @doc """
-  Register a System PID with the Master.
+  Register a System with the Master.
 
+  Stores the System struct and monitors the owner process.
   Called by System when created via configure_hardware.
   """
-  @spec register_system(GenServer.server(), pid(), timeout()) :: :ok
-  def register_system(master, system_pid, timeout \\ 5000) do
-    :gen_statem.call(master, {:register_system, system_pid}, timeout)
+  @spec register_system(GenServer.server(), pid(), EtherCAT.System.t(), timeout()) :: :ok
+  def register_system(master, owner_pid, system, timeout \\ 5000) do
+    :gen_statem.call(master, {:register_system, owner_pid, system}, timeout)
   end
 
   @doc """
-  Unregister a System PID from the Master.
+  Unregister the current System from the Master.
 
   Called by System when stopped via stop_system.
   """
   @spec unregister_system(GenServer.server(), pid(), timeout()) :: :ok
-  def unregister_system(master, system_pid, timeout \\ 5000) do
-    :gen_statem.call(master, {:unregister_system, system_pid}, timeout)
+  def unregister_system(master, owner_pid, timeout \\ 5000) do
+    :gen_statem.call(master, {:unregister_system, owner_pid}, timeout)
+  end
+
+  @doc """
+  Get the currently loaded System struct (if any).
+
+  Returns `{:ok, nil}` if no system is loaded, `{:ok, system}` if a system is loaded.
+  """
+  @spec get_current_system(GenServer.server(), timeout()) ::
+          {:ok, EtherCAT.System.t() | nil} | {:error, term()}
+  def get_current_system(master, timeout \\ 5000) do
+    :gen_statem.call(master, :get_current_system, timeout)
   end
 
   # Internal API - called by Slave and Domain modules
@@ -247,7 +270,7 @@ defmodule EtherCAT.Master do
   def callback_mode(), do: [:state_functions, :state_enter]
 
   @impl true
-  def init({master_index, scan_interval}) do
+  def init({master_index, scan_interval, fingerprint_change_threshold}) do
     # Trap exits to ensure graceful cleanup
     Process.flag(:trap_exit, true)
 
@@ -256,7 +279,8 @@ defmodule EtherCAT.Master do
         # Register this master in the Registry for process discovery
         case Registry.register(EtherCAT.Registry, {:master, master_index}, %{
                master_index: master_index,
-               scan_interval: scan_interval
+               scan_interval: scan_interval,
+               fingerprint_change_threshold: fingerprint_change_threshold
              }) do
           {:ok, _} ->
             :ok
@@ -278,7 +302,10 @@ defmodule EtherCAT.Master do
           scan_timer: nil,
           cycle_interval: nil,
           nif_yield_interval: nil,
-          systems: [],
+          current_system: nil,
+          slave_fingerprint: nil,
+          fingerprint_stable_since: nil,
+          fingerprint_change_threshold: fingerprint_change_threshold,
           pending_caller: nil,
           slaves_operational?: false
         }
@@ -462,12 +489,52 @@ defmodule EtherCAT.Master do
       {:ok, master_state} ->
         Logger.debug("Master state (stale): #{inspect(master_state)}")
 
-        if master_state.slaves_responding == length(data.slaves) and
-             master_state.slaves_responding > 0 do
-          {:next_state, :synced, data}
-        else
-          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-          {:keep_state_and_data, actions}
+        # Create fingerprint from slave count
+        current_fingerprint = master_state.slaves_responding
+        now = System.monotonic_time(:millisecond)
+
+        # Check if fingerprint changed or if this is first run
+        cond do
+          # Fingerprint changed - reset stability timer
+          data.slave_fingerprint != current_fingerprint ->
+            Logger.debug(
+              "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
+            )
+
+            new_data = %{data |
+              slave_fingerprint: current_fingerprint,
+              fingerprint_stable_since: now
+            }
+
+            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+            {:keep_state, new_data, actions}
+
+          # Fingerprint same and we have slaves - check if stable long enough
+          current_fingerprint > 0 and length(data.slaves) == 0 ->
+            # Check if stable for threshold duration
+            stable_duration = now - (data.fingerprint_stable_since || now)
+
+            if stable_duration >= data.fingerprint_change_threshold do
+              # Hardware is stable - transition to synced to discover slaves
+              Logger.info(
+                "Hardware stable with #{current_fingerprint} slaves for #{stable_duration}ms, transitioning to synced"
+              )
+
+              {:next_state, :synced, data}
+            else
+              # Not stable long enough yet
+              actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+              {:keep_state_and_data, actions}
+            end
+
+          # Already have slaves and count matches - stay in sync
+          current_fingerprint == length(data.slaves) and current_fingerprint > 0 ->
+            {:next_state, :synced, data}
+
+          # Default - keep scanning
+          true ->
+            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+            {:keep_state_and_data, actions}
         end
 
       {:error, reason} ->
@@ -596,15 +663,28 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
-  def synced({:call, from}, {:register_system, system_pid}, data) do
-    Process.monitor(system_pid)
-    new_data = %{data | systems: [system_pid | data.systems]}
+  def synced({:call, from}, {:register_system, owner_pid, system}, data) do
+    # Monitor the owner process so we can clean up if it dies
+    Process.monitor(owner_pid)
+    new_data = %{data | current_system: {owner_pid, system}}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def synced({:call, from}, {:unregister_system, system_pid}, data) do
-    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+  def synced({:call, from}, {:unregister_system, owner_pid}, data) do
+    # Only unregister if it matches the current system owner
+    new_data = case data.current_system do
+      {^owner_pid, _system} -> %{data | current_system: nil}
+      _ -> data
+    end
     {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
+  def synced({:call, from}, :get_current_system, data) do
+    system = case data.current_system do
+      {_owner_pid, system} -> system
+      nil -> nil
+    end
+    {:keep_state_and_data, [{:reply, from, {:ok, system}}]}
   end
 
   def synced(:state_timeout, :update_master_state, data) do
@@ -612,24 +692,61 @@ defmodule EtherCAT.Master do
       {:ok, master_state} ->
         Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
 
-        if master_state.slaves_responding == length(data.slaves) do
-          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-          {:keep_state_and_data, actions}
-        else
-          # Slave count mismatch - network topology changed
-          # Terminate existing slave processes before transitioning to stale
-          Logger.warning(
-            "Slave count mismatch: expected #{length(data.slaves)}, got #{master_state.slaves_responding}. Re-scanning bus."
-          )
+        current_fingerprint = master_state.slaves_responding
+        now = System.monotonic_time(:millisecond)
 
-          # Gracefully terminate all slave processes
-          Enum.each(data.slaves, fn slave_pid ->
-            if Process.alive?(slave_pid) do
-              GenServer.stop(slave_pid, :normal)
+        cond do
+          # Fingerprint changed - reset stability timer
+          data.slave_fingerprint != current_fingerprint ->
+            Logger.warning(
+              "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
+            )
+
+            new_data = %{data |
+              slave_fingerprint: current_fingerprint,
+              fingerprint_stable_since: now
+            }
+
+            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+            {:keep_state, new_data, actions}
+
+          # Fingerprint same and matches current slaves - hardware stable
+          current_fingerprint == length(data.slaves) ->
+            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+            {:keep_state_and_data, actions}
+
+          # Fingerprint stable but different - check threshold then notify
+          true ->
+            stable_duration = now - (data.fingerprint_stable_since || now)
+
+            if stable_duration >= data.fingerprint_change_threshold do
+              # Hardware has been stable with different count for threshold duration
+              Logger.warning(
+                "Hardware change stable for #{stable_duration}ms: #{length(data.slaves)} -> #{current_fingerprint} slaves"
+              )
+
+              # Notify current system owner if any
+              case data.current_system do
+                {owner_pid, _system} ->
+                  Logger.info("Notifying system owner #{inspect(owner_pid)} of hardware change")
+                  send(owner_pid, {:hardware_changed, current_fingerprint})
+                nil ->
+                  :ok
+              end
+
+              # Terminate existing slaves and transition to stale for re-scan
+              Enum.each(data.slaves, fn slave_pid ->
+                if Process.alive?(slave_pid) do
+                  GenServer.stop(slave_pid, :normal)
+                end
+              end)
+
+              {:next_state, :stale, %{data | slaves: []}}
+            else
+              # Not stable long enough yet - keep waiting
+              actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+              {:keep_state_and_data, actions}
             end
-          end)
-
-          {:next_state, :stale, %{data | slaves: []}}
         end
 
       {:error, reason} ->
@@ -639,10 +756,17 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def synced(:info, {:DOWN, _ref, :process, system_pid, _reason}, data) do
-    Logger.warning("System #{inspect(system_pid)} died, unregistering")
-    new_data = %{data | systems: List.delete(data.systems, system_pid)}
-    {:keep_state, new_data}
+  def synced(:info, {:DOWN, _ref, :process, owner_pid, _reason}, data) do
+    # Only unregister if it's the current system owner
+    case data.current_system do
+      {^owner_pid, _system} ->
+        Logger.warning("Current system owner #{inspect(owner_pid)} died, unregistering")
+        new_data = %{data | current_system: nil}
+        {:keep_state, new_data}
+      _ ->
+        # Some other process died, ignore
+        {:keep_state_and_data, []}
+    end
   end
 
   def synced(event_type, event_content, data) do
@@ -787,15 +911,26 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
-  def operational({:call, from}, {:register_system, system_pid}, data) do
-    Process.monitor(system_pid)
-    new_data = %{data | systems: [system_pid | data.systems]}
+  def operational({:call, from}, {:register_system, owner_pid, system}, data) do
+    Process.monitor(owner_pid)
+    new_data = %{data | current_system: {owner_pid, system}}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def operational({:call, from}, {:unregister_system, system_pid}, data) do
-    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+  def operational({:call, from}, {:unregister_system, owner_pid}, data) do
+    new_data = case data.current_system do
+      {^owner_pid, _system} -> %{data | current_system: nil}
+      _ -> data
+    end
     {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
+  def operational({:call, from}, :get_current_system, data) do
+    system = case data.current_system do
+      {_owner_pid, system} -> system
+      nil -> nil
+    end
+    {:keep_state_and_data, [{:reply, from, {:ok, system}}]}
   end
 
   def operational({:call, from}, :start_cyclic_mode, _data) do
@@ -873,10 +1008,15 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def operational(:info, {:DOWN, _ref, :process, system_pid, _reason}, data) do
-    Logger.warning("System #{inspect(system_pid)} died, unregistering")
-    new_data = %{data | systems: List.delete(data.systems, system_pid)}
-    {:keep_state, new_data}
+  def operational(:info, {:DOWN, _ref, :process, owner_pid, _reason}, data) do
+    case data.current_system do
+      {^owner_pid, _system} ->
+        Logger.warning("Current system owner #{inspect(owner_pid)} died, unregistering")
+        new_data = %{data | current_system: nil}
+        {:keep_state, new_data}
+      _ ->
+        {:keep_state_and_data, []}
+    end
   end
 
   def operational(event_type, event_content, data) do
