@@ -156,16 +156,91 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :connect, timeout)
   end
 
-  @doc "Discovers slaves, transitions to `:synced`."
-  @spec sync_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
-  def sync_slaves(master, timeout \\ 10_000) do
-    :gen_statem.call(master, :sync_slaves, timeout)
+  @doc """
+  Syncs slaves with the given configuration.
+
+  This validates the config against detected hardware, syncs slaves if valid,
+  and transitions from :stale to :synced. This is the primary way to configure
+  a Master.
+
+  ## Parameters
+  - `master` - Master PID or name
+  - `config` - HardwareConfig struct to validate and sync with
+  - `timeout` - Call timeout in milliseconds
+
+  ## Returns
+  - `{:ok, slaves}` - List of synced slave PIDs
+  - `{:error, :hardware_not_stable}` - Hardware fingerprint not stable yet
+  - `{:error, {:slave_count_mismatch, ...}}` - Wrong number of slaves
+  - `{:error, {:hardware_mismatch, ...}}` - Vendor/product mismatch
+  - `{:error, reason}` - Other sync error
+
+  ## Example
+
+      config = MyMachine.hardware_config()
+      {:ok, slaves} = Master.sync_with_config(master, config)
+  """
+  @spec sync_with_config(GenServer.server(), EtherCAT.Config.HardwareConfig.t(), timeout()) ::
+          {:ok, [pid()]} | {:error, term()}
+  def sync_with_config(master, config, timeout \\ 10_000) do
+    :gen_statem.call(master, {:sync_with_config, config}, timeout)
   end
 
-  @doc "Gets list of all slave PIDs."
+  @doc """
+  Gets list of all slave PIDs.
+
+  Only works in :synced or :operational states. Returns error in :stale.
+  """
   @spec get_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
-  def get_slaves(master, timeout \\ 5000) do
+  def get_slaves(master, timeout \\ 10_000) do
     :gen_statem.call(master, :get_slaves, timeout)
+  end
+
+  @doc """
+  Generates HardwareConfig by introspecting connected slaves.
+
+  Used for hardware discovery mode. Master must be in synced or operational state.
+
+  ## Returns
+  - `{:ok, config}` - Generated HardwareConfig with detected slaves
+  - `{:error, reason}` - Master not synced or error reading slave info
+  """
+  @spec generate_config(GenServer.server(), timeout()) ::
+          {:ok, EtherCAT.Config.HardwareConfig.t()} | {:error, term()}
+  def generate_config(master, timeout \\ 10_000) do
+    alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig}
+
+    with {:ok, slaves} <- get_slaves(master, timeout) do
+      slave_configs =
+        Enum.map(slaves, fn slave_pid ->
+          info = Slave.get_info(slave_pid)
+
+          %SlaveConfig{
+            position: info.position,
+            name: :"slave_#{info.position}",
+            driver: nil,
+            # TODO: Auto-detect driver from vendor/product
+            expected: %{
+              vendor: info.vendor_id,
+              product: info.product_code
+            },
+            config: %{},
+            entries: []
+          }
+        end)
+
+      config = %HardwareConfig{
+        master: %MasterConfig{
+          index: 0,
+          cycle_interval: 10_000,
+          nif_yield_interval: 100_000
+        },
+        domains: [%DomainConfig{name: :default_domain, interval: 1}],
+        slaves: slave_configs
+      }
+
+      {:ok, config}
+    end
   end
 
   @doc "Creates domain with independent update interval."
@@ -463,7 +538,7 @@ defmodule EtherCAT.Master do
   end
 
   # State: stale
-  # Network is up but slaves are not yet discovered/synchronized
+  # Network is up, monitoring hardware fingerprint for stability
 
   def stale(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
@@ -471,32 +546,43 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
-  def stale({:call, from}, :sync_slaves, data) do
+  def stale({:call, from}, :get_slaves, _data) do
+    # Master is not yet synced, return error
+    {:keep_state_and_data, [{:reply, from, {:error, :not_synced_yet}}]}
+  end
+
+  def stale({:call, from}, {:sync_with_config, config}, data) do
     start_time = System.monotonic_time()
 
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
+         :ok <- validate_hardware_stable(data, master_state),
+         :ok <- validate_config_matches_hardware(config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
       :telemetry.execute(
-        [:ethercat, :master, :sync_slaves],
+        [:ethercat, :master, :slaves_synced],
         %{duration: duration, count: length(slaves)},
         %{result: :success}
       )
 
+      Logger.info(
+        "Synced #{length(slaves)} slaves with config in #{duration}µs, transitioning to :synced"
+      )
+
       {:next_state, :synced, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else
-      {:error, reason} ->
+      {:error, reason} = error ->
         duration = System.monotonic_time() - start_time
 
         :telemetry.execute(
-          [:ethercat, :master, :sync_slaves],
+          [:ethercat, :master, :slaves_synced],
           %{duration: duration},
           %{result: :error, error: inspect(reason)}
         )
 
-        Logger.error("Error syncing slaves: #{inspect(reason)}")
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        Logger.warning("Failed to sync slaves with config: #{inspect(reason)}")
+        {:keep_state_and_data, [{:reply, from, error}]}
     end
   end
 
@@ -509,49 +595,25 @@ defmodule EtherCAT.Master do
         current_fingerprint = master_state.slaves_responding
         now = System.monotonic_time(:millisecond)
 
-        # Check if fingerprint changed or if this is first run
-        cond do
-          # Fingerprint changed - reset stability timer
-          data.slave_fingerprint != current_fingerprint ->
-            Logger.debug(
-              "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
-            )
+        # Track fingerprint changes, but don't auto-transition to :synced
+        # User must call sync_with_config to validate and sync
+        if data.slave_fingerprint != current_fingerprint do
+          Logger.debug(
+            "Hardware fingerprint changed: #{data.slave_fingerprint} -> #{current_fingerprint}"
+          )
 
-            new_data = %{
-              data
-              | slave_fingerprint: current_fingerprint,
-                fingerprint_stable_since: now
-            }
+          new_data = %{
+            data
+            | slave_fingerprint: current_fingerprint,
+              fingerprint_stable_since: now
+          }
 
-            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-            {:keep_state, new_data, actions}
-
-          # Fingerprint same and we have slaves - check if stable long enough
-          current_fingerprint > 0 and length(data.slaves) == 0 ->
-            # Check if stable for threshold duration
-            stable_duration = now - (data.fingerprint_stable_since || now)
-
-            if stable_duration >= data.fingerprint_change_threshold do
-              # Hardware is stable - transition to synced to discover slaves
-              Logger.info(
-                "Hardware stable with #{current_fingerprint} slaves for #{stable_duration}ms, transitioning to synced"
-              )
-
-              {:next_state, :synced, data}
-            else
-              # Not stable long enough yet
-              actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-              {:keep_state_and_data, actions}
-            end
-
-          # Already have slaves and count matches - stay in sync
-          current_fingerprint == length(data.slaves) and current_fingerprint > 0 ->
-            {:next_state, :synced, data}
-
-          # Default - keep scanning
-          true ->
-            actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-            {:keep_state_and_data, actions}
+          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+          {:keep_state, new_data, actions}
+        else
+          # Fingerprint unchanged, continue monitoring
+          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+          {:keep_state_and_data, actions}
         end
 
       {:error, reason} ->
@@ -570,13 +632,59 @@ defmodule EtherCAT.Master do
 
   def synced(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :synced})
+
+    # Slaves are already synced via sync_with_config call or already exist from :operational
+    # Just set up monitoring
+    Logger.debug("Entering synced state with #{length(data.slaves)} slaves")
     actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
 
-  def synced({:call, from}, :sync_slaves, data) do
-    # Already synced, just return the existing slaves
-    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
+  def synced({:call, from}, {:sync_with_config, config}, data) do
+    # Reconfiguration: terminate old slaves and sync with new config
+    start_time = System.monotonic_time()
+
+    Logger.info("Reconfiguring: terminating #{length(data.slaves)} existing slaves")
+
+    # Terminate existing slaves
+    Enum.each(data.slaves, fn slave_pid ->
+      if Process.alive?(slave_pid) do
+        GenServer.stop(slave_pid, :normal)
+      end
+    end)
+
+    # Now validate and sync with new config
+    with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
+         :ok <- validate_hardware_stable(data, master_state),
+         :ok <- validate_config_matches_hardware(config, master_state),
+         {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
+      duration = System.monotonic_time() - start_time
+
+      :telemetry.execute(
+        [:ethercat, :master, :slaves_synced],
+        %{duration: duration, count: length(slaves)},
+        %{result: :success, reconfiguration: true}
+      )
+
+      Logger.info(
+        "Reconfigured with #{length(slaves)} slaves in #{duration}µs"
+      )
+
+      {:keep_state, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
+    else
+      {:error, reason} = error ->
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:ethercat, :master, :slaves_synced],
+          %{duration: duration},
+          %{result: :error, error: inspect(reason), reconfiguration: true}
+        )
+
+        Logger.warning("Failed to reconfigure with new config: #{inspect(reason)}")
+        # Leave data.slaves empty after terminating old ones - user must fix config and retry
+        {:keep_state, %{data | slaves: []}, [{:reply, from, error}]}
+    end
   end
 
   def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
@@ -926,11 +1034,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.current_system}}]}
   end
 
-  def operational({:call, from}, :sync_slaves, data) do
-    # Already operational, return the existing slaves
-    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
-  end
-
   def operational({:call, from}, :start_cyclic_mode, _data) do
     {:keep_state_and_data,
      [{:reply, from, {:error, {:already_operational, "Cyclic mode is already running"}}}]}
@@ -1098,6 +1201,72 @@ defmodule EtherCAT.Master do
            ),
          :ok <- Nif.domain_set_pid(domain_ref, domain_pid) do
       {:ok, domain_ref, domain_pid}
+    end
+  end
+
+  # Validate hardware fingerprint is stable
+  defp validate_hardware_stable(data, master_state) do
+    current_fingerprint = master_state.slaves_responding
+    now = System.monotonic_time(:millisecond)
+
+    # Check if fingerprint matches what we've been tracking
+    if data.slave_fingerprint != current_fingerprint do
+      {:error, {:fingerprint_mismatch, "Hardware changed during sync attempt"}}
+    else
+      # Check if stable for required duration
+      stable_duration = now - (data.fingerprint_stable_since || now)
+
+      if stable_duration >= data.fingerprint_change_threshold do
+        :ok
+      else
+        {:error,
+         {:hardware_not_stable,
+          "Hardware must be stable for #{data.fingerprint_change_threshold}ms, " <>
+            "currently stable for #{stable_duration}ms"}}
+      end
+    end
+  end
+
+  # Validate config matches detected hardware
+  defp validate_config_matches_hardware(config, %{master_ref: master_ref} = master_state) do
+    detected_count = master_state.slaves_responding
+    config_count = length(config.slaves)
+
+    if detected_count != config_count do
+      {:error,
+       {:slave_count_mismatch,
+        "Config expects #{config_count} slaves, but detected #{detected_count}"}}
+    else
+      # Validate each slave's vendor/product if specified
+      config.slaves
+      |> Enum.filter(& &1.expected)
+      |> Enum.reduce_while(:ok, fn slave_config, :ok ->
+        with {:ok, slave_info} <- Nif.master_get_slave(master_ref, slave_config.position) do
+          cond do
+            slave_config.expected.vendor &&
+                slave_info.vendor_id != slave_config.expected.vendor ->
+              {:halt,
+               {:error,
+                {:hardware_mismatch, slave_config.position,
+                 "Expected vendor 0x#{Integer.to_string(slave_config.expected.vendor, 16)}, " <>
+                   "but found 0x#{Integer.to_string(slave_info.vendor_id, 16)}"}}}
+
+            slave_config.expected.product &&
+                slave_info.product_code != slave_config.expected.product ->
+              {:halt,
+               {:error,
+                {:hardware_mismatch, slave_config.position,
+                 "Expected product 0x#{Integer.to_string(slave_config.expected.product, 16)}, " <>
+                   "but found 0x#{Integer.to_string(slave_info.product_code, 16)}"}}}
+
+            true ->
+              {:cont, :ok}
+          end
+        else
+          {:error, reason} ->
+            {:halt, {:error, {:slave_info_read_failed, slave_config.position, reason}}}
+        end
+      end)
     end
   end
 

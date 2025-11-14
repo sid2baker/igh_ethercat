@@ -27,7 +27,9 @@ defmodule EtherCAT.System do
   @doc """
   Configure an existing Master with the given configuration.
 
-  This is called by EtherCAT.configure_hardware/1.
+  This is the main entry point for applying hardware configuration.
+  Automatically stops any existing system, validates hardware, and starts
+  cyclic communication.
 
   ## Parameters
   - `master` - Master PID (already started and connected)
@@ -39,18 +41,20 @@ defmodule EtherCAT.System do
 
   ## Example
 
-      {:ok, master} = find_master(0)
+      {:ok, master} = EtherCAT.find_master(0)
       config = MyMachine.hardware_config()
       {:ok, system} = EtherCAT.System.configure(master, config)
   """
   @spec configure(pid(), HardwareConfig.t()) :: {:ok, t()} | {:error, term()}
   def configure(master, %HardwareConfig{} = config) do
+    require Logger
+
     # Validate configuration
     with :ok <- HardwareConfig.validate(config),
-         # Discover/sync slaves (Master is already connected)
-         {:ok, slaves} <- Master.sync_slaves(master),
-         # Verify hardware matches config (if expected specified)
-         :ok <- verify_hardware(config, slaves),
+         # Stop current system if one exists
+         :ok <- stop_current_system_if_exists(master),
+         # Sync slaves with config (Master validates hardware and syncs)
+         {:ok, slaves} <- Master.sync_with_config(master, config),
          # Create all domains
          :ok <- create_domains(master, config.domains),
          # Configure all slaves
@@ -85,6 +89,28 @@ defmodule EtherCAT.System do
     end
   end
 
+  defp stop_current_system_if_exists(master) do
+    require Logger
+
+    case Master.get_current_system(master) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, _system} ->
+        Logger.warning(
+          "Stopping existing system on master to reconfigure with new configuration"
+        )
+
+        with :ok <- Master.stop_cyclic_mode(master),
+             :ok <- Master.unregister_system(master) do
+          :ok
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
   @doc """
   Closes the EtherCAT system and releases its resources.
 
@@ -95,47 +121,6 @@ defmodule EtherCAT.System do
     # Just unregister from Master (clear the current_system reference)
     Master.unregister_system(master)
     :ok
-  end
-
-  @doc """
-  Generates a HardwareConfig by scanning hardware from slaves.
-
-  Used by EtherCAT.generate_config/1 for hardware discovery.
-  """
-  @spec generate_hardware_config([pid()]) :: {:ok, HardwareConfig.t()} | {:error, term()}
-  def generate_hardware_config(slaves) do
-    slave_configs =
-      Enum.map(slaves, fn slave_pid ->
-        info = Slave.get_info(slave_pid)
-        _pdos = Slave.list_pdos(slave_pid)
-
-        # Generate basic slave config (user will need to add entries)
-        %EtherCAT.Config.SlaveConfig{
-          position: info.position,
-          name: info.name,
-          driver: nil,
-          # TODO: Driver detection
-          expected: %{
-            vendor: info.vendor_id,
-            product: info.product_code
-          },
-          config: %{},
-          entries: []
-          # User needs to fill this in
-        }
-      end)
-
-    config = %HardwareConfig{
-      master: nil,
-      # Will use defaults
-      domains: [
-        # Default domain - user should customize
-        %EtherCAT.Config.DomainConfig{name: :default_domain, interval: 1}
-      ],
-      slaves: slave_configs
-    }
-
-    {:ok, config}
   end
 
   @doc """
@@ -170,34 +155,6 @@ defmodule EtherCAT.System do
   end
 
   # Private implementation
-
-  defp verify_hardware(config, slaves) do
-    # Check each slave in config has expected hardware (if specified)
-    config.slaves
-    |> Enum.filter(& &1.expected)
-    |> Enum.reduce_while(:ok, fn slave_config, :ok ->
-      case Enum.at(slaves, slave_config.position) do
-        nil ->
-          {:halt, {:error, {:slave_not_found, "No slave at position #{slave_config.position}"}}}
-
-        slave_pid ->
-          info = Slave.get_info(slave_pid)
-
-          if info.vendor_id == slave_config.expected.vendor and
-               info.product_code == slave_config.expected.product do
-            {:cont, :ok}
-          else
-            {:halt,
-             {:error,
-              {:hardware_mismatch, slave_config.position,
-               "Expected vendor 0x#{Integer.to_string(slave_config.expected.vendor, 16)}, " <>
-                 "product 0x#{Integer.to_string(slave_config.expected.product, 16)}, " <>
-                 "but found vendor 0x#{Integer.to_string(info.vendor_id, 16)}, " <>
-                 "product 0x#{Integer.to_string(info.product_code, 16)}"}}}
-          end
-      end
-    end)
-  end
 
   defp create_domains(master, domain_configs) do
     Enum.reduce_while(domain_configs, :ok, fn domain_config, :ok ->
