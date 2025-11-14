@@ -581,7 +581,7 @@ defmodule EtherCAT.Master do
 
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
          {:ok, updated_data} <- ensure_hardware_stable(data, master_state),
-         :ok <- validate_config_matches_hardware(config, master_state),
+         :ok <- validate_config_matches_hardware(data.master_ref, config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
@@ -681,7 +681,7 @@ defmodule EtherCAT.Master do
     # Now validate and sync with new config
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
          {:ok, updated_data} <- ensure_hardware_stable(data, master_state),
-         :ok <- validate_config_matches_hardware(config, master_state),
+         :ok <- validate_config_matches_hardware(data.master_ref, config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
@@ -1261,7 +1261,7 @@ defmodule EtherCAT.Master do
   end
 
   # Validate config matches detected hardware
-  defp validate_config_matches_hardware(config, %{master_ref: master_ref} = master_state) do
+  defp validate_config_matches_hardware(master_ref, config, master_state) do
     detected_count = master_state.slaves_responding
     config_count = length(config.slaves)
 
