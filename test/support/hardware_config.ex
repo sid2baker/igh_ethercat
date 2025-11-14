@@ -28,6 +28,15 @@ defmodule TestHardwareConfig do
         %DomainConfig{name: :io_domain, interval: 1}
       ],
       slaves: [
+        # EK1100 - EtherCAT Coupler at position 0
+        %SlaveConfig{
+          position: 0,
+          name: :coupler,
+          driver: nil,
+          expected: %{vendor: 0x00000002, product: 0x044C2C52},
+          config: %{},
+          entries: []
+        },
         # EL1809 - 16-channel digital input at position 1
         %SlaveConfig{
           position: 1,
