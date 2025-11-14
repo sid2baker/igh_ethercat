@@ -19,10 +19,7 @@ defmodule EtherCAT.Config.SlaveConfig do
     :driver,
     :expected,
     :config,
-    :entries,
-    alias: 0,
-    pdos: [],
-    sdos: []
+    :entries
   ]
 
   @type expected :: %{
@@ -36,10 +33,7 @@ defmodule EtherCAT.Config.SlaveConfig do
           driver: module() | nil,
           expected: expected() | nil,
           config: map(),
-          entries: [EntryConfig.t()],
-          alias: non_neg_integer(),
-          pdos: list(),
-          sdos: list()
+          entries: [EntryConfig.t()]
         }
 
   @doc """
@@ -53,9 +47,6 @@ defmodule EtherCAT.Config.SlaveConfig do
     - `:expected` - Expected vendor/product codes for verification (optional)
     - `:config` - Driver-specific configuration map (default: %{})
     - `:entries` - List of EntryConfig structs for domain routing (default: [])
-    - `:alias` - EtherCAT alias address (default: 0)
-    - `:pdos` - Expected PDO configurations for verification (default: [])
-    - `:sdos` - SDO configurations to apply (default: [])
   """
   @spec new(non_neg_integer(), keyword()) :: t()
   def new(position, opts \\ []) when is_integer(position) and position >= 0 do
@@ -65,10 +56,7 @@ defmodule EtherCAT.Config.SlaveConfig do
       driver: Keyword.get(opts, :driver),
       expected: Keyword.get(opts, :expected),
       config: Keyword.get(opts, :config, %{}),
-      entries: Keyword.get(opts, :entries, []),
-      alias: Keyword.get(opts, :alias, 0),
-      pdos: Keyword.get(opts, :pdos, []),
-      sdos: Keyword.get(opts, :sdos, [])
+      entries: Keyword.get(opts, :entries, [])
     }
   end
 

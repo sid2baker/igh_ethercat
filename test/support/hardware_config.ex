@@ -15,10 +15,15 @@ defmodule HardwareConfig do
   - EL3202 Channel 2: 100Ω resistor connected
   """
 
-  alias EtherCAT.Config.{HardwareConfig, DomainConfig, SlaveConfig, EntryConfig}
+  alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig, EntryConfig}
 
   def hardware_config do
     %HardwareConfig{
+      master: %MasterConfig{
+        index: 0,
+        update_interval: 10_000,
+        nif_yield_interval: 100_000
+      },
       domains: [
         %DomainConfig{name: :io_domain, interval: 1}
       ],

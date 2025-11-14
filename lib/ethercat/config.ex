@@ -43,15 +43,34 @@ defmodule EtherCAT.Config do
   """
   @spec build(module()) :: EtherCAT.Config.HardwareConfig.t()
   def build(module) do
-    domains = Spark.Dsl.Extension.get_entities(module, [:hardware])
-              |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Domain))
+    entities = Spark.Dsl.Extension.get_entities(module, [:hardware])
 
-    slaves = Spark.Dsl.Extension.get_entities(module, [:hardware])
+    master = entities
+             |> Enum.find(&(&1.__struct__ == EtherCAT.Config.Dsl.Master))
+             |> build_master()
+
+    domains = entities
+              |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Domain))
+              |> Enum.map(&build_domain/1)
+
+    slaves = entities
              |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Slave))
+             |> Enum.map(&build_slave/1)
 
     %EtherCAT.Config.HardwareConfig{
-      domains: Enum.map(domains, &build_domain/1),
-      slaves: Enum.map(slaves, &build_slave/1)
+      master: master,
+      domains: domains,
+      slaves: slaves
+    }
+  end
+
+  defp build_master(nil), do: nil
+
+  defp build_master(entity) do
+    %EtherCAT.Config.MasterConfig{
+      index: entity.index || 0,
+      update_interval: entity.update_interval || 10_000,
+      nif_yield_interval: entity.nif_yield_interval || 100_000
     }
   end
 
@@ -109,6 +128,32 @@ defmodule EtherCAT.Config do
       top_level?: true,
       describe: "Hardware configuration for the EtherCAT system",
       entities: [
+        %Spark.Dsl.Entity{
+          name: :master,
+          describe: "Configure the EtherCAT master",
+          target: EtherCAT.Config.Dsl.Master,
+          args: [],
+          schema: [
+            index: [
+              type: :non_neg_integer,
+              required: false,
+              default: 0,
+              doc: "EtherCAT master index (default: 0)"
+            ],
+            update_interval: [
+              type: :pos_integer,
+              required: false,
+              default: 10_000,
+              doc: "Master update interval in microseconds (default: 10_000)"
+            ],
+            nif_yield_interval: [
+              type: :pos_integer,
+              required: false,
+              default: 100_000,
+              doc: "NIF yielding interval in microseconds (default: 100_000)"
+            ]
+          ]
+        },
         %Spark.Dsl.Entity{
           name: :domain,
           describe: "Define a cyclic domain with update interval",
