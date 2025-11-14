@@ -916,6 +916,10 @@ defmodule EtherCAT.Nif do
           try accessor.initDomainData();
       }
 
+      // Notify master that cyclic task initialization is complete
+      // This ensures the master doesn't accept read/write requests until data is ready
+      _ = try beam.send(master_pid, .cyclic_task_ready, .{});
+
       var counter: u32 = 0;
 
       // Main cyclic loop with deterministic timing
