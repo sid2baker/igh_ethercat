@@ -98,12 +98,6 @@ defmodule EtherCAT.HardwareLayout do
       #     %EtherCAT.Config.SlaveConfig{position: 1, expected: %{vendor: 0xDEAD, ...}, ...}
       #   ]
       # }
-
-  ## Future Options
-
-  - `:include_pdos` - Query and include PDO layout (requires NIF calls)
-  - `:include_sdos` - Read current SDO values (slow, requires uploads)
-  - `:minimal` - Only include essential fields
   """
   @spec from_slaves([pid()], keyword()) :: t()
   def from_slaves(slaves, _opts \\ []) do
@@ -125,9 +119,7 @@ defmodule EtherCAT.HardwareLayout do
             },
             config: %{},
             entries: [],
-            alias: info.alias,
-            pdos: [],
-            sdos: []
+            alias: info.alias
           }
         catch
           :exit, reason ->

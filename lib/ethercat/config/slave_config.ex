@@ -15,6 +15,7 @@ defmodule EtherCAT.Config.SlaveConfig do
 
   defstruct [
     :position,
+    :alias,
     :name,
     :driver,
     :expected,
@@ -29,6 +30,7 @@ defmodule EtherCAT.Config.SlaveConfig do
 
   @type t :: %__MODULE__{
           position: non_neg_integer(),
+          alias: non_neg_integer(),
           name: atom() | nil,
           driver: module() | nil,
           expected: expected() | nil,
@@ -41,6 +43,7 @@ defmodule EtherCAT.Config.SlaveConfig do
 
   ## Parameters
   - `position` - Bus position (0-based)
+  - `alias` - Bus alias (when 0 position is used)
   - `opts` - Configuration options:
     - `:name` - Semantic slave name (optional)
     - `:driver` - Driver module implementing EtherCAT.Slave.Driver (optional)
@@ -52,6 +55,7 @@ defmodule EtherCAT.Config.SlaveConfig do
   def new(position, opts \\ []) when is_integer(position) and position >= 0 do
     %__MODULE__{
       position: position,
+      alias: 0,
       name: Keyword.get(opts, :name),
       driver: Keyword.get(opts, :driver),
       expected: Keyword.get(opts, :expected),
