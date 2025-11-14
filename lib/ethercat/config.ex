@@ -34,7 +34,7 @@ defmodule EtherCAT.Config do
       end
 
       # Use the configuration
-      {:ok, system} = EtherCAT.open(MyMachine)
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
       {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
   """
 
