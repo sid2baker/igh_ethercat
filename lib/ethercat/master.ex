@@ -551,6 +551,11 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:error, :not_synced_yet}}]}
   end
 
+  def stale({:call, from}, :get_current_system, _data) do
+    # No system can exist in :stale state (not yet configured)
+    {:keep_state_and_data, [{:reply, from, {:ok, nil}}]}
+  end
+
   def stale({:call, from}, {:sync_with_config, config}, data) do
     start_time = System.monotonic_time()
 
