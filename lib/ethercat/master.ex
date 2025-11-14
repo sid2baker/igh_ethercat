@@ -691,9 +691,7 @@ defmodule EtherCAT.Master do
         %{result: :success, reconfiguration: true}
       )
 
-      Logger.info(
-        "Reconfigured with #{length(slaves)} slaves in #{duration}µs"
-      )
+      Logger.info("Reconfigured with #{length(slaves)} slaves in #{duration}µs")
 
       {:keep_state, %{updated_data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else

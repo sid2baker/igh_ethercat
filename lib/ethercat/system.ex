@@ -97,9 +97,7 @@ defmodule EtherCAT.System do
         :ok
 
       {:ok, _system} ->
-        Logger.warning(
-          "Stopping existing system on master to reconfigure with new configuration"
-        )
+        Logger.warning("Stopping existing system on master to reconfigure with new configuration")
 
         with :ok <- Master.stop_cyclic_mode(master),
              :ok <- Master.unregister_system(master) do
