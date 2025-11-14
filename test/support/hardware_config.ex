@@ -68,12 +68,24 @@ defmodule HardwareConfig do
           driver: EtherCAT.Drivers.EL3202,
           expected: %{vendor: 0x00000002, product: 0x0C823052},
           config: %{
-            # Configure both channels to OHMS mode (8) to read resistor values
+            # OHMS mode
             ch1_rtd_element: 8,
-            ch2_rtd_element: 8,
-            # Use 2-wire connection for resistors
+            # 2-wire
             ch1_connection: 0,
-            ch2_connection: 0
+            ch1_enable_user_scale: true,
+            # No offset
+            ch1_user_scale_offset: 0,
+            # 32768 * 1.257 (120/95.5)
+            ch1_user_scale_gain: 41190,
+            # OHMS mode
+            ch2_rtd_element: 8,
+            # 2-wire
+            ch2_connection: 0,
+            ch2_enable_user_scale: true,
+            # No offset
+            ch2_user_scale_offset: 0,
+            # 32768 * 1.259 (100/79.4)
+            ch2_user_scale_gain: 41264
           },
           entries: [
             %EntryConfig{pdo_name: :ch1, entry_name: :value, domain: :io_domain},
