@@ -53,10 +53,8 @@ defmodule EtherCAT.System do
     with :ok <- HardwareConfig.validate(config),
          # Stop current system if one exists
          :ok <- stop_current_system_if_exists(master),
-         # Get slaves (Master auto-syncs, so this will block until ready)
-         {:ok, slaves} <- Master.get_slaves(master),
-         # Verify hardware matches config (if expected specified)
-         :ok <- verify_hardware(config, slaves),
+         # Sync slaves with config (Master validates hardware and syncs)
+         {:ok, slaves} <- Master.sync_with_config(master, config),
          # Create all domains
          :ok <- create_domains(master, config.domains),
          # Configure all slaves
@@ -157,34 +155,6 @@ defmodule EtherCAT.System do
   end
 
   # Private implementation
-
-  defp verify_hardware(config, slaves) do
-    # Check each slave in config has expected hardware (if specified)
-    config.slaves
-    |> Enum.filter(& &1.expected)
-    |> Enum.reduce_while(:ok, fn slave_config, :ok ->
-      case Enum.at(slaves, slave_config.position) do
-        nil ->
-          {:halt, {:error, {:slave_not_found, "No slave at position #{slave_config.position}"}}}
-
-        slave_pid ->
-          info = Slave.get_info(slave_pid)
-
-          if info.vendor_id == slave_config.expected.vendor and
-               info.product_code == slave_config.expected.product do
-            {:cont, :ok}
-          else
-            {:halt,
-             {:error,
-              {:hardware_mismatch, slave_config.position,
-               "Expected vendor 0x#{Integer.to_string(slave_config.expected.vendor, 16)}, " <>
-                 "product 0x#{Integer.to_string(slave_config.expected.product, 16)}, " <>
-                 "but found vendor 0x#{Integer.to_string(info.vendor_id, 16)}, " <>
-                 "product 0x#{Integer.to_string(info.product_code, 16)}"}}}
-          end
-      end
-    end)
-  end
 
   defp create_domains(master, domain_configs) do
     Enum.reduce_while(domain_configs, :ok, fn domain_config, :ok ->
