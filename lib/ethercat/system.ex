@@ -29,7 +29,6 @@ defmodule EtherCAT.System do
 
   ## Parameters
   - `config` - HardwareConfig struct (typically from Spark DSL module)
-  - `opts` - Options passed to Master.start_link (overrides config.master if provided)
 
   ## Returns
   - `{:ok, system}` - System handle on success
@@ -40,10 +39,10 @@ defmodule EtherCAT.System do
       config = MyMachine.hardware_config()
       {:ok, system} = EtherCAT.System.open(config)
   """
-  @spec open(HardwareConfig.t(), keyword()) :: {:ok, t()} | {:error, term()}
-  def open(%HardwareConfig{} = config, opts \\ []) do
-    # Build master options from config.master (if present) and opts (override)
-    master_opts = build_master_opts(config.master, opts)
+  @spec open(HardwareConfig.t()) :: {:ok, t()} | {:error, term()}
+  def open(%HardwareConfig{} = config) do
+    # Build master options from config.master
+    master_opts = build_master_opts(config.master)
 
     # Validate configuration
     with :ok <- HardwareConfig.validate(config),
@@ -264,15 +263,14 @@ defmodule EtherCAT.System do
     end
   end
 
-  # Builds master options from config and opts (opts override config)
-  defp build_master_opts(nil, opts), do: opts
+  # Builds master options from config (uses defaults if nil)
+  defp build_master_opts(nil), do: []
 
-  defp build_master_opts(master_config, opts) do
+  defp build_master_opts(master_config) do
     [
       master_index: master_config.index,
       update_interval: master_config.update_interval,
       nif_yield_interval: master_config.nif_yield_interval
     ]
-    |> Keyword.merge(opts)
   end
 end

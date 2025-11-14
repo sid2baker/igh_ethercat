@@ -59,9 +59,6 @@ defmodule EtherCAT do
 
   ## Parameters
   - `config_module` - Module using `EtherCAT.Config` DSL
-  - `opts` - Options:
-    - `:index` - EtherCAT master index (default: 0)
-    - Other options passed to the NIF layer
 
   ## Returns
   - `{:ok, system}` - System handle for I/O operations
@@ -71,14 +68,11 @@ defmodule EtherCAT do
 
       # Using a Spark DSL module
       {:ok, system} = EtherCAT.open(MyMachine)
-
-      # Specifying master index
-      {:ok, system} = EtherCAT.open(MyMachine, index: 1)
   """
-  @spec open(module(), keyword()) :: {:ok, System.t()} | {:error, term()}
-  def open(config_module, opts) when is_atom(config_module) and is_list(opts) do
+  @spec open(module()) :: {:ok, System.t()} | {:error, term()}
+  def open(config_module) when is_atom(config_module) do
     config = config_module.hardware_config()
-    System.open(config, opts)
+    System.open(config)
   end
 
   @doc """
@@ -87,9 +81,9 @@ defmodule EtherCAT do
   Use this to discover connected hardware and generate a configuration.
   After discovery, call `generate_config/1` to create a config struct.
 
-  ## Parameters
-  - `opts` - Options:
-    - `:index` - EtherCAT master index (default: 0)
+  Discovery mode uses default master settings (index: 0, default intervals).
+  If you need to specify master settings for discovery, create a minimal
+  HardwareConfig with only master configured.
 
   ## Returns
   - `{:ok, system}` - System handle with discovered slaves
@@ -101,15 +95,11 @@ defmodule EtherCAT do
       config = EtherCAT.generate_config(system)
       # Use config to create your Spark DSL module
   """
-  @spec open(keyword()) :: {:ok, System.t()} | {:error, term()}
-  def open(opts) when is_list(opts) do
-    # Discovery mode - open with empty config
-    config = %HardwareConfig{domains: [], slaves: []}
-    System.open(config, opts)
-  end
-
-  def open(config_module) when is_atom(config_module) do
-    open(config_module, [])
+  @spec open() :: {:ok, System.t()} | {:error, term()}
+  def open() do
+    # Discovery mode - open with empty config (uses master defaults)
+    config = %HardwareConfig{master: nil, domains: [], slaves: []}
+    System.open(config)
   end
 
   @doc """
@@ -292,6 +282,8 @@ defmodule EtherCAT do
       end)
 
     %HardwareConfig{
+      master: nil,
+      # Will use defaults
       domains: [
         # Default domain - user should customize
         %EtherCAT.Config.DomainConfig{name: :default_domain, interval: 1}
