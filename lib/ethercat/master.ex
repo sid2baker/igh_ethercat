@@ -97,18 +97,29 @@ defmodule EtherCAT.Master do
   catch
     # Handle all variations of "process doesn't exist or is already stopping" exits:
     # Common exit patterns from :proc_lib.stop/3:
-    :exit, :noproc -> :ok
-    :exit, {:noproc, _} -> :ok
-    :exit, {reason, _details} when reason == :noproc -> :ok
-    :exit, :shutdown -> :ok
-    :exit, :normal -> :ok
+    :exit, :noproc ->
+      :ok
+
+    :exit, {:noproc, _} ->
+      :ok
+
+    :exit, {reason, _details} when reason == :noproc ->
+      :ok
+
+    :exit, :shutdown ->
+      :ok
+
+    :exit, :normal ->
+      :ok
+
     :exit, reason ->
       # Catch-all for any other exit that indicates process is gone/stopping
       # This handles variations in :proc_lib.stop/3 error formats across OTP versions
       reason_str = inspect(reason)
+
       if String.contains?(reason_str, "noproc") or
-         String.contains?(reason_str, "no process") or
-         String.contains?(reason_str, "not alive") do
+           String.contains?(reason_str, "no process") or
+           String.contains?(reason_str, "not alive") do
         :ok
       else
         # Unexpected exit - re-raise it
