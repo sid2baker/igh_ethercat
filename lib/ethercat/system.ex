@@ -168,20 +168,26 @@ defmodule EtherCAT.System do
           {:halt, {:error, {:slave_not_found, slave_config.position}}}
 
         slave_pid ->
-          # Set slave name if provided
-          if slave_config.name do
-            Slave.set_name(slave_pid, slave_config.name)
-          end
+          # Validate driver matches if specified in config
+          with :ok <- validate_driver_match(master, slave_pid, slave_config) do
+            # Set slave name if provided
+            if slave_config.name do
+              Slave.set_name(slave_pid, slave_config.name)
+            end
 
-          # Configure slave with driver config
-          case Slave.configure(slave_pid, slave_config.config) do
-            :ok ->
-              # Add to slave map (use name or position as key)
-              key = slave_config.name || :"s#{slave_config.position}"
-              {:cont, {:ok, Map.put(acc, key, slave_pid)}}
+            # Configure slave with driver config
+            case Slave.configure(slave_pid, slave_config.config) do
+              :ok ->
+                # Add to slave map (use name or position as key)
+                key = slave_config.name || :"s#{slave_config.position}"
+                {:cont, {:ok, Map.put(acc, key, slave_pid)}}
 
-            {:error, reason} ->
-              {:halt, {:error, {:slave_config_failed, slave_config.position, reason}}}
+              {:error, reason} ->
+                {:halt, {:error, {:slave_config_failed, slave_config.position, reason}}}
+            end
+          else
+            {:error, _} = error ->
+              {:halt, error}
           end
       end
     end)
@@ -226,5 +232,32 @@ defmodule EtherCAT.System do
       end)
     end)
     |> Map.new()
+  end
+
+  # Validates that the auto-detected driver matches the configured driver (if specified)
+  defp validate_driver_match(master, slave_pid, slave_config) do
+    # Skip validation if no driver specified in config
+    if slave_config.driver == nil do
+      :ok
+    else
+      info = Slave.get_info(slave_pid)
+
+      # Get the actual driver module from the slave's Registry metadata
+      [{_pid, slave_meta}] =
+        Registry.lookup(EtherCAT.Registry, {:slave, master, slave_config.position})
+
+      actual_driver = slave_meta.driver
+
+      if actual_driver == slave_config.driver do
+        :ok
+      else
+        {:error,
+         {:driver_mismatch, slave_config.position,
+          "Config specifies #{inspect(slave_config.driver)}, " <>
+            "but hardware (vendor 0x#{Integer.to_string(info.vendor_id, 16)}, " <>
+            "product 0x#{Integer.to_string(info.product_code, 16)}) " <>
+            "was detected as #{inspect(actual_driver)}"}}
+      end
+    end
   end
 end

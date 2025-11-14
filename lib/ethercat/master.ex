@@ -653,7 +653,12 @@ defmodule EtherCAT.Master do
         position: slave_position,
         driver: driver,
         slave_config: slave_config,
-        sync_count: slave_info.sync_count
+        sync_count: slave_info.sync_count,
+        vendor_id: slave_info.vendor_id,
+        product_code: slave_info.product_code,
+        alias: slave_info.alias,
+        revision: slave_info.revision_number,
+        serial: slave_info.serial_number
       )
     end
   end
@@ -756,8 +761,9 @@ defmodule EtherCAT.Master do
   end
 
   # Determines which driver to use for a slave based on vendor ID and product code.
-  # Currently returns Generic driver for all devices. In the future, this can be
-  # extended to support device-specific drivers.
-  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Drivers.EL3202
+  # Maps known Beckhoff devices to their specific drivers, falls back to Generic.
+  defp driver_for_slave(0x02, 0x07093052), do: EtherCAT.Drivers.EL1809
+  defp driver_for_slave(0x02, 0x0AF93052), do: EtherCAT.Drivers.EL2809
+  defp driver_for_slave(0x02, 0x0C5A3052), do: EtherCAT.Drivers.EL3202
   defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Drivers.Generic
 end

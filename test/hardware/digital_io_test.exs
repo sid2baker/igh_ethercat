@@ -1,6 +1,6 @@
 defmodule Hardware.DigitalIOTest do
   use ExUnit.Case, async: false
-  use Bitwise
+  import Bitwise
 
   @moduletag :hardware
   @moduletag timeout: :infinity
