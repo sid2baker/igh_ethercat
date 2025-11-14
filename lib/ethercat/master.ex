@@ -109,6 +109,9 @@ defmodule EtherCAT.Master do
     :exit, :shutdown ->
       :ok
 
+    :exit, {:shutdown, _} ->
+      :ok
+
     :exit, :normal ->
       :ok
 
