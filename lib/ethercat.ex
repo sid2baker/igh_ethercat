@@ -157,7 +157,7 @@ defmodule EtherCAT do
   @doc """
   Configure hardware and create an operational System.
 
-  If a system is already loaded on this master, it will be stopped first.
+  Automatically stops any existing system and starts cyclic communication.
 
   ## Parameters
   - `master` - Master PID or index (integer)
@@ -180,17 +180,15 @@ defmodule EtherCAT do
           {:ok, System.t()} | {:error, term()}
   def configure_hardware(master, config_or_module) when is_pid(master) do
     with {:ok, config} <- get_config(config_or_module),
-         {:ok, _slaves} <- wait_for_master_ready(master),
-         :ok <- verify_hardware(master, config),
-         :ok <- stop_current_system(master),
          {:ok, system} <- System.configure(master, config) do
       {:ok, system}
     end
   end
 
   def configure_hardware(master_index, config_or_module) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index) do
-      configure_hardware(master, config_or_module)
+    with {:ok, master} <- find_master(master_index),
+         {:ok, system} <- configure_hardware(master, config_or_module) do
+      {:ok, system}
     end
   end
 
@@ -339,56 +337,62 @@ defmodule EtherCAT do
     end
   end
 
+  @doc """
+  Generate hardware configuration by discovering connected slaves.
+
+  Use this for hardware discovery mode when you don't know the slave configuration.
+
+  ## Parameters
+  - `master` - Master PID or index (integer)
+
+  ## Returns
+  - `{:ok, config}` - Generated HardwareConfig
+  - `{:error, reason}` - Master not synced or error
+
+  ## Example
+
+      {:ok, system} = EtherCAT.open(0)  # Discovery mode
+      {:ok, config} = EtherCAT.generate_config(system)
+      IO.inspect(config, pretty: true)
+  """
+  @spec generate_config(System.t() | pid() | non_neg_integer()) ::
+          {:ok, HardwareConfig.t()} | {:error, term()}
+  def generate_config(%System{master: master}), do: Master.generate_config(master)
+  def generate_config(master) when is_pid(master), do: Master.generate_config(master)
+
+  def generate_config(master_index) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      Master.generate_config(master)
+    end
+  end
+
+  @doc """
+  Get list of detected slave PIDs from Master.
+
+  ## Parameters
+  - `master` - Master PID or index (integer)
+
+  ## Returns
+  - `{:ok, [pid]}` - List of slave PIDs
+  - `{:error, reason}` - Master not synced yet
+
+  ## Example
+
+      {:ok, slaves} = EtherCAT.get_slaves(0)
+  """
+  @spec get_slaves(pid() | non_neg_integer()) :: {:ok, [pid()]} | {:error, term()}
+  def get_slaves(master) when is_pid(master), do: Master.get_slaves(master)
+
+  def get_slaves(master_index) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      Master.get_slaves(master)
+    end
+  end
+
   ## Private Helpers
 
-  defp stop_current_system(master) do
-    # Stop cyclic mode and clear current system reference if any
-    case Master.get_current_system(master) do
-      {:ok, nil} ->
-        :ok
-
-      {:ok, _system} ->
-        # Stop cyclic mode (transitions operational → synced)
-        # Then clear the current system reference
-        with :ok <- Master.stop_cyclic_mode(master),
-             :ok <- Master.unregister_system(master) do
-          :ok
-        end
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
   defp generate_config_from_master(master) do
-    with {:ok, slaves} <- Master.get_slaves(master) do
-      System.generate_hardware_config(slaves)
-    end
-  end
-
-  defp wait_for_master_ready(master, timeout \\ 10_000) do
-    wait_for_master_ready(master, timeout, Elixir.System.monotonic_time(:millisecond))
-  end
-
-  defp wait_for_master_ready(master, timeout, start_time) do
-    elapsed = Elixir.System.monotonic_time(:millisecond) - start_time
-
-    if elapsed >= timeout do
-      {:error, {:master_not_ready, :timeout}}
-    else
-      case Master.sync_slaves(master, 1000) do
-        {:ok, slaves} ->
-          {:ok, slaves}
-
-        {:error, :timeout} ->
-          # Master still in :stale state, wait and retry
-          Process.sleep(100)
-          wait_for_master_ready(master, timeout, start_time)
-
-        {:error, _reason} = error ->
-          error
-      end
-    end
+    Master.generate_config(master)
   end
 
   defp get_config(module) when is_atom(module) do
@@ -402,52 +406,4 @@ defmodule EtherCAT do
   defp get_config(%HardwareConfig{} = config), do: {:ok, config}
 
   defp get_config(other), do: {:error, {:invalid_config, other}}
-
-  defp verify_hardware(master, %HardwareConfig{} = config) do
-    with {:ok, slaves} <- Master.get_slaves(master) do
-      # Get hardware info from each slave
-      slave_infos = Enum.map(slaves, &get_slave_info/1)
-
-      # Verify each configured slave matches hardware
-      Enum.reduce_while(config.slaves, :ok, fn slave_config, :ok ->
-        case find_matching_hardware(slave_config, slave_infos) do
-          {:ok, _hw_info} -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, {:verification_failed, slave_config, reason}}}
-        end
-      end)
-    end
-  end
-
-  defp get_slave_info(slave_pid) do
-    Slave.get_info(slave_pid)
-  end
-
-  defp find_matching_hardware(slave_config, slave_infos) do
-    # Match by position and verify vendor/product if specified
-    case Enum.find(slave_infos, fn info -> info.position == slave_config.position end) do
-      nil ->
-        {:error, :not_found}
-
-      hw_info ->
-        if slave_config.expected do
-          cond do
-            slave_config.expected.vendor && hw_info.vendor_id != slave_config.expected.vendor ->
-              {:error,
-               {:vendor_mismatch,
-                expected: slave_config.expected.vendor, actual: hw_info.vendor_id}}
-
-            slave_config.expected.product &&
-                hw_info.product_code != slave_config.expected.product ->
-              {:error,
-               {:product_mismatch,
-                expected: slave_config.expected.product, actual: hw_info.product_code}}
-
-            true ->
-              {:ok, hw_info}
-          end
-        else
-          {:ok, hw_info}
-        end
-    end
-  end
 end

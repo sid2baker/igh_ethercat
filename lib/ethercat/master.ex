@@ -156,16 +156,62 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :connect, timeout)
   end
 
-  @doc "Discovers slaves, transitions to `:synced`."
-  @spec sync_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
-  def sync_slaves(master, timeout \\ 10_000) do
-    :gen_statem.call(master, :sync_slaves, timeout)
+  @doc """
+  Gets list of all slave PIDs.
+
+  Blocks until Master is synced. Returns error if Master is not yet synced
+  and caller should retry with longer timeout or wait.
+  """
+  @spec get_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
+  def get_slaves(master, timeout \\ 10_000) do
+    :gen_statem.call(master, :get_slaves, timeout)
   end
 
-  @doc "Gets list of all slave PIDs."
-  @spec get_slaves(GenServer.server(), timeout()) :: {:ok, [pid()]} | {:error, term()}
-  def get_slaves(master, timeout \\ 5000) do
-    :gen_statem.call(master, :get_slaves, timeout)
+  @doc """
+  Generates HardwareConfig by introspecting connected slaves.
+
+  Used for hardware discovery mode. Master must be in synced or operational state.
+
+  ## Returns
+  - `{:ok, config}` - Generated HardwareConfig with detected slaves
+  - `{:error, reason}` - Master not synced or error reading slave info
+  """
+  @spec generate_config(GenServer.server(), timeout()) ::
+          {:ok, EtherCAT.Config.HardwareConfig.t()} | {:error, term()}
+  def generate_config(master, timeout \\ 10_000) do
+    alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig}
+
+    with {:ok, slaves} <- get_slaves(master, timeout) do
+      slave_configs =
+        Enum.map(slaves, fn slave_pid ->
+          info = Slave.get_info(slave_pid)
+
+          %SlaveConfig{
+            position: info.position,
+            name: :"slave_#{info.position}",
+            driver: nil,
+            # TODO: Auto-detect driver from vendor/product
+            expected: %{
+              vendor: info.vendor_id,
+              product: info.product_code
+            },
+            config: %{},
+            entries: []
+          }
+        end)
+
+      config = %HardwareConfig{
+        master: %MasterConfig{
+          index: 0,
+          cycle_interval: 10_000,
+          nif_yield_interval: 100_000
+        },
+        domains: [%DomainConfig{name: :default_domain, interval: 1}],
+        slaves: slave_configs
+      }
+
+      {:ok, config}
+    end
   end
 
   @doc "Creates domain with independent update interval."
@@ -463,15 +509,19 @@ defmodule EtherCAT.Master do
   end
 
   # State: stale
-  # Network is up but slaves are not yet discovered/synchronized
+  # Network is up, auto-syncing slaves
 
   def stale(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
+
+    # Trigger immediate sync on entering stale state
+    send(self(), :auto_sync_slaves)
+
     actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
 
-  def stale({:call, from}, :sync_slaves, data) do
+  def stale(:info, :auto_sync_slaves, data) do
     start_time = System.monotonic_time()
 
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
@@ -479,25 +529,33 @@ defmodule EtherCAT.Master do
       duration = System.monotonic_time() - start_time
 
       :telemetry.execute(
-        [:ethercat, :master, :sync_slaves],
+        [:ethercat, :master, :sync_complete],
         %{duration: duration, count: length(slaves)},
         %{result: :success}
       )
 
-      {:next_state, :synced, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
+      Logger.info("Auto-synced #{length(slaves)} slaves in #{duration}µs")
+      {:next_state, :synced, %{data | slaves: slaves}}
     else
       {:error, reason} ->
         duration = System.monotonic_time() - start_time
 
         :telemetry.execute(
-          [:ethercat, :master, :sync_slaves],
+          [:ethercat, :master, :sync_complete],
           %{duration: duration},
           %{result: :error, error: inspect(reason)}
         )
 
-        Logger.error("Error syncing slaves: #{inspect(reason)}")
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        Logger.error("Error auto-syncing slaves: #{inspect(reason)}")
+        # Stay in stale, will retry on next state_timeout
+        :keep_state_and_data
     end
+  end
+
+  def stale({:call, from}, :get_slaves, data) do
+    # Master is still syncing, return error - caller should wait and retry
+    # or use a longer timeout on their get_slaves call
+    {:keep_state_and_data, [{:reply, from, {:error, :not_synced_yet}}]}
   end
 
   def stale(:state_timeout, :update_master_state, data) do
@@ -572,11 +630,6 @@ defmodule EtherCAT.Master do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :synced})
     actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
-  end
-
-  def synced({:call, from}, :sync_slaves, data) do
-    # Already synced, just return the existing slaves
-    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
   def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
@@ -924,11 +977,6 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, :get_current_system, data) do
     {:keep_state_and_data, [{:reply, from, {:ok, data.current_system}}]}
-  end
-
-  def operational({:call, from}, :sync_slaves, data) do
-    # Already operational, return the existing slaves
-    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
   def operational({:call, from}, :start_cyclic_mode, _data) do
