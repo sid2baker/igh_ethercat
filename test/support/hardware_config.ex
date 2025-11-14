@@ -21,7 +21,7 @@ defmodule HardwareConfig do
     %HardwareConfig{
       master: %MasterConfig{
         index: 0,
-        update_interval: 10_000,
+        cycle_interval: 10_000,
         nif_yield_interval: 100_000
       },
       domains: [

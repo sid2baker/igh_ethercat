@@ -1,6 +1,32 @@
 defmodule EtherCAT do
   @moduledoc """
-  Declarative EtherCAT industrial I/O interface for the IgH EtherCAT Master.
+  EtherCAT application and main API.
+
+  ## Two-Phase Initialization
+
+  ### Phase 1: Start Infrastructure
+
+  The EtherCAT application automatically starts the Master in your supervision tree.
+  Alternatively, start manually:
+
+      {:ok, _pid} = EtherCAT.start_link(master_index: 0, scan_interval: 100_000)
+
+  ### Phase 2: Configure Hardware
+
+      # Option A: Use predefined configuration
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
+
+      # Option B: Auto-detect and use current hardware
+      {:ok, system} = EtherCAT.get_system(0)
+
+  ## Usage
+
+      {:ok, value} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
+      :ok = EtherCAT.write(system, :valve1, :control, :command, true)
+
+  ## Reconfiguration
+
+      {:ok, new_system} = EtherCAT.configure_hardware(0, NewConfig)
 
   ## Quick Start
 
@@ -8,6 +34,12 @@ defmodule EtherCAT do
 
       defmodule MyMachine do
         use EtherCAT.Config
+
+        master do
+          index 0
+          cycle_interval 10_000
+          nif_yield_interval 100_000
+        end
 
         domain :fast_loop, interval: 1
         domain :slow_loop, interval: 10
@@ -26,22 +58,12 @@ defmodule EtherCAT do
         end
       end
 
-  Then open and use the system:
+  Then configure and use the system:
 
-      {:ok, system} = EtherCAT.open(MyMachine)
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
       {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
       :ok = EtherCAT.write(system, :output_slave, :ch1, :value, true)
-      EtherCAT.close(system)
-
-  ## Discovery Mode
-
-  If you don't have a configuration yet, use discovery mode:
-
-      {:ok, system} = EtherCAT.open()
-      config = EtherCAT.generate_config(system)
-
-      # Inspect the config to create your Spark module
-      IO.inspect(config, pretty: true)
+      EtherCAT.stop_system(system)
 
   ## Architecture
 
@@ -49,73 +71,165 @@ defmodule EtherCAT do
   - **Type-safe**: Spark DSL validates at compile time
   - **Semantic names**: Use `:temp_sensor` instead of position 0
   - **Multi-domain**: Different update rates for critical vs diagnostic data
+  - **Two-phase init**: Infrastructure managed separately from configuration
   """
 
-  alias EtherCAT.{System, Master, Slave}
+  use Supervisor
+
+  alias EtherCAT.{Master, System, Slave}
   alias EtherCAT.Config.HardwareConfig
 
+  ## Supervision API
+
   @doc """
-  Opens an EtherCAT system with a hardware configuration.
+  Starts the EtherCAT application supervisor.
+
+  This is typically called automatically by the application supervision tree,
+  but can be started manually for testing or embedded use.
+
+  ## Options
+  - `:master_index` - EtherCAT master index (default: 0)
+  - `:scan_interval` - Hardware change detection interval in µs (default: 100_000)
+  """
+  def start_link(opts \\ []) do
+    Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl true
+  def init(opts) do
+    children = [
+      {Registry, keys: :unique, name: EtherCAT.Registry},
+      {Master, opts}
+    ]
+
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  ## Configuration API
+
+  @doc """
+  Returns the current System loaded on the Master, or creates a new one if none exists.
+
+  If no system is currently configured, this will scan the hardware and automatically
+  generate a configuration based on detected slaves.
 
   ## Parameters
-  - `config_module` - Module using `EtherCAT.Config` DSL
+  - `master` - Master PID or index (integer)
 
   ## Returns
-  - `{:ok, system}` - System handle for I/O operations
-  - `{:error, reason}` - Configuration or hardware error
+  - `{:ok, system}` - Existing or newly created system
+  - `{:error, reason}` - Error finding master or creating system
 
   ## Examples
 
-      # Using a Spark DSL module
-      {:ok, system} = EtherCAT.open(MyMachine)
+      # With master index
+      {:ok, system} = EtherCAT.get_system(0)
+
+      # With master PID
+      {:ok, master_pid} = EtherCAT.find_master(0)
+      {:ok, system} = EtherCAT.get_system(master_pid)
   """
-  @spec open(module()) :: {:ok, System.t()} | {:error, term()}
-  def open(config_module) when is_atom(config_module) do
-    config = config_module.hardware_config()
-    System.open(config)
+  @spec get_system(pid() | non_neg_integer()) :: {:ok, System.t()} | {:error, term()}
+  def get_system(master) when is_pid(master) do
+    case Master.get_current_system(master) do
+      {:ok, nil} ->
+        # No system loaded, generate config and create one
+        with {:ok, config} <- generate_config_from_master(master),
+             {:ok, system} <- System.configure(master, config) do
+          {:ok, system}
+        end
+
+      {:ok, system} when is_struct(system, System) ->
+        # System already exists, return it
+        {:ok, system}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def get_system(master_index) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      get_system(master)
+    end
   end
 
   @doc """
-  Opens an EtherCAT system in discovery mode (no configuration).
+  Configure hardware and create an operational System.
 
-  Use this to discover connected hardware and generate a configuration.
-  After discovery, call `generate_config/1` to create a config struct.
-
-  Discovery mode uses default master settings (index: 0, default intervals).
-  If you need to specify master settings for discovery, create a minimal
-  HardwareConfig with only master configured.
-
-  ## Returns
-  - `{:ok, system}` - System handle with discovered slaves
-  - `{:error, reason}` - Connection error
-
-  ## Example
-
-      {:ok, system} = EtherCAT.open()
-      config = EtherCAT.generate_config(system)
-      # Use config to create your Spark DSL module
-  """
-  @spec open() :: {:ok, System.t()} | {:error, term()}
-  def open() do
-    # Discovery mode - open with empty config (uses master defaults)
-    config = %HardwareConfig{master: nil, domains: [], slaves: []}
-    System.open(config)
-  end
-
-  @doc """
-  Closes the EtherCAT system and releases all resources.
+  If a system is already loaded on this master, it will be stopped first.
 
   ## Parameters
-  - `system` - System handle from `open/1` or `open/2`
+  - `master` - Master PID or index (integer)
+  - `config_or_module` - Configuration module or HardwareConfig struct
+
+  ## Returns
+  - `{:ok, system}` - Newly configured system
+  - `{:error, reason}` - Configuration error
+
+  ## Examples
+
+      # With module-based config and master index
+      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
+
+      # With master PID and HardwareConfig struct
+      {:ok, master} = EtherCAT.find_master(0)
+      {:ok, system} = EtherCAT.configure_hardware(master, config)
+  """
+  @spec configure_hardware(pid() | non_neg_integer(), module() | HardwareConfig.t()) ::
+          {:ok, System.t()} | {:error, term()}
+  def configure_hardware(master, config_or_module) when is_pid(master) do
+    with {:ok, config} <- get_config(config_or_module),
+         :ok <- verify_hardware(master, config),
+         :ok <- stop_current_system(master),
+         {:ok, system} <- System.configure(master, config) do
+      {:ok, system}
+    end
+  end
+
+  def configure_hardware(master_index, config_or_module) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index) do
+      configure_hardware(master, config_or_module)
+    end
+  end
+
+  @doc """
+  Stop a System and release its resources.
+
+  Stops cyclic mode and clears the system reference from the Master.
+  The Master transitions back to synced state and can be reconfigured.
+  """
+  @spec stop_system(System.t()) :: :ok | {:error, term()}
+  def stop_system(%System{master: master} = _system) do
+    with :ok <- Master.stop_cyclic_mode(master),
+         :ok <- Master.unregister_system(master) do
+      :ok
+    end
+  end
+
+  @doc """
+  Find a Master process by index.
+
+  ## Parameters
+  - `master_index` - Master index (default: 0)
+
+  ## Returns
+  - `{:ok, pid}` - Master process PID
+  - `{:error, reason}` - Master not found
 
   ## Example
 
-      {:ok, system} = EtherCAT.open(MyMachine)
-      # ... do work ...
-      EtherCAT.close(system)
+      {:ok, master} = EtherCAT.find_master(0)
   """
-  @spec close(System.t()) :: :ok
-  def close(system), do: System.close(system)
+  @spec find_master(non_neg_integer()) :: {:ok, pid()} | {:error, term()}
+  def find_master(master_index \\ 0) do
+    case Registry.lookup(EtherCAT.Registry, {:master, master_index}) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, {:master_not_found, master_index}}
+    end
+  end
+
+  ## I/O API (delegate to System)
 
   @doc """
   Reads a PDO entry value from the system.
@@ -190,7 +304,7 @@ defmodule EtherCAT do
 
       receive do
         {:pdo_value_changed, _name, temp} ->
-          IO.puts("Temperature changed: \#{temp}")
+          IO.puts("Temperature changed: #{temp}")
       end
   """
   @spec watch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
@@ -224,71 +338,90 @@ defmodule EtherCAT do
     end
   end
 
-  @doc """
-  Generates a HardwareConfig from a running system.
+  ## Private Helpers
 
-  Use this after opening in discovery mode to create a configuration
-  that can be saved and used to build a Spark DSL module.
+  defp stop_current_system(master) do
+    # Stop cyclic mode and clear current system reference if any
+    case Master.get_current_system(master) do
+      {:ok, nil} ->
+        :ok
 
-  ## Parameters
-  - `system` - System handle from discovery mode
+      {:ok, _system} ->
+        # Stop cyclic mode (transitions operational → synced)
+        # Then clear the current system reference
+        with :ok <- Master.stop_cyclic_mode(master),
+             :ok <- Master.unregister_system(master) do
+          :ok
+        end
 
-  ## Returns
-  - `HardwareConfig` struct representing the discovered hardware
+      {:error, _} ->
+        :ok
+    end
+  end
 
-  ## Example
+  defp generate_config_from_master(master) do
+    with {:ok, slaves} <- Master.get_slaves(master) do
+      System.generate_hardware_config(slaves)
+    end
+  end
 
-      {:ok, system} = EtherCAT.open()
-      config = EtherCAT.generate_config(system)
+  defp get_config(module) when is_atom(module) do
+    if function_exported?(module, :hardware_config, 0) do
+      {:ok, module.hardware_config()}
+    else
+      {:error, {:invalid_config_module, module}}
+    end
+  end
 
-      IO.puts(\"\"\"
-      defmodule MyMachine do
-        use EtherCAT.Config
+  defp get_config(%HardwareConfig{} = config), do: {:ok, config}
 
-        # TODO: Add domains
-        domain :default_domain, interval: 1
+  defp get_config(other), do: {:error, {:invalid_config, other}}
 
-        # Discovered slaves:
-        \"\"\")
+  defp verify_hardware(master, %HardwareConfig{} = config) do
+    with {:ok, slaves} <- Master.get_slaves(master) do
+      # Get hardware info from each slave
+      slave_infos = Enum.map(slaves, &get_slave_info/1)
 
-      Enum.each(config.slaves, fn slave ->
-        IO.puts("  slave position: \#{slave.position}, name: :\#{slave.name || "s\#{slave.position}"}")
+      # Verify each configured slave matches hardware
+      Enum.reduce_while(config.slaves, :ok, fn slave_config, :ok ->
+        case find_matching_hardware(slave_config, slave_infos) do
+          {:ok, _hw_info} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:verification_failed, slave_config, reason}}}
+        end
       end)
-  """
-  @spec generate_config(System.t()) :: HardwareConfig.t()
-  def generate_config(%System{master: master}) do
-    # Get all slaves
-    {:ok, slaves} = Master.get_slaves(master)
+    end
+  end
 
-    slave_configs =
-      Enum.map(slaves, fn slave_pid ->
-        info = Slave.get_info(slave_pid)
-        _pdos = Slave.list_pdos(slave_pid)
+  defp get_slave_info(slave_pid) do
+    Slave.get_info(slave_pid)
+  end
 
-        # Generate basic slave config (user will need to add entries)
-        %EtherCAT.Config.SlaveConfig{
-          position: info.position,
-          name: info.name,
-          driver: nil,
-          # TODO: Driver detection
-          expected: %{
-            vendor: info.vendor_id,
-            product: info.product_code
-          },
-          config: %{},
-          entries: []
-          # User needs to fill this in
-        }
-      end)
+  defp find_matching_hardware(slave_config, slave_infos) do
+    # Match by position and verify vendor/product if specified
+    case Enum.find(slave_infos, fn info -> info.position == slave_config.position end) do
+      nil ->
+        {:error, :not_found}
 
-    %HardwareConfig{
-      master: nil,
-      # Will use defaults
-      domains: [
-        # Default domain - user should customize
-        %EtherCAT.Config.DomainConfig{name: :default_domain, interval: 1}
-      ],
-      slaves: slave_configs
-    }
+      hw_info ->
+        if slave_config.expected do
+          cond do
+            slave_config.expected.vendor && hw_info.vendor_id != slave_config.expected.vendor ->
+              {:error,
+               {:vendor_mismatch,
+                expected: slave_config.expected.vendor, actual: hw_info.vendor_id}}
+
+            slave_config.expected.product &&
+                hw_info.product_code != slave_config.expected.product ->
+              {:error,
+               {:product_mismatch,
+                expected: slave_config.expected.product, actual: hw_info.product_code}}
+
+            true ->
+              {:ok, hw_info}
+          end
+        else
+          {:ok, hw_info}
+        end
+    end
   end
 end

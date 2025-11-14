@@ -32,8 +32,8 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Single Channel Loopback" do
     setup do
-      {:ok, system} = EtherCAT.open(HardwareConfig)
-      on_exit(fn -> EtherCAT.close(system) end)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
 
@@ -81,7 +81,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "All Channels Loopback" do
     setup do
-      {:ok, system} = EtherCAT.open(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
 
       # Clear all outputs before each test
       for i <- 1..16 do
@@ -98,7 +98,7 @@ defmodule Hardware.DigitalIOTest do
           EtherCAT.write(system, :digital_outputs, ch, :output, false)
         end
 
-        EtherCAT.close(system)
+        EtherCAT.stop_system(system)
       end)
 
       {:ok, system: system}
@@ -177,7 +177,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Pattern Testing" do
     setup do
-      {:ok, system} = EtherCAT.open(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
 
       # Clear all outputs
       for i <- 1..16 do
@@ -191,7 +191,7 @@ defmodule Hardware.DigitalIOTest do
           EtherCAT.write(system, :digital_outputs, ch, :output, false)
         end
 
-        EtherCAT.close(system)
+        EtherCAT.stop_system(system)
       end)
 
       {:ok, system: system}
@@ -279,7 +279,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Timing Tests" do
     setup do
-      {:ok, system} = EtherCAT.open(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
 
       on_exit(fn ->
         for i <- 1..16 do
@@ -287,7 +287,7 @@ defmodule Hardware.DigitalIOTest do
           EtherCAT.write(system, :digital_outputs, ch, :output, false)
         end
 
-        EtherCAT.close(system)
+        EtherCAT.stop_system(system)
       end)
 
       {:ok, system: system}

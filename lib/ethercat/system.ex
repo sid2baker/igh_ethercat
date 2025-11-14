@@ -25,9 +25,12 @@ defmodule EtherCAT.System do
         }
 
   @doc """
-  Opens and configures an EtherCAT system from a hardware configuration.
+  Configure an existing Master with the given configuration.
+
+  This is called by EtherCAT.configure_hardware/1.
 
   ## Parameters
+  - `master` - Master PID (already started and connected)
   - `config` - HardwareConfig struct (typically from Spark DSL module)
 
   ## Returns
@@ -36,21 +39,15 @@ defmodule EtherCAT.System do
 
   ## Example
 
+      {:ok, master} = find_master(0)
       config = MyMachine.hardware_config()
-      {:ok, system} = EtherCAT.System.open(config)
+      {:ok, system} = EtherCAT.System.configure(master, config)
   """
-  @spec open(HardwareConfig.t()) :: {:ok, t()} | {:error, term()}
-  def open(%HardwareConfig{} = config) do
-    # Build master options from config.master
-    master_opts = build_master_opts(config.master)
-
+  @spec configure(pid(), HardwareConfig.t()) :: {:ok, t()} | {:error, term()}
+  def configure(master, %HardwareConfig{} = config) do
     # Validate configuration
     with :ok <- HardwareConfig.validate(config),
-         # Start master
-         {:ok, master} <- Master.start_link(master_opts),
-         # Connect to EtherCAT master
-         :ok <- Master.connect(master),
-         # Discover slaves
+         # Discover/sync slaves (Master is already connected)
          {:ok, slaves} <- Master.sync_slaves(master),
          # Verify hardware matches config (if expected specified)
          :ok <- verify_hardware(config, slaves),
@@ -60,8 +57,13 @@ defmodule EtherCAT.System do
          {:ok, slave_map} <- configure_slaves(master, slaves, config.slaves),
          # Register all entries to domains
          :ok <- register_entries(slave_map, config.slaves),
-         # Start cyclic communication
-         :ok <- Master.start_cyclic_mode(master) do
+         # Start cyclic communication with intervals from config
+         :ok <-
+           Master.start_cyclic_mode(
+             master,
+             config.master.cycle_interval,
+             config.master.nif_yield_interval
+           ) do
       # Build entry handle lookup map
       entry_handles = build_entry_handles(slave_map, config.slaves)
 
@@ -72,21 +74,68 @@ defmodule EtherCAT.System do
         entry_handles: entry_handles
       }
 
+      # Register this System with Master for later retrieval
+      :ok = Master.register_system(master, system)
+
       {:ok, system}
     else
       {:error, _reason} = error ->
-        # Cleanup on error - stop master if it was started
-        # Only attempt cleanup if master variable is bound (i.e., Master.start_link succeeded)
+        # Don't stop master on error - it remains running for retry
         error
     end
   end
 
   @doc """
-  Closes the EtherCAT system and releases all resources.
+  Closes the EtherCAT system and releases its resources.
+
+  The Master remains running and can be reconfigured with a new System.
   """
   @spec close(t()) :: :ok
-  def close(%__MODULE__{master: master}) do
-    Master.stop(master)
+  def close(%__MODULE__{master: master} = _system) do
+    # Just unregister from Master (clear the current_system reference)
+    Master.unregister_system(master)
+    :ok
+  end
+
+  @doc """
+  Generates a HardwareConfig by scanning hardware from slaves.
+
+  Used by EtherCAT.generate_config/1 for hardware discovery.
+  """
+  @spec generate_hardware_config([pid()]) :: {:ok, HardwareConfig.t()} | {:error, term()}
+  def generate_hardware_config(slaves) do
+    slave_configs =
+      Enum.map(slaves, fn slave_pid ->
+        info = Slave.get_info(slave_pid)
+        _pdos = Slave.list_pdos(slave_pid)
+
+        # Generate basic slave config (user will need to add entries)
+        %EtherCAT.Config.SlaveConfig{
+          position: info.position,
+          name: info.name,
+          driver: nil,
+          # TODO: Driver detection
+          expected: %{
+            vendor: info.vendor_id,
+            product: info.product_code
+          },
+          config: %{},
+          entries: []
+          # User needs to fill this in
+        }
+      end)
+
+    config = %HardwareConfig{
+      master: nil,
+      # Will use defaults
+      domains: [
+        # Default domain - user should customize
+        %EtherCAT.Config.DomainConfig{name: :default_domain, interval: 1}
+      ],
+      slaves: slave_configs
+    }
+
+    {:ok, config}
   end
 
   @doc """
@@ -263,14 +312,4 @@ defmodule EtherCAT.System do
     end
   end
 
-  # Builds master options from config (uses defaults if nil)
-  defp build_master_opts(nil), do: []
-
-  defp build_master_opts(master_config) do
-    [
-      master_index: master_config.index,
-      update_interval: master_config.update_interval,
-      nif_yield_interval: master_config.nif_yield_interval
-    ]
-  end
 end

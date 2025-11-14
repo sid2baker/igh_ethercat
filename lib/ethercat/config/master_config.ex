@@ -5,13 +5,15 @@ defmodule EtherCAT.Config.MasterConfig do
   Defines the master index and timing parameters for the EtherCAT master.
   """
 
-  defstruct index: 0,
-            update_interval: 10_000,
-            nif_yield_interval: 100_000
+  defstruct [
+    :index,
+    :cycle_interval,
+    :nif_yield_interval
+  ]
 
   @type t :: %__MODULE__{
           index: non_neg_integer(),
-          update_interval: pos_integer(),
+          cycle_interval: pos_integer(),
           nif_yield_interval: pos_integer()
         }
 
@@ -21,14 +23,14 @@ defmodule EtherCAT.Config.MasterConfig do
   ## Parameters
   - `opts` - Configuration options:
     - `:index` - EtherCAT master index (default: 0)
-    - `:update_interval` - Master update interval in microseconds (default: 10_000)
+    - `:cycle_interval` - PDO cyclic update interval in microseconds (required)
     - `:nif_yield_interval` - NIF yielding interval in microseconds (default: 100_000)
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     %__MODULE__{
       index: Keyword.get(opts, :index, 0),
-      update_interval: Keyword.get(opts, :update_interval, 10_000),
+      cycle_interval: Keyword.fetch!(opts, :cycle_interval),
       nif_yield_interval: Keyword.get(opts, :nif_yield_interval, 100_000)
     }
   end
@@ -38,13 +40,13 @@ defmodule EtherCAT.Config.MasterConfig do
 
   Checks:
   - Index is a non-negative integer
-  - Update interval is positive
+  - Cycle interval is positive
   - NIF yield interval is positive
   """
   @spec validate(t()) :: :ok | {:error, term()}
   def validate(%__MODULE__{} = master) do
     with :ok <- validate_index(master.index),
-         :ok <- validate_update_interval(master.update_interval),
+         :ok <- validate_cycle_interval(master.cycle_interval),
          :ok <- validate_nif_yield_interval(master.nif_yield_interval) do
       :ok
     end
@@ -53,8 +55,8 @@ defmodule EtherCAT.Config.MasterConfig do
   defp validate_index(index) when is_integer(index) and index >= 0, do: :ok
   defp validate_index(_), do: {:error, :invalid_master_index}
 
-  defp validate_update_interval(interval) when is_integer(interval) and interval > 0, do: :ok
-  defp validate_update_interval(_), do: {:error, :invalid_update_interval}
+  defp validate_cycle_interval(interval) when is_integer(interval) and interval > 0, do: :ok
+  defp validate_cycle_interval(_), do: {:error, :invalid_cycle_interval}
 
   defp validate_nif_yield_interval(interval) when is_integer(interval) and interval > 0, do: :ok
   defp validate_nif_yield_interval(_), do: {:error, :invalid_nif_yield_interval}
