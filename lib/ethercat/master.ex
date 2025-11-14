@@ -640,6 +640,53 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
+  def synced({:call, from}, {:sync_with_config, config}, data) do
+    # Reconfiguration: terminate old slaves and sync with new config
+    start_time = System.monotonic_time()
+
+    Logger.info("Reconfiguring: terminating #{length(data.slaves)} existing slaves")
+
+    # Terminate existing slaves
+    Enum.each(data.slaves, fn slave_pid ->
+      if Process.alive?(slave_pid) do
+        GenServer.stop(slave_pid, :normal)
+      end
+    end)
+
+    # Now validate and sync with new config
+    with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
+         :ok <- validate_hardware_stable(data, master_state),
+         :ok <- validate_config_matches_hardware(config, master_state),
+         {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
+      duration = System.monotonic_time() - start_time
+
+      :telemetry.execute(
+        [:ethercat, :master, :slaves_synced],
+        %{duration: duration, count: length(slaves)},
+        %{result: :success, reconfiguration: true}
+      )
+
+      Logger.info(
+        "Reconfigured with #{length(slaves)} slaves in #{duration}µs"
+      )
+
+      {:keep_state, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
+    else
+      {:error, reason} = error ->
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:ethercat, :master, :slaves_synced],
+          %{duration: duration},
+          %{result: :error, error: inspect(reason), reconfiguration: true}
+        )
+
+        Logger.warning("Failed to reconfigure with new config: #{inspect(reason)}")
+        # Leave data.slaves empty after terminating old ones - user must fix config and retry
+        {:keep_state, %{data | slaves: []}, [{:reply, from, error}]}
+    end
+  end
+
   def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
     Logger.info(
       "Starting cyclic mode - cycle: #{cycle_interval}µs, yield: #{nif_yield_interval}µs - locking #{map_size(data.domains)} domains and #{length(data.slaves)} slaves"
