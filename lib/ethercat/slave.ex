@@ -604,12 +604,6 @@ defmodule EtherCAT.Slave do
   def terminate(reason, _state, data) do
     Logger.info("Slave at position #{data.position} terminating: #{inspect(reason)}")
 
-    :telemetry.execute(
-      [:ethercat, :slave, :terminate],
-      %{position: data.position},
-      %{reason: reason, driver: data.driver}
-    )
-
     # Call driver's terminate callback
     if data.driver && data.driver_state do
       data.driver.terminate(data.driver_state)
@@ -623,12 +617,6 @@ defmodule EtherCAT.Slave do
 
   def unconfigured(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :unconfigured state")
-
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
-      position: data.position,
-      state: :unconfigured
-    })
-
     :keep_state_and_data
   end
 
@@ -707,12 +695,6 @@ defmodule EtherCAT.Slave do
 
   def configured(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :configured state")
-
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
-      position: data.position,
-      state: :configured
-    })
-
     :keep_state_and_data
   end
 
@@ -839,12 +821,6 @@ defmodule EtherCAT.Slave do
 
   def operational(:enter, _old_state, data) do
     Logger.debug("Slave #{data.position} entered :operational state")
-
-    :telemetry.execute([:ethercat, :slave, :state], %{}, %{
-      position: data.position,
-      state: :operational
-    })
-
     :keep_state_and_data
   end
 

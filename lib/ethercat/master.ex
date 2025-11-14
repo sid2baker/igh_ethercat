@@ -452,7 +452,6 @@ defmodule EtherCAT.Master do
 
   def offline(:enter, _old_state, _data) do
     Logger.debug("Master entered :offline state")
-    :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :offline})
     :keep_state_and_data
   end
 
@@ -481,43 +480,17 @@ defmodule EtherCAT.Master do
   end
 
   def offline({:call, from}, :connect, data) do
-    start_time = System.monotonic_time()
-
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
         if master_state.link_up == 1 do
-          duration = System.monotonic_time() - start_time
-
-          :telemetry.execute(
-            [:ethercat, :master, :connect],
-            %{duration: duration},
-            %{result: :success}
-          )
-
           Logger.info("Master connected successfully, transitioning to :stale")
           {:next_state, :stale, data, [{:reply, from, :ok}]}
         else
-          duration = System.monotonic_time() - start_time
-
-          :telemetry.execute(
-            [:ethercat, :master, :connect],
-            %{duration: duration},
-            %{result: :link_down}
-          )
-
           Logger.warning("Master connect failed: link is down")
           {:keep_state_and_data, [{:reply, from, {:error, :link_down}}]}
         end
 
       {:error, reason} ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :connect],
-          %{duration: duration},
-          %{result: :error, error: inspect(reason)}
-        )
-
         Logger.error("Error connecting master: #{inspect(reason)}")
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
@@ -541,7 +514,6 @@ defmodule EtherCAT.Master do
   # Network is up, monitoring hardware fingerprint for stability
 
   def stale(:enter, _old_state, data) do
-    :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
     actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
@@ -552,36 +524,16 @@ defmodule EtherCAT.Master do
   end
 
   def stale({:call, from}, {:sync_with_config, config}, data) do
-    start_time = System.monotonic_time()
-
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
          :ok <- validate_hardware_stable(data, master_state),
          :ok <- validate_config_matches_hardware(config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
-      duration = System.monotonic_time() - start_time
-
-      :telemetry.execute(
-        [:ethercat, :master, :slaves_synced],
-        %{duration: duration, count: length(slaves)},
-        %{result: :success}
-      )
-
-      Logger.info(
-        "Synced #{length(slaves)} slaves with config in #{duration}µs, transitioning to :synced"
-      )
+      Logger.info("Synced #{length(slaves)} slaves with config, transitioning to :synced")
 
       {:next_state, :synced, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else
-      {:error, reason} = error ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :slaves_synced],
-          %{duration: duration},
-          %{result: :error, error: inspect(reason)}
-        )
-
-        Logger.warning("Failed to sync slaves with config: #{inspect(reason)}")
+      {:error, _reason} = error ->
+        Logger.warning("Failed to sync slaves with config: #{inspect(error)}")
         {:keep_state_and_data, [{:reply, from, error}]}
     end
   end
@@ -631,8 +583,6 @@ defmodule EtherCAT.Master do
   # Slaves are discovered and synchronized, ready for configuration
 
   def synced(:enter, _old_state, data) do
-    :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :synced})
-
     # Slaves are already synced via sync_with_config call or already exist from :operational
     # Just set up monitoring
     Logger.debug("Entering synced state with #{length(data.slaves)} slaves")
@@ -642,8 +592,6 @@ defmodule EtherCAT.Master do
 
   def synced({:call, from}, {:sync_with_config, config}, data) do
     # Reconfiguration: terminate old slaves and sync with new config
-    start_time = System.monotonic_time()
-
     Logger.info("Reconfiguring: terminating #{length(data.slaves)} existing slaves")
 
     # Terminate existing slaves
@@ -658,30 +606,12 @@ defmodule EtherCAT.Master do
          :ok <- validate_hardware_stable(data, master_state),
          :ok <- validate_config_matches_hardware(config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
-      duration = System.monotonic_time() - start_time
-
-      :telemetry.execute(
-        [:ethercat, :master, :slaves_synced],
-        %{duration: duration, count: length(slaves)},
-        %{result: :success, reconfiguration: true}
-      )
-
-      Logger.info(
-        "Reconfigured with #{length(slaves)} slaves in #{duration}µs"
-      )
+      Logger.info("Reconfigured with #{length(slaves)} slaves")
 
       {:keep_state, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else
-      {:error, reason} = error ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :slaves_synced],
-          %{duration: duration},
-          %{result: :error, error: inspect(reason), reconfiguration: true}
-        )
-
-        Logger.warning("Failed to reconfigure with new config: #{inspect(reason)}")
+      {:error, _reason} = error ->
+        Logger.warning("Failed to reconfigure with new config: #{inspect(error)}")
         # Leave data.slaves empty after terminating old ones - user must fix config and retry
         {:keep_state, %{data | slaves: []}, [{:reply, from, error}]}
     end
@@ -887,9 +817,6 @@ defmodule EtherCAT.Master do
 
   def operational(:enter, _old_state, data) do
     Logger.info("Master entered :operational state - system ready for I/O")
-    start_time = System.monotonic_time()
-
-    :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :operational})
 
     case Nif.master_activate(data.master_ref) do
       :ok ->
@@ -912,14 +839,6 @@ defmodule EtherCAT.Master do
               data.nif_yield_interval
             )
           end)
-
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :activate],
-          %{duration: duration},
-          %{domains: map_size(data.domains), slaves: length(data.slaves)}
-        )
 
         # Check if slaves are already in OP state (fast transition case)
         case Nif.get_master_state(data.master_ref) do
@@ -947,14 +866,6 @@ defmodule EtherCAT.Master do
         end
 
       {:error, reason} ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :activate],
-          %{duration: duration},
-          %{result: :error, error: inspect(reason)}
-        )
-
         Logger.error("Error activating master: #{inspect(reason)}")
         {:keep_state_and_data, []}
     end
@@ -1237,36 +1148,46 @@ defmodule EtherCAT.Master do
        {:slave_count_mismatch,
         "Config expects #{config_count} slaves, but detected #{detected_count}"}}
     else
-      # Validate each slave's vendor/product if specified
-      config.slaves
-      |> Enum.filter(& &1.expected)
-      |> Enum.reduce_while(:ok, fn slave_config, :ok ->
-        with {:ok, slave_info} <- Nif.master_get_slave(master_ref, slave_config.position) do
-          cond do
-            slave_config.expected.vendor &&
-                slave_info.vendor_id != slave_config.expected.vendor ->
-              {:halt,
-               {:error,
-                {:hardware_mismatch, slave_config.position,
-                 "Expected vendor 0x#{Integer.to_string(slave_config.expected.vendor, 16)}, " <>
-                   "but found 0x#{Integer.to_string(slave_info.vendor_id, 16)}"}}}
+      validate_slave_identities(config.slaves, master_ref)
+    end
+  end
 
-            slave_config.expected.product &&
-                slave_info.product_code != slave_config.expected.product ->
-              {:halt,
-               {:error,
-                {:hardware_mismatch, slave_config.position,
-                 "Expected product 0x#{Integer.to_string(slave_config.expected.product, 16)}, " <>
-                   "but found 0x#{Integer.to_string(slave_info.product_code, 16)}"}}}
+  # Validate each slave's vendor/product ID matches expectations
+  defp validate_slave_identities(slaves, master_ref) do
+    slaves
+    |> Enum.filter(& &1.expected)
+    |> Enum.reduce_while(:ok, fn slave_config, :ok ->
+      with {:ok, slave_info} <- Nif.master_get_slave(master_ref, slave_config.position),
+           :ok <- check_vendor_match(slave_config, slave_info),
+           :ok <- check_product_match(slave_config, slave_info) do
+        {:cont, :ok}
+      else
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
 
-            true ->
-              {:cont, :ok}
-          end
-        else
-          {:error, reason} ->
-            {:halt, {:error, {:slave_info_read_failed, slave_config.position, reason}}}
-        end
-      end)
+  # Check if vendor ID matches expectations
+  defp check_vendor_match(slave_config, slave_info) do
+    if slave_config.expected.vendor && slave_info.vendor_id != slave_config.expected.vendor do
+      {:error,
+       {:hardware_mismatch, slave_config.position,
+        "Expected vendor 0x#{Integer.to_string(slave_config.expected.vendor, 16)}, " <>
+          "but found 0x#{Integer.to_string(slave_info.vendor_id, 16)}"}}
+    else
+      :ok
+    end
+  end
+
+  # Check if product code matches expectations
+  defp check_product_match(slave_config, slave_info) do
+    if slave_config.expected.product && slave_info.product_code != slave_config.expected.product do
+      {:error,
+       {:hardware_mismatch, slave_config.position,
+        "Expected product 0x#{Integer.to_string(slave_config.expected.product, 16)}, " <>
+          "but found 0x#{Integer.to_string(slave_info.product_code, 16)}"}}
+    else
+      :ok
     end
   end
 

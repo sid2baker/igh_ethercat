@@ -471,12 +471,6 @@ defmodule EtherCAT.Domain do
       end)
     end)
 
-    :telemetry.execute(
-      [:ethercat, :domain, :terminate],
-      %{subscriber_count: map_size(state.subscribers)},
-      %{reason: reason}
-    )
-
     :ok
   end
 end
