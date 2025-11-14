@@ -8,13 +8,15 @@ defmodule EtherCAT.Master do
 
   alias EtherCAT.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains, :domain_refs, :task_pid, :update_interval, :nif_yield_interval]
+  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval, :nif_yield_interval]
+
+  @type domain_info :: %{name: atom(), ref: reference()}
 
   @type t :: %__MODULE__{
           master_ref: reference(),
           slaves: [Slave.t()],
-          domains: [Domain.t()],
-          domain_refs: [reference()],
+          # Map of pid => %{name: atom, ref: reference}
+          domains: %{pid() => domain_info()},
           task_pid: pid(),
           # in us
           update_interval: integer(),
@@ -182,11 +184,10 @@ defmodule EtherCAT.Master do
         end
 
         case do_create_domain(ref, :default_domain, 1) do
-          {:ok, _domain_ref, domain_pid} ->
+          {:ok, domain_ref, domain_pid} ->
             data = %__MODULE__{
               master_ref: ref,
-              domains: [domain_pid],
-              domain_refs: [],
+              domains: %{domain_pid => %{name: :default_domain, ref: domain_ref}},
               slaves: [],
               task_pid: nil,
               update_interval: update_interval,
@@ -381,15 +382,15 @@ defmodule EtherCAT.Master do
 
   def synced({:call, from}, :start_cyclic_mode, data) do
     Logger.info(
-      "Starting cyclic mode - locking #{length(data.domains)} domains and #{length(data.slaves)} slaves"
+      "Starting cyclic mode - locking #{map_size(data.domains)} domains and #{length(data.slaves)} slaves"
     )
 
     # Retrieve pending PDO entries from all domains, register them, and lock the domains
-    # Also collect domain refs to avoid synchronous calls in the enter callback
+    # We iterate over the domains map which already contains the refs
     result =
-      Enum.reduce_while(data.domains, {:ok, []}, fn domain, {:ok, domain_refs_acc} ->
-        pending_entries = Domain.get_pdo_entries(domain)
-        domain_ref = Domain.get_ref(domain)
+      Enum.reduce_while(data.domains, :ok, fn {domain_pid, domain_info}, :ok ->
+        pending_entries = Domain.get_pdo_entries(domain_pid)
+        domain_ref = domain_info.ref
 
         Logger.debug(
           "Registering PDO entries for domain: #{map_size(pending_entries)} slave configs"
@@ -427,14 +428,14 @@ defmodule EtherCAT.Master do
         # Store the registered entries back in the domain and lock it
         Logger.debug("Locking domain with #{map_size(registered_entries)} entries")
 
-        case Domain.store_and_lock_entries(domain, registered_entries) do
-          :ok -> {:cont, {:ok, [domain_ref | domain_refs_acc]}}
+        case Domain.store_and_lock_entries(domain_pid, registered_entries) do
+          :ok -> {:cont, :ok}
           {:error, reason} -> {:halt, {:error, {:domain_lock_failed, reason}}}
         end
       end)
 
     case result do
-      {:ok, domain_refs} ->
+      :ok ->
         Logger.info("All domains locked, now locking #{length(data.slaves)} slaves")
 
         # Lock all slaves to prevent further configuration changes
@@ -442,12 +443,8 @@ defmodule EtherCAT.Master do
           Slave.lock(slave)
         end)
 
-        # Store domain refs for use in operational state
-        # Reverse the list since we accumulated in reverse order
-        updated_data = %{data | domain_refs: Enum.reverse(domain_refs)}
-
         Logger.info("Cyclic mode activation complete, transitioning to :operational")
-        {:next_state, :operational, updated_data, [{:reply, from, :ok}]}
+        {:next_state, :operational, data, [{:reply, from, :ok}]}
 
       {:error, _reason} = error ->
         Logger.error("Failed to start cyclic mode: #{inspect(error)}")
@@ -464,7 +461,8 @@ defmodule EtherCAT.Master do
   def synced({:call, from}, {:create_domain, name, interval}, data) do
     case do_create_domain(data.master_ref, name, interval) do
       {:ok, domain_ref, domain_pid} ->
-        {:keep_state, %{data | domains: [domain_pid | data.domains]},
+        updated_domains = Map.put(data.domains, domain_pid, %{name: name, ref: domain_ref})
+        {:keep_state, %{data | domains: updated_domains},
          [{:reply, from, {:ok, domain_ref}}]}
 
       {:error, reason} ->
@@ -529,9 +527,12 @@ defmodule EtherCAT.Master do
       :ok ->
         parent_pid = self()
 
-        # Use pre-collected domain refs instead of making synchronous calls
-        # This prevents blocking the state transition and potential deadlocks
-        domain_resources = data.domain_refs
+        # Extract domain refs from the domains map
+        # This avoids making synchronous calls during state transition
+        domain_resources =
+          data.domains
+          |> Map.values()
+          |> Enum.map(& &1.ref)
 
         task_pid =
           spawn_link(fn ->
@@ -549,7 +550,7 @@ defmodule EtherCAT.Master do
         :telemetry.execute(
           [:ethercat, :master, :activate],
           %{duration: duration},
-          %{domains: length(data.domains), slaves: length(data.slaves)}
+          %{domains: map_size(data.domains), slaves: length(data.slaves)}
         )
 
         {:keep_state, %{data | task_pid: task_pid}, []}
@@ -716,13 +717,14 @@ defmodule EtherCAT.Master do
         end
 
       # Domain exited
-      pid in data.domains ->
+      Map.has_key?(data.domains, pid) ->
+        domain_info = data.domains[pid]
         Logger.warning(
-          "Domain #{inspect(pid)} exited with reason: #{inspect(reason)} in state #{state}"
+          "Domain #{domain_info.name} (#{inspect(pid)}) exited with reason: #{inspect(reason)} in state #{state}"
         )
 
-        # Remove from domains list - supervisor will restart it if needed
-        {:keep_state, %{data | domains: List.delete(data.domains, pid)}}
+        # Remove from domains map - supervisor will restart it if needed
+        {:keep_state, %{data | domains: Map.delete(data.domains, pid)}}
 
       # Slave exited
       pid in data.slaves ->
