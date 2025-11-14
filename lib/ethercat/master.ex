@@ -14,8 +14,7 @@ defmodule EtherCAT.Master do
     :domains,
     :task_pid,
     :update_interval,
-    :nif_yield_interval,
-    cyclic_ready?: false
+    :nif_yield_interval
   ]
 
   @type domain_info :: %{name: atom(), ref: reference()}
@@ -29,9 +28,7 @@ defmodule EtherCAT.Master do
           # in us
           update_interval: integer(),
           # NIF yielding interval in us (default 100_000 = 100ms)
-          nif_yield_interval: integer(),
-          # True when cyclic task has initialized and is ready for I/O
-          cyclic_ready?: boolean()
+          nif_yield_interval: integer()
         }
 
   # Client API
@@ -561,6 +558,23 @@ defmodule EtherCAT.Master do
           |> Map.values()
           |> Enum.map(& &1.ref)
 
+        # CRITICAL: Initialize all domain data pointers synchronously BEFORE spawning cyclic task
+        # This ensures domain data is ready for I/O operations immediately
+        Logger.debug("Initializing domain data for #{length(domain_resources)} domains")
+
+        Enum.each(domain_resources, fn domain_ref ->
+          case Nif.domain_init_data(domain_ref) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.error("Failed to initialize domain data: #{inspect(reason)}")
+              raise "Domain initialization failed: #{inspect(reason)}"
+          end
+        end)
+
+        Logger.debug("Domain data initialization complete")
+
         task_pid =
           spawn_link(fn ->
             Nif.cyclic_task(
@@ -580,9 +594,7 @@ defmodule EtherCAT.Master do
           %{domains: map_size(data.domains), slaves: length(data.slaves)}
         )
 
-        # Wait for cyclic task to signal readiness (with 5 second timeout)
-        {:keep_state, %{data | task_pid: task_pid},
-         [{:state_timeout, 5_000, :cyclic_task_ready_timeout}]}
+        {:keep_state, %{data | task_pid: task_pid}, []}
 
       {:error, reason} ->
         duration = System.monotonic_time() - start_time
@@ -596,21 +608,6 @@ defmodule EtherCAT.Master do
         Logger.error("Error activating master: #{inspect(reason)}")
         {:keep_state_and_data, []}
     end
-  end
-
-  def operational(:info, :cyclic_task_ready, data) do
-    Logger.debug("Cyclic task initialization complete - system ready for I/O operations")
-    # Cancel the timeout since we received the ready message
-    {:keep_state, %{data | cyclic_ready?: true}, [{:state_timeout, :cancel}]}
-  end
-
-  def operational(:state_timeout, :cyclic_task_ready_timeout, data) do
-    Logger.warning(
-      "Cyclic task did not signal readiness within timeout - proceeding anyway (may cause errors)"
-    )
-
-    # Proceed anyway to avoid hanging, but this indicates a problem
-    {:keep_state, %{data | cyclic_ready?: true}, []}
   end
 
   def operational(:info, {:master_state_changed, master_state}, _data) do
@@ -638,19 +635,13 @@ defmodule EtherCAT.Master do
   # Domain identifies itself by PID; we look up its NIF reference
   def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
       when is_binary(value) do
-    # Check if cyclic task has completed initialization
-    unless data.cyclic_ready? do
-      {:keep_state_and_data,
-       [{:reply, from, {:error, {:cyclic_not_ready, "Cyclic task still initializing"}}}]}
-    else
-      case Map.get(data.domains, domain_pid) do
-        nil ->
-          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    case Map.get(data.domains, domain_pid) do
+      nil ->
+        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-        domain_info ->
-          result = Nif.set_value(domain_info.ref, name, value)
-          {:keep_state_and_data, [{:reply, from, result}]}
-      end
+      domain_info ->
+        result = Nif.set_value(domain_info.ref, name, value)
+        {:keep_state_and_data, [{:reply, from, result}]}
     end
   end
 
@@ -663,24 +654,18 @@ defmodule EtherCAT.Master do
   end
 
   def operational({:call, from}, {:domain_get_value, domain_pid, name}, data) do
-    # Check if cyclic task has completed initialization
-    unless data.cyclic_ready? do
-      {:keep_state_and_data,
-       [{:reply, from, {:error, {:cyclic_not_ready, "Cyclic task still initializing"}}}]}
-    else
-      case Map.get(data.domains, domain_pid) do
-        nil ->
-          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    case Map.get(data.domains, domain_pid) do
+      nil ->
+        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-        domain_info ->
-          result =
-            case Nif.get_value(domain_info.ref, name) do
-              {:error, _} = error -> error
-              value -> {:ok, value}
-            end
+      domain_info ->
+        result =
+          case Nif.get_value(domain_info.ref, name) do
+            {:error, _} = error -> error
+            value -> {:ok, value}
+          end
 
-          {:keep_state_and_data, [{:reply, from, result}]}
-      end
+        {:keep_state_and_data, [{:reply, from, result}]}
     end
   end
 
