@@ -367,11 +367,11 @@ defmodule EtherCAT do
   end
 
   defp wait_for_master_ready(master, timeout \\ 10_000) do
-    wait_for_master_ready(master, timeout, System.monotonic_time(:millisecond))
+    wait_for_master_ready(master, timeout, Elixir.System.monotonic_time(:millisecond))
   end
 
   defp wait_for_master_ready(master, timeout, start_time) do
-    elapsed = System.monotonic_time(:millisecond) - start_time
+    elapsed = Elixir.System.monotonic_time(:millisecond) - start_time
 
     if elapsed >= timeout do
       {:error, {:master_not_ready, :timeout}}
