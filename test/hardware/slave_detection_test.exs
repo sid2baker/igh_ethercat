@@ -13,17 +13,9 @@ defmodule Hardware.SlaveDetectionTest do
   - Position 3: EL3202 (2-channel RTD input)
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware
-  """
 
-  setup_all do
-    # Skip tests if ETHERCAT_HARDWARE environment variable is not set
-    unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      ExUnit.configure(exclude: [:hardware])
-      :ok
-    else
-      :ok
-    end
-  end
+  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  """
 
   describe "System Initialization" do
     test "successfully configures EtherCAT system" do

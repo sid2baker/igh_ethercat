@@ -19,16 +19,9 @@ defmodule Hardware.DigitalIOTest do
   4. Timing characteristics are acceptable
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
-  """
 
-  setup_all do
-    unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      ExUnit.configure(exclude: [:hardware])
-      :ok
-    else
-      :ok
-    end
-  end
+  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  """
 
   describe "Single Channel Loopback" do
     setup do

@@ -19,6 +19,8 @@ defmodule Hardware.RTDInputTest do
   4. Readings are stable over time
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:rtd
+
+  Note: The EtherCAT Master is auto-started by the Application supervision tree.
   """
 
   # Expected resistance values
@@ -27,15 +29,6 @@ defmodule Hardware.RTDInputTest do
 
   # Tolerance for resistance measurements (±5Ω allows for resistor tolerance and wire resistance)
   @resistance_tolerance 5.0
-
-  setup_all do
-    unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      ExUnit.configure(exclude: [:hardware])
-      :ok
-    else
-      :ok
-    end
-  end
 
   describe "Basic Resistance Reading" do
     setup do
