@@ -90,7 +90,6 @@ defmodule EtherCAT.Domain do
     GenServer.call(domain, {:store_and_lock_entries, entries})
   end
 
-
   @doc """
   Returns the domain's update interval in microseconds.
 

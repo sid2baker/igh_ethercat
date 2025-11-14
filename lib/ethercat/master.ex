@@ -493,8 +493,7 @@ defmodule EtherCAT.Master do
     case do_create_domain(data.master_ref, name, interval) do
       {:ok, domain_ref, domain_pid} ->
         updated_domains = Map.put(data.domains, domain_pid, %{name: name, ref: domain_ref})
-        {:keep_state, %{data | domains: updated_domains},
-         [{:reply, from, {:ok, domain_ref}}]}
+        {:keep_state, %{data | domains: updated_domains}, [{:reply, from, {:ok, domain_ref}}]}
 
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
@@ -564,23 +563,6 @@ defmodule EtherCAT.Master do
           data.domains
           |> Map.values()
           |> Enum.map(& &1.ref)
-
-        # CRITICAL: Initialize all domain data pointers synchronously BEFORE spawning cyclic task
-        # This ensures domain data is ready for I/O operations immediately
-        Logger.debug("Initializing domain data for #{length(domain_resources)} domains")
-
-        Enum.each(domain_resources, fn domain_ref ->
-          case Nif.domain_init_data(domain_ref) do
-            :ok ->
-              :ok
-
-            {:error, reason} ->
-              Logger.error("Failed to initialize domain data: #{inspect(reason)}")
-              raise "Domain initialization failed: #{inspect(reason)}"
-          end
-        end)
-
-        Logger.debug("Domain data initialization complete")
 
         task_pid =
           spawn_link(fn ->
@@ -702,8 +684,7 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, :start_cyclic_mode, _data) do
     {:keep_state_and_data,
-     [{:reply, from,
-       {:error, {:already_operational, "Cyclic mode is already running"}}}]}
+     [{:reply, from, {:error, {:already_operational, "Cyclic mode is already running"}}}]}
   end
 
   # Gateway for domain operations in operational state
@@ -713,10 +694,12 @@ defmodule EtherCAT.Master do
     # Check if slaves have reached OP state before allowing PDO writes
     unless data.slaves_operational? do
       {:keep_state_and_data,
-       [{:reply, from,
-         {:error,
-          {:slaves_not_operational,
-           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+       [
+         {:reply, from,
+          {:error,
+           {:slaves_not_operational,
+            "Slaves are still transitioning to OP state. PDO communication not yet available."}}}
+       ]}
     else
       case Map.get(data.domains, domain_pid) do
         nil ->
@@ -741,10 +724,12 @@ defmodule EtherCAT.Master do
     # Check if slaves have reached OP state before allowing PDO reads
     unless data.slaves_operational? do
       {:keep_state_and_data,
-       [{:reply, from,
-         {:error,
-          {:slaves_not_operational,
-           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+       [
+         {:reply, from,
+          {:error,
+           {:slaves_not_operational,
+            "Slaves are still transitioning to OP state. PDO communication not yet available."}}}
+       ]}
     else
       case Map.get(data.domains, domain_pid) do
         nil ->
@@ -868,6 +853,7 @@ defmodule EtherCAT.Master do
       # Domain exited
       Map.has_key?(data.domains, pid) ->
         domain_info = data.domains[pid]
+
         Logger.warning(
           "Domain #{domain_info.name} (#{inspect(pid)}) exited with reason: #{inspect(reason)} in state #{state}"
         )
