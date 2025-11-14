@@ -96,14 +96,25 @@ defmodule EtherCAT.Master do
     :gen_statem.stop(master, :normal, timeout)
   catch
     # Handle all variations of "process doesn't exist or is already stopping" exits:
-    # - {:noproc, _} - process is already dead
-    # - {reason, _} when reason == :noproc - process doesn't exist (alternative format)
-    # - :shutdown - process is currently shutting down, can't stop it again
-    # - :normal - process already stopped normally
+    # Common exit patterns from :proc_lib.stop/3:
+    :exit, :noproc -> :ok
     :exit, {:noproc, _} -> :ok
     :exit, {reason, _details} when reason == :noproc -> :ok
     :exit, :shutdown -> :ok
     :exit, :normal -> :ok
+    :exit, reason ->
+      # Log unexpected exits to help debug
+      require Logger
+      Logger.debug("Master.stop caught unexpected exit: #{inspect(reason)}")
+      # If it looks like a "process gone" error, treat as ok
+      reason_str = inspect(reason)
+      if String.contains?(reason_str, "noproc") or String.contains?(reason_str, "no process") or
+         String.contains?(reason_str, "not alive") do
+        :ok
+      else
+        # Re-raise unexpected exits
+        exit(reason)
+      end
   end
 
   @doc "Connects to EtherCAT network, transitions to `:stale`."
