@@ -25,6 +25,8 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Single Channel Loopback" do
     setup do
+      # Wait for hardware to stabilize after Master connects
+      Process.sleep(2100)
       {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}

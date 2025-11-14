@@ -1260,28 +1260,6 @@ defmodule EtherCAT.Master do
     end
   end
 
-  defp validate_hardware_stable(data, master_state) do
-    current_fingerprint = master_state.slaves_responding
-    now = System.monotonic_time(:millisecond)
-
-    # Check if fingerprint matches what we've been tracking
-    if data.slave_fingerprint != current_fingerprint do
-      {:error, {:fingerprint_mismatch, "Hardware changed during sync attempt"}}
-    else
-      # Check if stable for required duration
-      stable_duration = now - (data.fingerprint_stable_since || now)
-
-      if stable_duration >= data.fingerprint_change_threshold do
-        :ok
-      else
-        {:error,
-         {:hardware_not_stable,
-          "Hardware must be stable for #{data.fingerprint_change_threshold}ms, " <>
-            "currently stable for #{stable_duration}ms"}}
-      end
-    end
-  end
-
   # Validate config matches detected hardware
   defp validate_config_matches_hardware(config, %{master_ref: master_ref} = master_state) do
     detected_count = master_state.slaves_responding
