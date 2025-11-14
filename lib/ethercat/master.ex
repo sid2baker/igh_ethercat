@@ -103,16 +103,15 @@ defmodule EtherCAT.Master do
     :exit, :shutdown -> :ok
     :exit, :normal -> :ok
     :exit, reason ->
-      # Log unexpected exits to help debug
-      require Logger
-      Logger.debug("Master.stop caught unexpected exit: #{inspect(reason)}")
-      # If it looks like a "process gone" error, treat as ok
+      # Catch-all for any other exit that indicates process is gone/stopping
+      # This handles variations in :proc_lib.stop/3 error formats across OTP versions
       reason_str = inspect(reason)
-      if String.contains?(reason_str, "noproc") or String.contains?(reason_str, "no process") or
+      if String.contains?(reason_str, "noproc") or
+         String.contains?(reason_str, "no process") or
          String.contains?(reason_str, "not alive") do
         :ok
       else
-        # Re-raise unexpected exits
+        # Unexpected exit - re-raise it
         exit(reason)
       end
   end
@@ -247,8 +246,6 @@ defmodule EtherCAT.Master do
   @impl true
   def terminate(reason, _state, %{task_pid: task_pid} = _data) do
     Logger.info("EtherCAT Master terminating: #{inspect(reason)}")
-    Logger.debug("Terminate called from: #{inspect(Process.info(self(), :current_stacktrace))}")
-
     # All linked processes (slaves, domains, cyclic task) will automatically
     # receive exit signals and terminate when this process terminates
     if task_pid do
@@ -771,17 +768,7 @@ defmodule EtherCAT.Master do
 
   # Common catch-all handler for unexpected events
   defp handle_unexpected(event_type, event_content, state, _data) do
-    # Special logging for EXIT messages to debug test cleanup issue
-    case {event_type, event_content} do
-      {:info, {:EXIT, pid, reason}} ->
-        Logger.warning(
-          "Received EXIT in state #{state} from #{inspect(pid)} with reason: #{inspect(reason)}"
-        )
-
-      _ ->
-        Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
-    end
-
+    Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
     {:keep_state_and_data, []}
   end
 
