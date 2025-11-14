@@ -1,4 +1,4 @@
-defmodule HardwareConfig do
+defmodule TestHardwareConfig do
   @moduledoc """
   Hardware configuration for the test setup.
 
