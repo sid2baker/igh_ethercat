@@ -28,7 +28,8 @@ defmodule EtherCAT.MixProject do
     [
       {:zigler, "~> 0.15", runtime: false},
       {:telemetry, "~> 1.2"},
-      {:spark, "~> 2.0"}
+      {:spark, "~> 2.0"},
+      {:sourceror, "~> 1.7", only: [:dev, :test]}
     ]
   end
 end

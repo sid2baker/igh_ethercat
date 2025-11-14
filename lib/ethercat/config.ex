@@ -45,17 +45,20 @@ defmodule EtherCAT.Config do
   def build(module) do
     entities = Spark.Dsl.Extension.get_entities(module, [:hardware])
 
-    master = entities
-             |> Enum.find(&(&1.__struct__ == EtherCAT.Config.Dsl.Master))
-             |> build_master()
+    master =
+      entities
+      |> Enum.find(&(&1.__struct__ == EtherCAT.Config.Dsl.Master))
+      |> build_master()
 
-    domains = entities
-              |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Domain))
-              |> Enum.map(&build_domain/1)
+    domains =
+      entities
+      |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Domain))
+      |> Enum.map(&build_domain/1)
 
-    slaves = entities
-             |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Slave))
-             |> Enum.map(&build_slave/1)
+    slaves =
+      entities
+      |> Enum.filter(&(&1.__struct__ == EtherCAT.Config.Dsl.Slave))
+      |> Enum.map(&build_slave/1)
 
     %EtherCAT.Config.HardwareConfig{
       master: master,

@@ -198,10 +198,12 @@ defmodule Unit.DriverTest do
       pt100_state = %{ch1_rtd_element: 0}
 
       # 20.0°C should encode to 200
-      assert {:ok, <<200::little-signed-16>>} = EL3202.encode_value(pt100_state, :ch1, :value, 20.0)
+      assert {:ok, <<200::little-signed-16>>} =
+               EL3202.encode_value(pt100_state, :ch1, :value, 20.0)
 
       # -10.5°C should encode to -105
-      assert {:ok, <<-105::little-signed-16>>} = EL3202.encode_value(pt100_state, :ch1, :value, -10.5)
+      assert {:ok, <<-105::little-signed-16>>} =
+               EL3202.encode_value(pt100_state, :ch1, :value, -10.5)
     end
 
     test "uses default encoding for non-value entries", %{driver_state: state} do
@@ -218,19 +220,27 @@ defmodule Unit.DriverTest do
     test "decodes with different RTD element types" do
       # PT100 (0)
       pt100_state = %{ch1_rtd_element: 0}
-      assert {:ok, 25.0} = EL3202.decode_value(pt100_state, :ch1, :value, <<250::little-signed-16>>)
+
+      assert {:ok, 25.0} =
+               EL3202.decode_value(pt100_state, :ch1, :value, <<250::little-signed-16>>)
 
       # PT1000 (2)
       pt1000_state = %{ch1_rtd_element: 2}
-      assert {:ok, 25.0} = EL3202.decode_value(pt1000_state, :ch1, :value, <<250::little-signed-16>>)
+
+      assert {:ok, 25.0} =
+               EL3202.decode_value(pt1000_state, :ch1, :value, <<250::little-signed-16>>)
 
       # OHMS (8)
       ohms_state = %{ch1_rtd_element: 8}
-      assert {:ok, 25.0} = EL3202.decode_value(ohms_state, :ch1, :value, <<250::little-signed-16>>)
+
+      assert {:ok, 25.0} =
+               EL3202.decode_value(ohms_state, :ch1, :value, <<250::little-signed-16>>)
 
       # Unknown element type (defaults to temperature behavior)
       unknown_state = %{ch1_rtd_element: 99}
-      assert {:ok, 25.0} = EL3202.decode_value(unknown_state, :ch1, :value, <<250::little-signed-16>>)
+
+      assert {:ok, 25.0} =
+               EL3202.decode_value(unknown_state, :ch1, :value, <<250::little-signed-16>>)
     end
   end
 
@@ -252,14 +262,18 @@ defmodule Unit.DriverTest do
       # Maximum int16 value
       max_int16 = 32767
       expected = max_int16 / 10.0
-      assert {:ok, ^expected} = EL3202.decode_value(state, :ch1, :value, <<max_int16::little-signed-16>>)
+
+      assert {:ok, ^expected} =
+               EL3202.decode_value(state, :ch1, :value, <<max_int16::little-signed-16>>)
     end
 
     test "decodes minimum negative value", %{driver_state: state} do
       # Minimum int16 value
       min_int16 = -32768
       expected = min_int16 / 10.0
-      assert {:ok, ^expected} = EL3202.decode_value(state, :ch1, :value, <<min_int16::little-signed-16>>)
+
+      assert {:ok, ^expected} =
+               EL3202.decode_value(state, :ch1, :value, <<min_int16::little-signed-16>>)
     end
   end
 end

@@ -5,10 +5,14 @@ defmodule EtherCAT.Config.Dsl.Slave do
   defstruct [
     :position,
     :name,
-    :driver,    # Will be a Driver entity (singleton)
-    :expect,    # Will be an Expect entity (singleton)
-    :config,    # Will be a Config entity (singleton)
+    # Will be a Driver entity (singleton)
+    :driver,
+    # Will be an Expect entity (singleton)
+    :expect,
+    # Will be a Config entity (singleton)
+    :config,
     :__spark_metadata__,
-    entries: []  # Will be a list of Entry entities
+    # Will be a list of Entry entities
+    entries: []
   ]
 end

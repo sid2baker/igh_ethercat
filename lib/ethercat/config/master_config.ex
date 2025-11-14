@@ -5,11 +5,9 @@ defmodule EtherCAT.Config.MasterConfig do
   Defines the master index and timing parameters for the EtherCAT master.
   """
 
-  defstruct [
-    index: 0,
-    update_interval: 10_000,
-    nif_yield_interval: 100_000
-  ]
+  defstruct index: 0,
+            update_interval: 10_000,
+            nif_yield_interval: 100_000
 
   @type t :: %__MODULE__{
           index: non_neg_integer(),
