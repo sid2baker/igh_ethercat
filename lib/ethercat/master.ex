@@ -700,6 +700,12 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
+  def operational({:call, from}, :start_cyclic_mode, _data) do
+    {:keep_state_and_data,
+     [{:reply, from,
+       {:error, {:already_operational, "Cyclic mode is already running"}}}]}
+  end
+
   # Gateway for domain operations in operational state
   # Domain identifies itself by PID; we look up its NIF reference
   def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
