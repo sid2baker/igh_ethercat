@@ -207,22 +207,23 @@ defmodule EtherCAT.Master do
   @doc """
   Register a System with the Master.
 
-  Stores the System struct and monitors the owner process.
+  Stores the System struct for later retrieval.
   Called by System when created via configure_hardware.
   """
-  @spec register_system(GenServer.server(), pid(), EtherCAT.System.t(), timeout()) :: :ok
-  def register_system(master, owner_pid, system, timeout \\ 5000) do
-    :gen_statem.call(master, {:register_system, owner_pid, system}, timeout)
+  @spec register_system(GenServer.server(), EtherCAT.System.t(), timeout()) :: :ok
+  def register_system(master, system, timeout \\ 5000) do
+    :gen_statem.call(master, {:register_system, system}, timeout)
   end
 
   @doc """
   Unregister the current System from the Master.
 
+  Clears the current_system reference.
   Called by System when stopped via stop_system.
   """
-  @spec unregister_system(GenServer.server(), pid(), timeout()) :: :ok
-  def unregister_system(master, owner_pid, timeout \\ 5000) do
-    :gen_statem.call(master, {:unregister_system, owner_pid}, timeout)
+  @spec unregister_system(GenServer.server(), timeout()) :: :ok
+  def unregister_system(master, timeout \\ 5000) do
+    :gen_statem.call(master, :unregister_system, timeout)
   end
 
   @doc """
@@ -663,28 +664,18 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
-  def synced({:call, from}, {:register_system, owner_pid, system}, data) do
-    # Monitor the owner process so we can clean up if it dies
-    Process.monitor(owner_pid)
-    new_data = %{data | current_system: {owner_pid, system}}
+  def synced({:call, from}, {:register_system, system}, data) do
+    new_data = %{data | current_system: system}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def synced({:call, from}, {:unregister_system, owner_pid}, data) do
-    # Only unregister if it matches the current system owner
-    new_data = case data.current_system do
-      {^owner_pid, _system} -> %{data | current_system: nil}
-      _ -> data
-    end
+  def synced({:call, from}, :unregister_system, data) do
+    new_data = %{data | current_system: nil}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
   def synced({:call, from}, :get_current_system, data) do
-    system = case data.current_system do
-      {_owner_pid, system} -> system
-      nil -> nil
-    end
-    {:keep_state_and_data, [{:reply, from, {:ok, system}}]}
+    {:keep_state_and_data, [{:reply, from, {:ok, data.current_system}}]}
   end
 
   def synced(:state_timeout, :update_master_state, data) do
@@ -725,13 +716,9 @@ defmodule EtherCAT.Master do
                 "Hardware change stable for #{stable_duration}ms: #{length(data.slaves)} -> #{current_fingerprint} slaves"
               )
 
-              # Notify current system owner if any
-              case data.current_system do
-                {owner_pid, _system} ->
-                  Logger.info("Notifying system owner #{inspect(owner_pid)} of hardware change")
-                  send(owner_pid, {:hardware_changed, current_fingerprint})
-                nil ->
-                  :ok
+              # Clear current system on hardware change
+              if data.current_system do
+                Logger.info("Hardware changed, clearing current system")
               end
 
               # Terminate existing slaves and transition to stale for re-scan
@@ -741,7 +728,7 @@ defmodule EtherCAT.Master do
                 end
               end)
 
-              {:next_state, :stale, %{data | slaves: []}}
+              {:next_state, :stale, %{data | slaves: [], current_system: nil}}
             else
               # Not stable long enough yet - keep waiting
               actions = [{:state_timeout, data.scan_interval, :update_master_state}]
@@ -756,18 +743,6 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def synced(:info, {:DOWN, _ref, :process, owner_pid, _reason}, data) do
-    # Only unregister if it's the current system owner
-    case data.current_system do
-      {^owner_pid, _system} ->
-        Logger.warning("Current system owner #{inspect(owner_pid)} died, unregistering")
-        new_data = %{data | current_system: nil}
-        {:keep_state, new_data}
-      _ ->
-        # Some other process died, ignore
-        {:keep_state_and_data, []}
-    end
-  end
 
   def synced(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :synced, data)
@@ -911,26 +886,18 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
-  def operational({:call, from}, {:register_system, owner_pid, system}, data) do
-    Process.monitor(owner_pid)
-    new_data = %{data | current_system: {owner_pid, system}}
+  def operational({:call, from}, {:register_system, system}, data) do
+    new_data = %{data | current_system: system}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def operational({:call, from}, {:unregister_system, owner_pid}, data) do
-    new_data = case data.current_system do
-      {^owner_pid, _system} -> %{data | current_system: nil}
-      _ -> data
-    end
+  def operational({:call, from}, :unregister_system, data) do
+    new_data = %{data | current_system: nil}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
   def operational({:call, from}, :get_current_system, data) do
-    system = case data.current_system do
-      {_owner_pid, system} -> system
-      nil -> nil
-    end
-    {:keep_state_and_data, [{:reply, from, {:ok, system}}]}
+    {:keep_state_and_data, [{:reply, from, {:ok, data.current_system}}]}
   end
 
   def operational({:call, from}, :start_cyclic_mode, _data) do
@@ -1008,16 +975,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def operational(:info, {:DOWN, _ref, :process, owner_pid, _reason}, data) do
-    case data.current_system do
-      {^owner_pid, _system} ->
-        Logger.warning("Current system owner #{inspect(owner_pid)} died, unregistering")
-        new_data = %{data | current_system: nil}
-        {:keep_state, new_data}
-      _ ->
-        {:keep_state_and_data, []}
-    end
-  end
 
   def operational(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :operational, data)

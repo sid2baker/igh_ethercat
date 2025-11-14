@@ -74,9 +74,8 @@ defmodule EtherCAT.System do
         entry_handles: entry_handles
       }
 
-      # Register this System with Master for auto-reconfigure support
-      # self() is the owner process (the process calling configure_hardware)
-      :ok = Master.register_system(master, self(), system)
+      # Register this System with Master for later retrieval
+      :ok = Master.register_system(master, system)
 
       {:ok, system}
     else
@@ -93,19 +92,8 @@ defmodule EtherCAT.System do
   """
   @spec close(t()) :: :ok
   def close(%__MODULE__{master: master} = _system) do
-    # Unregister from Master (using self() as the owner_pid)
-    Master.unregister_system(master, self())
-
-    # TODO: Stop domains (if we own them - may need refactoring to track this)
-    # TODO: Unlock slaves (allow reconfiguration)
-    # For now, we don't stop the Master - it remains running
-
-    # Note: In a more complete implementation, we would:
-    # 1. Track which domains belong to this System
-    # 2. Unlock slaves to allow reconfiguration
-    # 3. Possibly stop cyclic mode if no other Systems are active
-
-    _ = system
+    # Just unregister from Master (clear the current_system reference)
+    Master.unregister_system(master)
     :ok
   end
 

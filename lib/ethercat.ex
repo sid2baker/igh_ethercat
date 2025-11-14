@@ -196,11 +196,12 @@ defmodule EtherCAT do
   @doc """
   Stop a System and release its resources.
 
-  The Master remains running and can be reconfigured with a new System.
+  Clears the system reference from the Master. The Master remains running
+  and can be reconfigured with a new System.
   """
   @spec stop_system(System.t()) :: :ok
-  def stop_system(%System{} = system) do
-    System.close(system)
+  def stop_system(%System{master: master} = _system) do
+    Master.unregister_system(master)
   end
 
   @doc """
@@ -337,13 +338,14 @@ defmodule EtherCAT do
   ## Private Helpers
 
   defp stop_current_system(master) do
+    # Just clear the current system reference if any
     case Master.get_current_system(master) do
       {:ok, nil} ->
         :ok
 
-      {:ok, system} when is_struct(system, System) ->
-        # Stop the existing system
-        stop_system(system)
+      {:ok, _system} ->
+        # Clear the current system reference
+        Master.unregister_system(master)
 
       {:error, _} ->
         :ok
