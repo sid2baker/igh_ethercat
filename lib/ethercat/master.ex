@@ -93,22 +93,49 @@ defmodule EtherCAT.Master do
   """
   @spec stop(GenServer.server(), timeout()) :: :ok
   def stop(master, timeout \\ 5000) do
-    case :gen_statem.stop(master, :normal, timeout) do
-      :ok -> :ok
-      # Process already dead or doesn't exist - that's fine
-      {:error, :noproc} -> :ok
-      {:error, {:noproc, _}} -> :ok
-      # Let other errors propagate
-      {:error, _} = error -> error
-    end
-  rescue
-    # Catch exit signals from dead processes
-    e in ArgumentError ->
-      if Exception.message(e) =~ "no process" do
-        :ok
-      else
-        reraise e, __STACKTRACE__
+    try do
+      case :gen_statem.stop(master, :normal, timeout) do
+        :ok -> :ok
+        # Process already dead or doesn't exist - that's fine
+        {:error, :noproc} -> :ok
+        {:error, {:noproc, _}} -> :ok
+        # Let other errors propagate
+        {:error, _} = error -> error
       end
+    catch
+      # Catch all exit signals related to missing/dead processes
+      # Common patterns from :proc_lib.stop/3 when process doesn't exist:
+      # - {:noproc, _}
+      # - {reason, {gen, :call, _}} where the call failed
+      :exit, {:noproc, _} ->
+        :ok
+
+      :exit, :noproc ->
+        :ok
+
+      :exit, {reason, {_module, _function, _args}} when reason == :noproc ->
+        :ok
+
+      # Catch any other exit that might be related to process not existing
+      # Re-raise if it's not a "no process" error
+      :exit, reason ->
+        reason_str = inspect(reason)
+
+        if String.contains?(reason_str, "no process") or
+             String.contains?(reason_str, "noproc") do
+          :ok
+        else
+          exit(reason)
+        end
+    rescue
+      # Catch ArgumentError from dead processes
+      e in ArgumentError ->
+        if Exception.message(e) =~ "no process" do
+          :ok
+        else
+          reraise e, __STACKTRACE__
+        end
+    end
   end
 
   @doc "Connects to EtherCAT network, transitions to `:stale`."
