@@ -180,6 +180,7 @@ defmodule EtherCAT do
           {:ok, System.t()} | {:error, term()}
   def configure_hardware(master, config_or_module) when is_pid(master) do
     with {:ok, config} <- get_config(config_or_module),
+         {:ok, _slaves} <- wait_for_master_ready(master),
          :ok <- verify_hardware(master, config),
          :ok <- stop_current_system(master),
          {:ok, system} <- System.configure(master, config) do
@@ -362,6 +363,31 @@ defmodule EtherCAT do
   defp generate_config_from_master(master) do
     with {:ok, slaves} <- Master.get_slaves(master) do
       System.generate_hardware_config(slaves)
+    end
+  end
+
+  defp wait_for_master_ready(master, timeout \\ 10_000) do
+    wait_for_master_ready(master, timeout, System.monotonic_time(:millisecond))
+  end
+
+  defp wait_for_master_ready(master, timeout, start_time) do
+    elapsed = System.monotonic_time(:millisecond) - start_time
+
+    if elapsed >= timeout do
+      {:error, {:master_not_ready, :timeout}}
+    else
+      case Master.sync_slaves(master, 1000) do
+        {:ok, slaves} ->
+          {:ok, slaves}
+
+        {:error, :timeout} ->
+          # Master still in :stale state, wait and retry
+          Process.sleep(100)
+          wait_for_master_ready(master, timeout, start_time)
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
