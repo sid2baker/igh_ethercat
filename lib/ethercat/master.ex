@@ -93,21 +93,26 @@ defmodule EtherCAT.Master do
   """
   @spec stop(GenServer.server(), timeout()) :: :ok
   def stop(master, timeout \\ 5000) do
-    case :gen_statem.stop(master, :normal, timeout) do
-      :ok -> :ok
-      # Process already dead or doesn't exist - that's fine
-      {:error, :noproc} -> :ok
-      {:error, {:noproc, _}} -> :ok
-      # Let other errors propagate
-      {:error, _} = error -> error
-    end
-  rescue
-    # Catch exit signals from dead processes
-    e in ArgumentError ->
-      if Exception.message(e) =~ "no process" do
+    :gen_statem.stop(master, :normal, timeout)
+  catch
+    # Handle all variations of "process doesn't exist or is already stopping" exits:
+    # Common exit patterns from :proc_lib.stop/3:
+    :exit, :noproc -> :ok
+    :exit, {:noproc, _} -> :ok
+    :exit, {reason, _details} when reason == :noproc -> :ok
+    :exit, :shutdown -> :ok
+    :exit, :normal -> :ok
+    :exit, reason ->
+      # Catch-all for any other exit that indicates process is gone/stopping
+      # This handles variations in :proc_lib.stop/3 error formats across OTP versions
+      reason_str = inspect(reason)
+      if String.contains?(reason_str, "noproc") or
+         String.contains?(reason_str, "no process") or
+         String.contains?(reason_str, "not alive") do
         :ok
       else
-        reraise e, __STACKTRACE__
+        # Unexpected exit - re-raise it
+        exit(reason)
       end
   end
 
