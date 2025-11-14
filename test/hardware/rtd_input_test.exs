@@ -39,7 +39,7 @@ defmodule Hardware.RTDInputTest do
 
   describe "Basic Resistance Reading" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -89,7 +89,7 @@ defmodule Hardware.RTDInputTest do
 
   describe "Measurement Stability" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -159,7 +159,7 @@ defmodule Hardware.RTDInputTest do
 
   describe "Rapid Reading" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -207,7 +207,7 @@ defmodule Hardware.RTDInputTest do
 
   describe "Range Validation" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
