@@ -3,17 +3,19 @@ defmodule EtherCAT.Config.HardwareConfig do
   Complete EtherCAT system hardware configuration.
 
   This struct represents the full declarative configuration of an EtherCAT system,
-  including all domains, slaves, and entry routing.
+  including master settings, domains, slaves, and entry routing.
   """
 
-  alias EtherCAT.Config.{DomainConfig, SlaveConfig}
+  alias EtherCAT.Config.{MasterConfig, DomainConfig, SlaveConfig}
 
   defstruct [
+    :master,
     :domains,
     :slaves
   ]
 
   @type t :: %__MODULE__{
+          master: MasterConfig.t() | nil,
           domains: [DomainConfig.t()],
           slaves: [SlaveConfig.t()]
         }
@@ -24,6 +26,7 @@ defmodule EtherCAT.Config.HardwareConfig do
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     %__MODULE__{
+      master: Keyword.get(opts, :master),
       domains: Keyword.get(opts, :domains, []),
       slaves: Keyword.get(opts, :slaves, [])
     }
@@ -33,6 +36,7 @@ defmodule EtherCAT.Config.HardwareConfig do
   Validates the hardware configuration for consistency.
 
   Checks:
+  - Master configuration is valid (if specified)
   - All referenced domains exist
   - No duplicate slave positions
   - No duplicate slave names
@@ -40,12 +44,16 @@ defmodule EtherCAT.Config.HardwareConfig do
   """
   @spec validate(t()) :: :ok | {:error, term()}
   def validate(%__MODULE__{} = config) do
-    with :ok <- validate_domains(config),
+    with :ok <- validate_master(config),
+         :ok <- validate_domains(config),
          :ok <- validate_slaves(config),
          :ok <- validate_entry_domains(config) do
       :ok
     end
   end
+
+  defp validate_master(%{master: nil}), do: :ok
+  defp validate_master(%{master: master}), do: MasterConfig.validate(master)
 
   defp validate_domains(%{domains: domains}) do
     names = Enum.map(domains, & &1.name)

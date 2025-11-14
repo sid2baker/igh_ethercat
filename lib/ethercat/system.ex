@@ -29,7 +29,7 @@ defmodule EtherCAT.System do
 
   ## Parameters
   - `config` - HardwareConfig struct (typically from Spark DSL module)
-  - `opts` - Options passed to Master.start_link
+  - `opts` - Options passed to Master.start_link (overrides config.master if provided)
 
   ## Returns
   - `{:ok, system}` - System handle on success
@@ -42,10 +42,13 @@ defmodule EtherCAT.System do
   """
   @spec open(HardwareConfig.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(%HardwareConfig{} = config, opts \\ []) do
+    # Build master options from config.master (if present) and opts (override)
+    master_opts = build_master_opts(config.master, opts)
+
     # Validate configuration
     with :ok <- HardwareConfig.validate(config),
          # Start master
-         {:ok, master} <- Master.start_link(opts),
+         {:ok, master} <- Master.start_link(master_opts),
          # Connect to EtherCAT master
          :ok <- Master.connect(master),
          # Discover slaves
@@ -259,5 +262,17 @@ defmodule EtherCAT.System do
             "was detected as #{inspect(actual_driver)}"}}
       end
     end
+  end
+
+  # Builds master options from config and opts (opts override config)
+  defp build_master_opts(nil, opts), do: opts
+
+  defp build_master_opts(master_config, opts) do
+    [
+      master_index: master_config.index,
+      update_interval: master_config.update_interval,
+      nif_yield_interval: master_config.nif_yield_interval
+    ]
+    |> Keyword.merge(opts)
   end
 end
