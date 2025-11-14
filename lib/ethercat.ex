@@ -196,12 +196,15 @@ defmodule EtherCAT do
   @doc """
   Stop a System and release its resources.
 
-  Clears the system reference from the Master. The Master remains running
-  and can be reconfigured with a new System.
+  Stops cyclic mode and clears the system reference from the Master.
+  The Master transitions back to synced state and can be reconfigured.
   """
-  @spec stop_system(System.t()) :: :ok
+  @spec stop_system(System.t()) :: :ok | {:error, term()}
   def stop_system(%System{master: master} = _system) do
-    Master.unregister_system(master)
+    with :ok <- Master.stop_cyclic_mode(master),
+         :ok <- Master.unregister_system(master) do
+      :ok
+    end
   end
 
   @doc """
@@ -338,14 +341,18 @@ defmodule EtherCAT do
   ## Private Helpers
 
   defp stop_current_system(master) do
-    # Just clear the current system reference if any
+    # Stop cyclic mode and clear current system reference if any
     case Master.get_current_system(master) do
       {:ok, nil} ->
         :ok
 
       {:ok, _system} ->
-        # Clear the current system reference
-        Master.unregister_system(master)
+        # Stop cyclic mode (transitions operational → synced)
+        # Then clear the current system reference
+        with :ok <- Master.stop_cyclic_mode(master),
+             :ok <- Master.unregister_system(master) do
+          :ok
+        end
 
       {:error, _} ->
         :ok

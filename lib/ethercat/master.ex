@@ -198,6 +198,21 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, timeout)
   end
 
+  @doc """
+  Stop cyclic mode and return to synced state.
+
+  Stops the cyclic task, deactivates the master, and transitions back to synced state.
+  The master can then be reconfigured with a new system.
+
+  ## Parameters
+  - `master` - Master process
+  - `timeout` - Call timeout (default: 10_000ms)
+  """
+  @spec stop_cyclic_mode(GenServer.server(), timeout()) :: :ok | {:error, term()}
+  def stop_cyclic_mode(master, timeout \\ 10_000) do
+    :gen_statem.call(master, :stop_cyclic_mode, timeout)
+  end
+
   @doc "Gets master NIF reference for internal use."
   @spec get_ref(GenServer.server(), timeout()) :: reference()
   def get_ref(master, timeout \\ 5000) do
@@ -639,6 +654,11 @@ defmodule EtherCAT.Master do
     end
   end
 
+  def synced({:call, from}, :stop_cyclic_mode, _data) do
+    # Already in synced state (not operational), nothing to stop
+    {:keep_state_and_data, [{:reply, from, :ok}]}
+  end
+
   # Gateway for Slave module operations - ensures only Master talks to NIF
   def synced({:call, from}, {:slave_operation, position, operation, args}, data) do
     result = execute_slave_operation(data.master_ref, position, operation, args)
@@ -905,6 +925,35 @@ defmodule EtherCAT.Master do
      [{:reply, from, {:error, {:already_operational, "Cyclic mode is already running"}}}]}
   end
 
+  def operational({:call, from}, :stop_cyclic_mode, data) do
+    Logger.info("Stopping cyclic mode - transitioning from operational to synced")
+
+    # Stop the cyclic task properly (with :kill and wait for both messages)
+    stop_cyclic_task(data.task_pid)
+
+    # Deactivate the master
+    case Nif.master_deactivate(data.master_ref) do
+      :ok ->
+        Logger.info("Master deactivated successfully")
+
+        # Transition back to synced state
+        new_data = %{
+          data
+          | task_pid: nil,
+            cycle_interval: nil,
+            nif_yield_interval: nil,
+            slaves_operational?: false,
+            pending_caller: nil
+        }
+
+        {:next_state, :synced, new_data, [{:reply, from, :ok}]}
+
+      {:error, reason} ->
+        Logger.error("Failed to deactivate master: #{inspect(reason)}")
+        {:keep_state_and_data, [{:reply, from, {:error, {:deactivate_failed, reason}}}]}
+    end
+  end
+
   # Gateway for domain operations in operational state
   # Domain identifies itself by PID; we look up its NIF reference
   def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
@@ -978,6 +1027,40 @@ defmodule EtherCAT.Master do
 
   def operational(event_type, event_content, data) do
     handle_unexpected(event_type, event_content, :operational, data)
+  end
+
+  # Helper to properly stop cyclic task
+  #
+  # The task must be killed with :kill (not :normal) due to beam.yield issue
+  # See: https://github.com/E-xyza/zigler/issues/571
+  #
+  # We need to wait for BOTH messages (order is non-deterministic):
+  # - NIF sends :cyclic_task_died before task exits
+  # - Erlang sends {:EXIT, task_pid, _} when process dies
+  defp stop_cyclic_task(nil), do: :ok
+
+  defp stop_cyclic_task(task_pid) do
+    # Kill the task (must use :kill due to beam.yield)
+    Process.exit(task_pid, :kill)
+
+    # Wait for BOTH termination messages (order is non-deterministic)
+    results =
+      for _ <- 1..2 do
+        receive do
+          {:EXIT, ^task_pid, _exit_reason} -> :exit_received
+          :cyclic_task_died -> :died_received
+        after
+          3000 ->
+            Logger.error("Timeout waiting for cyclic task termination message")
+            :timeout
+        end
+      end
+
+    if Enum.member?(results, :timeout) do
+      Logger.warning("Cyclic task termination messages incomplete: #{inspect(results)}")
+    end
+
+    :ok
   end
 
   # Common catch-all handler for unexpected events
