@@ -72,7 +72,7 @@ defmodule EtherCAT.Config do
   defp build_master(entity) do
     %EtherCAT.Config.MasterConfig{
       index: entity.index || 0,
-      update_interval: entity.update_interval || 10_000,
+      cycle_interval: entity.cycle_interval,
       nif_yield_interval: entity.nif_yield_interval || 100_000
     }
   end
@@ -143,17 +143,16 @@ defmodule EtherCAT.Config do
               default: 0,
               doc: "EtherCAT master index (default: 0)"
             ],
-            update_interval: [
+            cycle_interval: [
               type: :pos_integer,
-              required: false,
-              default: 10_000,
-              doc: "Master update interval in microseconds (default: 10_000)"
+              required: true,
+              doc: "PDO cyclic update interval in microseconds (e.g., 1_000 for 1ms)"
             ],
             nif_yield_interval: [
               type: :pos_integer,
               required: false,
               default: 100_000,
-              doc: "NIF yielding interval in microseconds (default: 100_000)"
+              doc: "NIF scheduler yielding interval in microseconds (default: 100_000)"
             ]
           ]
         },

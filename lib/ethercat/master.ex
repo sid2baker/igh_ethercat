@@ -10,11 +10,15 @@ defmodule EtherCAT.Master do
 
   defstruct [
     :master_ref,
+    :master_index,
     :slaves,
     :domains,
     :task_pid,
-    :update_interval,
+    :scan_interval,
+    :scan_timer,
+    :cycle_interval,
     :nif_yield_interval,
+    :systems,
     :pending_caller,
     slaves_operational?: false
   ]
@@ -23,14 +27,21 @@ defmodule EtherCAT.Master do
 
   @type t :: %__MODULE__{
           master_ref: reference(),
+          master_index: non_neg_integer(),
           slaves: [Slave.t()],
           # Map of pid => %{name: atom, ref: reference}
           domains: %{pid() => domain_info()},
-          task_pid: pid(),
-          # in us
-          update_interval: integer(),
-          # NIF yielding interval in us (default 100_000 = 100ms)
-          nif_yield_interval: integer(),
+          task_pid: pid() | nil,
+          # Hardware change detection interval in microseconds
+          scan_interval: integer(),
+          # Timer reference for hardware scanning
+          scan_timer: reference() | nil,
+          # PDO cyclic update interval (set when going operational)
+          cycle_interval: integer() | nil,
+          # NIF yielding interval (set when going operational)
+          nif_yield_interval: integer() | nil,
+          # Active System PIDs
+          systems: [pid()],
           # Caller waiting for start_cyclic_mode to complete (slaves reach OP)
           pending_caller: :gen_statem.from() | nil,
           # True when at least one slave has reached OP state (PDO communication ready)
@@ -60,21 +71,19 @@ defmodule EtherCAT.Master do
 
   ## Options
   - `:master_index` - EtherCAT master index (default: 0)
-  - `:update_interval` - Master update interval in microseconds (default: 10_000)
-  - `:nif_yield_interval` - NIF yielding interval in microseconds (default: 100_000 = 100ms)
+  - `:scan_interval` - Hardware change detection interval in microseconds (default: 100_000 = 100ms)
   - `:name` - Registered process name (default: `EtherCAT.Master`)
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
     master_index = Keyword.get(opts, :master_index, 0)
-    update_interval = Keyword.get(opts, :update_interval, 10_000)
-    nif_yield_interval = Keyword.get(opts, :nif_yield_interval, 100_000)
+    scan_interval = Keyword.get(opts, :scan_interval, 100_000)
     name = Keyword.get(opts, :name, __MODULE__)
 
     :gen_statem.start_link(
       {:local, name},
       __MODULE__,
-      {master_index, update_interval, nif_yield_interval},
+      {master_index, scan_interval},
       []
     )
   end
@@ -165,16 +174,43 @@ defmodule EtherCAT.Master do
   - Transitioned to operational state
 
   The system is ready for I/O operations when this function returns.
+
+  ## Parameters
+  - `master` - Master process
+  - `cycle_interval` - PDO cyclic update interval in microseconds (from configuration)
+  - `nif_yield_interval` - NIF scheduler yielding interval in microseconds (from configuration)
+  - `timeout` - Call timeout (default: 30_000ms)
   """
-  @spec start_cyclic_mode(GenServer.server(), timeout()) :: :ok | {:error, term()}
-  def start_cyclic_mode(master, timeout \\ 30_000) do
-    :gen_statem.call(master, :start_cyclic_mode, timeout)
+  @spec start_cyclic_mode(GenServer.server(), pos_integer(), pos_integer(), timeout()) ::
+          :ok | {:error, term()}
+  def start_cyclic_mode(master, cycle_interval, nif_yield_interval, timeout \\ 30_000) do
+    :gen_statem.call(master, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, timeout)
   end
 
   @doc "Gets master NIF reference for internal use."
   @spec get_ref(GenServer.server(), timeout()) :: reference()
   def get_ref(master, timeout \\ 5000) do
     :gen_statem.call(master, :get_ref, timeout)
+  end
+
+  @doc """
+  Register a System PID with the Master.
+
+  Called by System when created via configure_hardware.
+  """
+  @spec register_system(GenServer.server(), pid(), timeout()) :: :ok
+  def register_system(master, system_pid, timeout \\ 5000) do
+    :gen_statem.call(master, {:register_system, system_pid}, timeout)
+  end
+
+  @doc """
+  Unregister a System PID from the Master.
+
+  Called by System when stopped via stop_system.
+  """
+  @spec unregister_system(GenServer.server(), pid(), timeout()) :: :ok
+  def unregister_system(master, system_pid, timeout \\ 5000) do
+    :gen_statem.call(master, {:unregister_system, system_pid}, timeout)
   end
 
   # Internal API - called by Slave and Domain modules
@@ -211,7 +247,7 @@ defmodule EtherCAT.Master do
   def callback_mode(), do: [:state_functions, :state_enter]
 
   @impl true
-  def init({master_index, update_interval, nif_yield_interval}) do
+  def init({master_index, scan_interval}) do
     # Trap exits to ensure graceful cleanup
     Process.flag(:trap_exit, true)
 
@@ -220,8 +256,7 @@ defmodule EtherCAT.Master do
         # Register this master in the Registry for process discovery
         case Registry.register(EtherCAT.Registry, {:master, master_index}, %{
                master_index: master_index,
-               update_interval: update_interval,
-               nif_yield_interval: nif_yield_interval
+               scan_interval: scan_interval
              }) do
           {:ok, _} ->
             :ok
@@ -232,24 +267,26 @@ defmodule EtherCAT.Master do
             )
         end
 
-        case do_create_domain(ref, :default_domain, 1) do
-          {:ok, domain_ref, domain_pid} ->
-            data = %__MODULE__{
-              master_ref: ref,
-              domains: %{domain_pid => %{name: :default_domain, ref: domain_ref}},
-              slaves: [],
-              task_pid: nil,
-              update_interval: update_interval,
-              nif_yield_interval: nif_yield_interval
-            }
+        # DO NOT create default domain - domains created during configure_hardware
+        data = %__MODULE__{
+          master_ref: ref,
+          master_index: master_index,
+          domains: %{},
+          slaves: [],
+          task_pid: nil,
+          scan_interval: scan_interval,
+          scan_timer: nil,
+          cycle_interval: nil,
+          nif_yield_interval: nil,
+          systems: [],
+          pending_caller: nil,
+          slaves_operational?: false
+        }
 
-            Logger.info("EtherCAT Master #{master_index} initialized successfully")
-            {:ok, :offline, data}
+        Logger.info("EtherCAT Master #{master_index} initialized (infrastructure only)")
 
-          {:error, reason} ->
-            Logger.error("Failed to create default domain: #{inspect(reason)}")
-            {:stop, {:failed_to_create_domain, reason}}
-        end
+        # Auto-connect on startup
+        {:ok, :offline, data, [{:next_event, :internal, :auto_connect}]}
 
       :error ->
         Logger.error("Failed to create EtherCAT master #{master_index}")
@@ -299,6 +336,30 @@ defmodule EtherCAT.Master do
     Logger.debug("Master entered :offline state")
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :offline})
     :keep_state_and_data
+  end
+
+  def offline(:internal, :auto_connect, data) do
+    Logger.info("Auto-connecting to EtherCAT master #{data.master_index}")
+
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} when master_state.link_up == 1 ->
+        Logger.info("Master connected, transitioning to :stale")
+        {:next_state, :stale, data}
+
+      {:ok, _master_state} ->
+        # Link down, retry after scan_interval
+        Logger.warning("Master link down, will retry")
+        {:keep_state_and_data, [{:state_timeout, data.scan_interval, :auto_connect}]}
+
+      {:error, reason} ->
+        Logger.error("Failed to connect: #{inspect(reason)}")
+        {:keep_state_and_data, [{:state_timeout, data.scan_interval, :auto_connect}]}
+    end
+  end
+
+  def offline(:state_timeout, :auto_connect, data) do
+    # Retry connection
+    offline(:internal, :auto_connect, data)
   end
 
   def offline({:call, from}, :connect, data) do
@@ -363,7 +424,7 @@ defmodule EtherCAT.Master do
 
   def stale(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
-    actions = [{:state_timeout, data.update_interval, :update_master_state}]
+    actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
 
@@ -405,13 +466,13 @@ defmodule EtherCAT.Master do
              master_state.slaves_responding > 0 do
           {:next_state, :synced, data}
         else
-          actions = [{:state_timeout, data.update_interval, :update_master_state}]
+          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
           {:keep_state_and_data, actions}
         end
 
       {:error, reason} ->
         Logger.warning("Failed to get master state in stale: #{inspect(reason)}")
-        actions = [{:state_timeout, data.update_interval, :update_master_state}]
+        actions = [{:state_timeout, data.scan_interval, :update_master_state}]
         {:keep_state_and_data, actions}
     end
   end
@@ -425,13 +486,13 @@ defmodule EtherCAT.Master do
 
   def synced(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :synced})
-    actions = [{:state_timeout, data.update_interval, :update_master_state}]
+    actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
 
-  def synced({:call, from}, :start_cyclic_mode, data) do
+  def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
     Logger.info(
-      "Starting cyclic mode - locking #{map_size(data.domains)} domains and #{length(data.slaves)} slaves"
+      "Starting cyclic mode - cycle: #{cycle_interval}µs, yield: #{nif_yield_interval}µs - locking #{map_size(data.domains)} domains and #{length(data.slaves)} slaves"
     )
 
     # Retrieve pending PDO entries from all domains, register them, and lock the domains
@@ -494,7 +555,15 @@ defmodule EtherCAT.Master do
 
         Logger.info("Cyclic mode activation complete, transitioning to :operational")
         # DON'T reply yet - store caller and reply when slaves reach OP state
-        {:next_state, :operational, %{data | pending_caller: from}, []}
+        # Store operational parameters in state
+        updated_data = %{
+          data
+          | pending_caller: from,
+            cycle_interval: cycle_interval,
+            nif_yield_interval: nif_yield_interval
+        }
+
+        {:next_state, :operational, updated_data, []}
 
       {:error, _reason} = error ->
         Logger.error("Failed to start cyclic mode: #{inspect(error)}")
@@ -527,13 +596,24 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
+  def synced({:call, from}, {:register_system, system_pid}, data) do
+    Process.monitor(system_pid)
+    new_data = %{data | systems: [system_pid | data.systems]}
+    {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
+  def synced({:call, from}, {:unregister_system, system_pid}, data) do
+    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+    {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
   def synced(:state_timeout, :update_master_state, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
         Logger.debug("Master state (synced/ready): #{inspect(master_state)}")
 
         if master_state.slaves_responding == length(data.slaves) do
-          actions = [{:state_timeout, data.update_interval, :update_master_state}]
+          actions = [{:state_timeout, data.scan_interval, :update_master_state}]
           {:keep_state_and_data, actions}
         else
           # Slave count mismatch - network topology changed
@@ -554,9 +634,15 @@ defmodule EtherCAT.Master do
 
       {:error, reason} ->
         Logger.warning("Failed to get master state in synced: #{inspect(reason)}")
-        actions = [{:state_timeout, data.update_interval, :update_master_state}]
+        actions = [{:state_timeout, data.scan_interval, :update_master_state}]
         {:keep_state_and_data, actions}
     end
+  end
+
+  def synced(:info, {:DOWN, _ref, :process, system_pid, _reason}, data) do
+    Logger.warning("System #{inspect(system_pid)} died, unregistering")
+    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+    {:keep_state, new_data}
   end
 
   def synced(event_type, event_content, data) do
@@ -589,7 +675,7 @@ defmodule EtherCAT.Master do
               parent_pid,
               data.master_ref,
               domain_resources,
-              data.update_interval,
+              data.cycle_interval,
               data.nif_yield_interval
             )
           end)
@@ -701,6 +787,17 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
+  def operational({:call, from}, {:register_system, system_pid}, data) do
+    Process.monitor(system_pid)
+    new_data = %{data | systems: [system_pid | data.systems]}
+    {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
+  def operational({:call, from}, {:unregister_system, system_pid}, data) do
+    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+    {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
   def operational({:call, from}, :start_cyclic_mode, _data) do
     {:keep_state_and_data,
      [{:reply, from, {:error, {:already_operational, "Cyclic mode is already running"}}}]}
@@ -774,6 +871,12 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, {:domain_unsubscribe, domain, pid, name}, _data) do
     result = Domain.unsubscribe(domain, pid, name)
     {:keep_state_and_data, [{:reply, from, result}]}
+  end
+
+  def operational(:info, {:DOWN, _ref, :process, system_pid, _reason}, data) do
+    Logger.warning("System #{inspect(system_pid)} died, unregistering")
+    new_data = %{data | systems: List.delete(data.systems, system_pid)}
+    {:keep_state, new_data}
   end
 
   def operational(event_type, event_content, data) do
