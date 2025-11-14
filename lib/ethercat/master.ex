@@ -574,6 +574,11 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
+  def synced({:call, from}, :sync_slaves, data) do
+    # Already synced, just return the existing slaves
+    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
+  end
+
   def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
     Logger.info(
       "Starting cyclic mode - cycle: #{cycle_interval}µs, yield: #{nif_yield_interval}µs - locking #{map_size(data.domains)} domains and #{length(data.slaves)} slaves"
@@ -919,6 +924,11 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, :get_current_system, data) do
     {:keep_state_and_data, [{:reply, from, {:ok, data.current_system}}]}
+  end
+
+  def operational({:call, from}, :sync_slaves, data) do
+    # Already operational, return the existing slaves
+    {:keep_state_and_data, [{:reply, from, {:ok, data.slaves}}]}
   end
 
   def operational({:call, from}, :start_cyclic_mode, _data) do

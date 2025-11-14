@@ -13,21 +13,13 @@ defmodule Hardware.SlaveDetectionTest do
   - Position 3: EL3202 (2-channel RTD input)
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware
-  """
 
-  setup_all do
-    # Skip tests if ETHERCAT_HARDWARE environment variable is not set
-    unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      ExUnit.configure(exclude: [:hardware])
-      :ok
-    else
-      :ok
-    end
-  end
+  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  """
 
   describe "System Initialization" do
     test "successfully configures EtherCAT system" do
-      assert {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      assert {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
       assert %EtherCAT.System{} = system
       assert is_pid(system.master)
 
@@ -36,7 +28,7 @@ defmodule Hardware.SlaveDetectionTest do
     end
 
     test "system transitions to operational state" do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
 
       # Give the system time to reach operational state
       Process.sleep(1000)
@@ -50,7 +42,7 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Detection" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -81,7 +73,7 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Communication" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end

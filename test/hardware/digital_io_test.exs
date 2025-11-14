@@ -19,20 +19,13 @@ defmodule Hardware.DigitalIOTest do
   4. Timing characteristics are acceptable
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
-  """
 
-  setup_all do
-    unless System.get_env("ETHERCAT_HARDWARE") == "true" do
-      ExUnit.configure(exclude: [:hardware])
-      :ok
-    else
-      :ok
-    end
-  end
+  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  """
 
   describe "Single Channel Loopback" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
       on_exit(fn -> EtherCAT.stop_system(system) end)
       {:ok, system: system}
     end
@@ -81,7 +74,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "All Channels Loopback" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
 
       # Clear all outputs before each test
       for i <- 1..16 do
@@ -177,7 +170,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Pattern Testing" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
 
       # Clear all outputs
       for i <- 1..16 do
@@ -279,7 +272,7 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Timing Tests" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, HardwareConfig)
+      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
 
       on_exit(fn ->
         for i <- 1..16 do
