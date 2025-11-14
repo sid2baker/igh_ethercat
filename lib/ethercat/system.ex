@@ -160,7 +160,7 @@ defmodule EtherCAT.System do
     end)
   end
 
-  defp configure_slaves(_master, slaves, slave_configs) do
+  defp configure_slaves(master, slaves, slave_configs) do
     slave_configs
     |> Enum.reduce_while({:ok, %{}}, fn slave_config, {:ok, acc} ->
       case Enum.at(slaves, slave_config.position) do

@@ -28,7 +28,7 @@ defmodule HardwareConfig do
           position: 1,
           name: :digital_inputs,
           driver: EtherCAT.Drivers.EL1809,
-          expected: %{vendor: 0x00000002, product: 0x07093052},
+          expected: %{vendor: 0x00000002, product: 0x07113052},
           config: %{},
           entries:
             Enum.map(1..16, fn i ->
@@ -61,7 +61,7 @@ defmodule HardwareConfig do
           position: 3,
           name: :rtd_inputs,
           driver: EtherCAT.Drivers.EL3202,
-          expected: %{vendor: 0x00000002, product: 0x0C5A3052},
+          expected: %{vendor: 0x00000002, product: 0x0C823052},
           config: %{
             # Configure both channels to OHMS mode (8) to read resistor values
             ch1_rtd_element: 8,
