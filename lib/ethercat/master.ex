@@ -93,49 +93,14 @@ defmodule EtherCAT.Master do
   """
   @spec stop(GenServer.server(), timeout()) :: :ok
   def stop(master, timeout \\ 5000) do
-    try do
-      case :gen_statem.stop(master, :normal, timeout) do
-        :ok -> :ok
-        # Process already dead or doesn't exist - that's fine
-        {:error, :noproc} -> :ok
-        {:error, {:noproc, _}} -> :ok
-        # Let other errors propagate
-        {:error, _} = error -> error
-      end
-    catch
-      # Catch all exit signals related to missing/dead processes
-      # Common patterns from :proc_lib.stop/3 when process doesn't exist:
-      # - {:noproc, _}
-      # - {reason, {gen, :call, _}} where the call failed
-      :exit, {:noproc, _} ->
-        :ok
-
-      :exit, :noproc ->
-        :ok
-
-      :exit, {reason, {_module, _function, _args}} when reason == :noproc ->
-        :ok
-
-      # Catch any other exit that might be related to process not existing
-      # Re-raise if it's not a "no process" error
-      :exit, reason ->
-        reason_str = inspect(reason)
-
-        if String.contains?(reason_str, "no process") or
-             String.contains?(reason_str, "noproc") do
-          :ok
-        else
-          exit(reason)
-        end
-    rescue
-      # Catch ArgumentError from dead processes
-      e in ArgumentError ->
-        if Exception.message(e) =~ "no process" do
-          :ok
-        else
-          reraise e, __STACKTRACE__
-        end
-    end
+    :gen_statem.stop(master, :normal, timeout)
+  catch
+    # Handle all variations of "process doesn't exist" exits
+    # These come from :proc_lib.stop/3 when the process is already dead:
+    # - {:noproc, _} - direct noproc error
+    # - {reason, {mod, fun, args}} - call failed because process doesn't exist
+    :exit, {:noproc, _} -> :ok
+    :exit, {reason, _details} when reason == :noproc -> :ok
   end
 
   @doc "Connects to EtherCAT network, transitions to `:stale`."
@@ -268,6 +233,8 @@ defmodule EtherCAT.Master do
   @impl true
   def terminate(reason, _state, %{task_pid: task_pid} = _data) do
     Logger.info("EtherCAT Master terminating: #{inspect(reason)}")
+    Logger.debug("Terminate called from: #{inspect(Process.info(self(), :current_stacktrace))}")
+
     # All linked processes (slaves, domains, cyclic task) will automatically
     # receive exit signals and terminate when this process terminates
     if task_pid do
@@ -790,7 +757,17 @@ defmodule EtherCAT.Master do
 
   # Common catch-all handler for unexpected events
   defp handle_unexpected(event_type, event_content, state, _data) do
-    Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
+    # Special logging for EXIT messages to debug test cleanup issue
+    case {event_type, event_content} do
+      {:info, {:EXIT, pid, reason}} ->
+        Logger.warning(
+          "Received EXIT in state #{state} from #{inspect(pid)} with reason: #{inspect(reason)}"
+        )
+
+      _ ->
+        Logger.warning("Unexpected event in state #{state}: #{inspect({event_type, event_content})}")
+    end
+
     {:keep_state_and_data, []}
   end
 
