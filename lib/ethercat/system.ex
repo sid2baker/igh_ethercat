@@ -156,6 +156,11 @@ defmodule EtherCAT.System do
 
   # Private implementation
 
+  # Returns the map key for a slave (name if provided, otherwise position-based key)
+  defp slave_key(slave_config) do
+    slave_config.name || :"s#{slave_config.position}"
+  end
+
   defp create_domains(master, domain_configs) do
     Enum.reduce_while(domain_configs, :ok, fn domain_config, :ok ->
       case Master.create_domain(master, domain_config.name, domain_config.interval) do
@@ -183,11 +188,22 @@ defmodule EtherCAT.System do
               Slave.set_name(slave_pid, slave_config.name)
             end
 
-            # Configure slave with driver config
-            case Slave.configure(slave_pid, slave_config.config) do
+            # Skip configuration for slaves with no driver and no entries (e.g., couplers)
+            result =
+              case slave_config do
+                %{driver: nil, entries: []} ->
+                  # Coupler or passive device - no configuration needed
+                  :ok
+
+                _ ->
+                  # Configure slave with driver config
+                  Slave.configure(slave_pid, slave_config.config)
+              end
+
+            case result do
               :ok ->
                 # Add to slave map (use name or position as key)
-                key = slave_config.name || :"s#{slave_config.position}"
+                key = slave_key(slave_config)
                 {:cont, {:ok, Map.put(acc, key, slave_pid)}}
 
               {:error, reason} ->
@@ -204,7 +220,7 @@ defmodule EtherCAT.System do
   defp register_entries(slave_map, slave_configs) do
     slave_configs
     |> Enum.reduce_while(:ok, fn slave_config, :ok ->
-      slave_pid = Map.fetch!(slave_map, slave_config.name || :"s#{slave_config.position}")
+      slave_pid = Map.fetch!(slave_map, slave_key(slave_config))
 
       # Register each entry
       result =
@@ -230,7 +246,7 @@ defmodule EtherCAT.System do
   defp build_entry_handles(slave_map, slave_configs) do
     slave_configs
     |> Enum.flat_map(fn slave_config ->
-      slave_name = slave_config.name || :"s#{slave_config.position}"
+      slave_name = slave_key(slave_config)
 
       Enum.map(slave_config.entries, fn entry_config ->
         key = {slave_name, entry_config.pdo_name, entry_config.entry_name}

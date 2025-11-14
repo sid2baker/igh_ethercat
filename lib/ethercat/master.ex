@@ -542,8 +542,28 @@ defmodule EtherCAT.Master do
 
   def stale(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
-    actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-    {:keep_state_and_data, actions}
+
+    # Initialize fingerprint immediately when entering :stale
+    # This allows sync_with_config to be called without waiting for first scan
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        current_fingerprint = master_state.slaves_responding
+        now = System.monotonic_time(:millisecond)
+
+        new_data = %{
+          data
+          | slave_fingerprint: current_fingerprint,
+            fingerprint_stable_since: now
+        }
+
+        actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+        {:keep_state, new_data, actions}
+
+      {:error, reason} ->
+        Logger.warning("Failed to initialize fingerprint in :stale: #{inspect(reason)}")
+        actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+        {:keep_state_and_data, actions}
+    end
   end
 
   def stale({:call, from}, :get_slaves, _data) do
@@ -551,12 +571,17 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:error, :not_synced_yet}}]}
   end
 
+  def stale({:call, from}, :get_current_system, _data) do
+    # No system can exist in :stale state (not yet configured)
+    {:keep_state_and_data, [{:reply, from, {:ok, nil}}]}
+  end
+
   def stale({:call, from}, {:sync_with_config, config}, data) do
     start_time = System.monotonic_time()
 
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
-         :ok <- validate_hardware_stable(data, master_state),
-         :ok <- validate_config_matches_hardware(config, master_state),
+         {:ok, updated_data} <- ensure_hardware_stable(data, master_state),
+         :ok <- validate_config_matches_hardware(data.master_ref, config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
@@ -570,7 +595,7 @@ defmodule EtherCAT.Master do
         "Synced #{length(slaves)} slaves with config in #{duration}µs, transitioning to :synced"
       )
 
-      {:next_state, :synced, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
+      {:next_state, :synced, %{updated_data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else
       {:error, reason} = error ->
         duration = System.monotonic_time() - start_time
@@ -655,8 +680,8 @@ defmodule EtherCAT.Master do
 
     # Now validate and sync with new config
     with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
-         :ok <- validate_hardware_stable(data, master_state),
-         :ok <- validate_config_matches_hardware(config, master_state),
+         {:ok, updated_data} <- ensure_hardware_stable(data, master_state),
+         :ok <- validate_config_matches_hardware(data.master_ref, config, master_state),
          {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
       duration = System.monotonic_time() - start_time
 
@@ -670,7 +695,7 @@ defmodule EtherCAT.Master do
         "Reconfigured with #{length(slaves)} slaves in #{duration}µs"
       )
 
-      {:keep_state, %{data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
+      {:keep_state, %{updated_data | slaves: slaves}, [{:reply, from, {:ok, slaves}}]}
     else
       {:error, reason} = error ->
         duration = System.monotonic_time() - start_time
@@ -1205,30 +1230,38 @@ defmodule EtherCAT.Master do
   end
 
   # Validate hardware fingerprint is stable
-  defp validate_hardware_stable(data, master_state) do
+  # Ensures hardware is stable, updating fingerprint tracking if it has changed
+  defp ensure_hardware_stable(data, master_state) do
     current_fingerprint = master_state.slaves_responding
     now = System.monotonic_time(:millisecond)
 
-    # Check if fingerprint matches what we've been tracking
-    if data.slave_fingerprint != current_fingerprint do
-      {:error, {:fingerprint_mismatch, "Hardware changed during sync attempt"}}
-    else
-      # Check if stable for required duration
-      stable_duration = now - (data.fingerprint_stable_since || now)
+    # Update tracking if fingerprint changed
+    updated_data =
+      if data.slave_fingerprint != current_fingerprint do
+        Logger.debug(
+          "Hardware fingerprint changed during sync: #{data.slave_fingerprint} -> #{current_fingerprint}, resetting stability timer"
+        )
 
-      if stable_duration >= data.fingerprint_change_threshold do
-        :ok
+        %{data | slave_fingerprint: current_fingerprint, fingerprint_stable_since: now}
       else
-        {:error,
-         {:hardware_not_stable,
-          "Hardware must be stable for #{data.fingerprint_change_threshold}ms, " <>
-            "currently stable for #{stable_duration}ms"}}
+        data
       end
+
+    # Check if stable for required duration
+    stable_duration = now - (updated_data.fingerprint_stable_since || now)
+
+    if stable_duration >= data.fingerprint_change_threshold do
+      {:ok, updated_data}
+    else
+      {:error,
+       {:hardware_not_stable,
+        "Hardware must be stable for #{data.fingerprint_change_threshold}ms, " <>
+          "currently stable for #{stable_duration}ms"}}
     end
   end
 
   # Validate config matches detected hardware
-  defp validate_config_matches_hardware(config, %{master_ref: master_ref} = master_state) do
+  defp validate_config_matches_hardware(master_ref, config, master_state) do
     detected_count = master_state.slaves_responding
     config_count = length(config.slaves)
 
