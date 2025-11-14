@@ -5,11 +5,10 @@ defmodule EtherCAT.Domain do
   use GenServer
   require Logger
 
-  defstruct [:master, :resource, :interval, :entries, :subscribers, locked?: false]
+  defstruct [:master, :interval, :entries, :subscribers, locked?: false]
 
   @type t :: %__MODULE__{
           master: pid(),
-          resource: reference(),
           interval: integer(),
           entries: map(),
           subscribers: %{name() => MapSet.t(pid())},
@@ -48,7 +47,6 @@ defmodule EtherCAT.Domain do
   - `opts` - Keyword list with:
     - `:name` - Registered name for the domain (atom)
     - `:master` - Master process PID
-    - `:resource` - Domain reference from the NIF
     - `:interval` - Update interval in microseconds
 
   ## Returns
@@ -60,7 +58,6 @@ defmodule EtherCAT.Domain do
       Domain.start_link(
         name: :default_domain,
         master: master_pid,
-        resource: domain_ref,
         interval: 1
       )
   """
@@ -68,10 +65,9 @@ defmodule EtherCAT.Domain do
   def start_link(opts) when is_list(opts) do
     name = Keyword.fetch!(opts, :name)
     master = Keyword.fetch!(opts, :master)
-    resource = Keyword.fetch!(opts, :resource)
     interval = Keyword.fetch!(opts, :interval)
 
-    GenServer.start_link(__MODULE__, {name, master, resource, interval})
+    GenServer.start_link(__MODULE__, {name, master, interval})
   end
 
   @doc """
@@ -94,15 +90,6 @@ defmodule EtherCAT.Domain do
     GenServer.call(domain, {:store_and_lock_entries, entries})
   end
 
-  @doc """
-  Returns the domain's NIF reference.
-
-  This reference is used by the Master to access domain operations in the NIF layer.
-  """
-  @spec get_ref(GenServer.server()) :: reference()
-  def get_ref(domain) do
-    GenServer.call(domain, :get_ref)
-  end
 
   @doc """
   Returns the domain's update interval in microseconds.
@@ -260,7 +247,7 @@ defmodule EtherCAT.Domain do
   # GenServer callbacks
 
   @impl true
-  def init({name, master, resource, interval}) do
+  def init({name, master, interval}) do
     # Register this domain in the Registry for process discovery
     # Use a unique key combining master PID and domain name
     Registry.register(EtherCAT.Registry, {:domain, master, name}, %{
@@ -271,17 +258,11 @@ defmodule EtherCAT.Domain do
     {:ok,
      %__MODULE__{
        master: master,
-       resource: resource,
        interval: interval,
        entries: %{},
        subscribers: %{},
        locked?: false
      }}
-  end
-
-  @impl true
-  def handle_call(:get_ref, _from, state) do
-    {:reply, state.resource, state}
   end
 
   @impl true
@@ -296,13 +277,15 @@ defmodule EtherCAT.Domain do
 
   @impl true
   def handle_call({:set_pdo_value, unique_name, value}, _from, state) do
-    result = EtherCAT.Master.domain_set_value(state.master, state.resource, unique_name, value)
+    # Domain identifies itself by PID; Master will look up the NIF reference
+    result = EtherCAT.Master.domain_set_value(state.master, self(), unique_name, value)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:get_pdo_value, unique_name}, _from, state) do
-    result = EtherCAT.Master.domain_get_value(state.master, state.resource, unique_name)
+    # Domain identifies itself by PID; Master will look up the NIF reference
+    result = EtherCAT.Master.domain_get_value(state.master, self(), unique_name)
     {:reply, result, state}
   end
 

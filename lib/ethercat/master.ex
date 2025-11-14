@@ -138,13 +138,13 @@ defmodule EtherCAT.Master do
   end
 
   @doc false
-  def domain_set_value(master, domain_ref, name, value, timeout \\ 5000) do
-    :gen_statem.call(master, {:domain_set_value, domain_ref, name, value}, timeout)
+  def domain_set_value(master, domain_pid, name, value, timeout \\ 5000) do
+    :gen_statem.call(master, {:domain_set_value, domain_pid, name, value}, timeout)
   end
 
   @doc false
-  def domain_get_value(master, domain_ref, name, timeout \\ 5000) do
-    :gen_statem.call(master, {:domain_get_value, domain_ref, name}, timeout)
+  def domain_get_value(master, domain_pid, name, timeout \\ 5000) do
+    :gen_statem.call(master, {:domain_get_value, domain_pid, name}, timeout)
   end
 
   @doc false
@@ -591,13 +591,20 @@ defmodule EtherCAT.Master do
   end
 
   # Gateway for domain operations in operational state
-  def operational({:call, from}, {:domain_set_value, domain_ref, name, value}, _data)
+  # Domain identifies itself by PID; we look up its NIF reference
+  def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
       when is_binary(value) do
-    result = Nif.set_value(domain_ref, name, value)
-    {:keep_state_and_data, [{:reply, from, result}]}
+    case Map.get(data.domains, domain_pid) do
+      nil ->
+        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+
+      domain_info ->
+        result = Nif.set_value(domain_info.ref, name, value)
+        {:keep_state_and_data, [{:reply, from, result}]}
+    end
   end
 
-  def operational({:call, from}, {:domain_set_value, _domain_ref, name, value}, _data) do
+  def operational({:call, from}, {:domain_set_value, _domain_pid, name, value}, _data) do
     {:keep_state_and_data,
      [
        {:reply, from,
@@ -605,14 +612,20 @@ defmodule EtherCAT.Master do
      ]}
   end
 
-  def operational({:call, from}, {:domain_get_value, domain_ref, name}, _data) do
-    result =
-      case Nif.get_value(domain_ref, name) do
-        {:error, _} = error -> error
-        value -> {:ok, value}
-      end
+  def operational({:call, from}, {:domain_get_value, domain_pid, name}, data) do
+    case Map.get(data.domains, domain_pid) do
+      nil ->
+        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-    {:keep_state_and_data, [{:reply, from, result}]}
+      domain_info ->
+        result =
+          case Nif.get_value(domain_info.ref, name) do
+            {:error, _} = error -> error
+            value -> {:ok, value}
+          end
+
+        {:keep_state_and_data, [{:reply, from, result}]}
+    end
   end
 
   def operational({:call, from}, {:domain_subscribe, domain, pid, name}, _data) do
@@ -638,19 +651,21 @@ defmodule EtherCAT.Master do
   # Helper to create domain with proper two-step initialization (avoids race condition)
   #
   # 1. Create domain resource via NIF (allocates native EtherCAT domain + accessor)
-  # 2. Start Domain process with resource (creates Elixir GenServer)
+  # 2. Start Domain process (creates Elixir GenServer)
   # 3. Set PID in resource (NIF now knows where to send messages)
   #
   # Order is critical: if we set PID before the process starts, the NIF's cyclic
   # task might try to send messages to a non-existent process during race window.
   # The `with` statement ensures atomicity and proper cleanup on any error.
+  #
+  # Note: Domain no longer stores the NIF reference - Master maintains the mapping
+  # of domain PID to reference in its domains map for single source of truth.
   defp do_create_domain(master_ref, name, interval) do
     with {:ok, domain_ref} <- Nif.master_create_domain(master_ref, self(), interval),
          {:ok, domain_pid} <-
            Domain.start_link(
              name: name,
              master: self(),
-             resource: domain_ref,
              interval: interval
            ),
          :ok <- Nif.domain_set_pid(domain_ref, domain_pid) do
