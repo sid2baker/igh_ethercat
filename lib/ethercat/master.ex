@@ -95,12 +95,15 @@ defmodule EtherCAT.Master do
   def stop(master, timeout \\ 5000) do
     :gen_statem.stop(master, :normal, timeout)
   catch
-    # Handle all variations of "process doesn't exist" exits
-    # These come from :proc_lib.stop/3 when the process is already dead:
-    # - {:noproc, _} - direct noproc error
-    # - {reason, {mod, fun, args}} - call failed because process doesn't exist
+    # Handle all variations of "process doesn't exist or is already stopping" exits:
+    # - {:noproc, _} - process is already dead
+    # - {reason, _} when reason == :noproc - process doesn't exist (alternative format)
+    # - :shutdown - process is currently shutting down, can't stop it again
+    # - :normal - process already stopped normally
     :exit, {:noproc, _} -> :ok
     :exit, {reason, _details} when reason == :noproc -> :ok
+    :exit, :shutdown -> :ok
+    :exit, :normal -> :ok
   end
 
   @doc "Connects to EtherCAT network, transitions to `:stale`."
