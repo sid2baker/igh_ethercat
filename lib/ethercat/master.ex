@@ -8,12 +8,13 @@ defmodule EtherCAT.Master do
 
   alias EtherCAT.{Nif, Slave, Domain}
 
-  defstruct [:master_ref, :slaves, :domains, :task_pid, :update_interval, :nif_yield_interval]
+  defstruct [:master_ref, :slaves, :domains, :domain_refs, :task_pid, :update_interval, :nif_yield_interval]
 
   @type t :: %__MODULE__{
           master_ref: reference(),
           slaves: [Slave.t()],
           domains: [Domain.t()],
+          domain_refs: [reference()],
           task_pid: pid(),
           # in us
           update_interval: integer(),
@@ -185,6 +186,7 @@ defmodule EtherCAT.Master do
             data = %__MODULE__{
               master_ref: ref,
               domains: [domain_pid],
+              domain_refs: [],
               slaves: [],
               task_pid: nil,
               update_interval: update_interval,
@@ -383,8 +385,9 @@ defmodule EtherCAT.Master do
     )
 
     # Retrieve pending PDO entries from all domains, register them, and lock the domains
+    # Also collect domain refs to avoid synchronous calls in the enter callback
     result =
-      Enum.reduce_while(data.domains, :ok, fn domain, :ok ->
+      Enum.reduce_while(data.domains, {:ok, []}, fn domain, {:ok, domain_refs_acc} ->
         pending_entries = Domain.get_pdo_entries(domain)
         domain_ref = Domain.get_ref(domain)
 
@@ -425,13 +428,13 @@ defmodule EtherCAT.Master do
         Logger.debug("Locking domain with #{map_size(registered_entries)} entries")
 
         case Domain.store_and_lock_entries(domain, registered_entries) do
-          :ok -> {:cont, :ok}
+          :ok -> {:cont, {:ok, [domain_ref | domain_refs_acc]}}
           {:error, reason} -> {:halt, {:error, {:domain_lock_failed, reason}}}
         end
       end)
 
     case result do
-      :ok ->
+      {:ok, domain_refs} ->
         Logger.info("All domains locked, now locking #{length(data.slaves)} slaves")
 
         # Lock all slaves to prevent further configuration changes
@@ -439,8 +442,12 @@ defmodule EtherCAT.Master do
           Slave.lock(slave)
         end)
 
+        # Store domain refs for use in operational state
+        # Reverse the list since we accumulated in reverse order
+        updated_data = %{data | domain_refs: Enum.reverse(domain_refs)}
+
         Logger.info("Cyclic mode activation complete, transitioning to :operational")
-        {:next_state, :operational, data, [{:reply, from, :ok}]}
+        {:next_state, :operational, updated_data, [{:reply, from, :ok}]}
 
       {:error, _reason} = error ->
         Logger.error("Failed to start cyclic mode: #{inspect(error)}")
@@ -522,10 +529,9 @@ defmodule EtherCAT.Master do
       :ok ->
         parent_pid = self()
 
-        domain_resources =
-          Enum.map(data.domains, fn domain ->
-            Domain.get_ref(domain)
-          end)
+        # Use pre-collected domain refs instead of making synchronous calls
+        # This prevents blocking the state transition and potential deadlocks
+        domain_resources = data.domain_refs
 
         task_pid =
           spawn_link(fn ->
