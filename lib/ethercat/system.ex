@@ -183,8 +183,17 @@ defmodule EtherCAT.System do
               Slave.set_name(slave_pid, slave_config.name)
             end
 
-            # Configure slave with driver config
-            case Slave.configure(slave_pid, slave_config.config) do
+            # Skip configuration for slaves with no driver and no entries (e.g., couplers)
+            result =
+              if slave_config.driver == nil && slave_config.entries == [] do
+                # Coupler or passive device - no configuration needed
+                :ok
+              else
+                # Configure slave with driver config
+                Slave.configure(slave_pid, slave_config.config)
+              end
+
+            case result do
               :ok ->
                 # Add to slave map (use name or position as key)
                 key = slave_config.name || :"s#{slave_config.position}"
