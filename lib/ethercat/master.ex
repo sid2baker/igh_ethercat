@@ -103,10 +103,20 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:create_domain, name, interval}, timeout)
   end
 
-  @doc "Activates cyclic mode, transitions to `:operational`. Configuration locked."
-  @spec start_cyclic_mode(GenServer.server()) :: :ok
-  def start_cyclic_mode(master) do
-    :gen_statem.cast(master, :start_cyclic_mode)
+  @doc """
+  Activates cyclic mode, transitions to `:operational`. Configuration locked.
+
+  This is a synchronous operation that blocks until the master has:
+  - Registered all PDO entries with the NIF
+  - Locked all domains
+  - Locked all slaves
+  - Transitioned to operational state
+
+  The system is ready for I/O operations when this function returns.
+  """
+  @spec start_cyclic_mode(GenServer.server(), timeout()) :: :ok | {:error, term()}
+  def start_cyclic_mode(master, timeout \\ 30_000) do
+    :gen_statem.call(master, :start_cyclic_mode, timeout)
   end
 
   @doc "Gets master NIF reference for internal use."
@@ -367,55 +377,75 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, actions}
   end
 
-  def synced(:cast, :start_cyclic_mode, data) do
+  def synced({:call, from}, :start_cyclic_mode, data) do
+    Logger.info(
+      "Starting cyclic mode - locking #{length(data.domains)} domains and #{length(data.slaves)} slaves"
+    )
+
     # Retrieve pending PDO entries from all domains, register them, and lock the domains
-    Enum.each(data.domains, fn domain ->
-      pending_entries = Domain.get_pdo_entries(domain)
-      domain_ref = Domain.get_ref(domain)
+    result =
+      Enum.reduce_while(data.domains, :ok, fn domain, :ok ->
+        pending_entries = Domain.get_pdo_entries(domain)
+        domain_ref = Domain.get_ref(domain)
 
-      Logger.debug(
-        "Registering PDO entries for domain: #{map_size(pending_entries)} slave configs"
-      )
+        Logger.debug(
+          "Registering PDO entries for domain: #{map_size(pending_entries)} slave configs"
+        )
 
-      # Register all pending PDO entries via NIF and build the registered entries map
-      # Entries are 4-tuples: {index, subindex, size, direction}
-      # Domain doesn't need type info - that's handled by Slave for encoding/decoding
-      registered_entries =
-        for {slave_config, pdo_entries} <- pending_entries,
-            {name, {entry_index, entry_subindex, entry_size, direction}} <- pdo_entries do
-          # Infer type for NIF registration
+        # Register all pending PDO entries via NIF and build the registered entries map
+        # Entries are 4-tuples: {index, subindex, size, direction}
+        # Domain doesn't need type info - that's handled by Slave for encoding/decoding
+        registered_entries =
+          for {slave_config, pdo_entries} <- pending_entries,
+              {name, {entry_index, entry_subindex, entry_size, direction}} <- pdo_entries do
+            # Infer type for NIF registration
 
-          offset =
-            Nif.slave_config_reg_pdo_entry(
-              slave_config,
-              name,
-              entry_index,
-              entry_subindex,
-              entry_size,
-              domain_ref,
-              direction
+            offset =
+              Nif.slave_config_reg_pdo_entry(
+                slave_config,
+                name,
+                entry_index,
+                entry_subindex,
+                entry_size,
+                domain_ref,
+                direction
+              )
+
+            Logger.debug(
+              "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, direction=#{direction}"
             )
 
-          Logger.debug(
-            "  Registered #{name}: entry=0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}, offset=#{offset}, size=#{entry_size}, direction=#{direction}"
-          )
+            {name, {offset, entry_size}}
+          end
+          |> Map.new()
 
-          {name, {offset, entry_size}}
+        Logger.debug("Total entries registered: #{map_size(registered_entries)}")
+
+        # Store the registered entries back in the domain and lock it
+        Logger.debug("Locking domain with #{map_size(registered_entries)} entries")
+
+        case Domain.store_and_lock_entries(domain, registered_entries) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:domain_lock_failed, reason}}}
         end
-        |> Map.new()
+      end)
 
-      Logger.debug("Total entries registered: #{map_size(registered_entries)}")
+    case result do
+      :ok ->
+        Logger.info("All domains locked, now locking #{length(data.slaves)} slaves")
 
-      # Store the registered entries back in the domain and lock it
-      Domain.store_and_lock_entries(domain, registered_entries)
-    end)
+        # Lock all slaves to prevent further configuration changes
+        Enum.each(data.slaves, fn slave ->
+          Slave.lock(slave)
+        end)
 
-    # Lock all slaves to prevent further configuration changes
-    Enum.each(data.slaves, fn slave ->
-      Slave.lock(slave)
-    end)
+        Logger.info("Cyclic mode activation complete, transitioning to :operational")
+        {:next_state, :operational, data, [{:reply, from, :ok}]}
 
-    {:next_state, :operational, data}
+      {:error, _reason} = error ->
+        Logger.error("Failed to start cyclic mode: #{inspect(error)}")
+        {:keep_state_and_data, [{:reply, from, error}]}
+    end
   end
 
   # Gateway for Slave module operations - ensures only Master talks to NIF
@@ -483,6 +513,7 @@ defmodule EtherCAT.Master do
   # Master is activated and running cyclic communication
 
   def operational(:enter, _old_state, data) do
+    Logger.info("Master entered :operational state - system ready for I/O")
     start_time = System.monotonic_time()
 
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :operational})
