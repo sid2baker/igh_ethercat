@@ -59,7 +59,7 @@ defmodule EtherCAT.Slave do
   @behaviour :gen_statem
   require Logger
 
-  alias EtherCAT.{Master, Domain, PDOEntry}
+  alias EtherCAT.{Master, Domain}
   alias EtherCAT.Slave.Driver
 
   defstruct [
@@ -287,14 +287,17 @@ defmodule EtherCAT.Slave do
 
   ## Example
 
-      # Register only the temperature value, skip error flags
-      {:ok, handle} = Slave.register_entry(slave, :ch1, :value, :fast_domain)
+      # Register entry to a domain
+      :ok = Slave.register_entry(slave, :ch1, :value, :fast_domain)
 
-      # Use with EtherCAT.read/write/watch
-      {:ok, temp} = EtherCAT.read(handle)
+  ## Note
+
+  This function is primarily used internally by `EtherCAT.System` during
+  hardware configuration. For application code, use the System-based API:
+  `EtherCAT.read(system, slave_name, pdo_name, entry_name)`.
   """
   @spec register_entry(pid(), pdo_name(), entry_name(), domain(), timeout()) ::
-          {:ok, PDOEntry.t()} | {:error, term()}
+          :ok | {:error, term()}
   def register_entry(slave, pdo_name, entry_name, domain \\ :default_domain, timeout \\ 10_000) do
     :gen_statem.call(slave, {:register_entry, pdo_name, entry_name, domain}, timeout)
   end
@@ -697,8 +700,8 @@ defmodule EtherCAT.Slave do
 
   def configured({:call, from}, {:register_entry, pdo_name, entry_name, domain_name}, data) do
     case do_register_entry(pdo_name, entry_name, domain_name, data) do
-      {:ok, entry_info, updated_data} ->
-        {:keep_state, updated_data, [{:reply, from, {:ok, entry_info}}]}
+      {:ok, updated_data} ->
+        {:keep_state, updated_data, [{:reply, from, :ok}]}
 
       {:error, _reason} = error ->
         {:keep_state_and_data, [{:reply, from, error}]}
@@ -964,10 +967,7 @@ defmodule EtherCAT.Slave do
         | entries: Map.put(data.entries, {pdo_name, entry_name}, entry_metadata)
       }
 
-      # Return PDOEntry struct
-      pdo_entry = PDOEntry.new(self(), pdo_name, entry_name)
-
-      {:ok, pdo_entry, updated_data}
+      {:ok, updated_data}
     end
   end
 

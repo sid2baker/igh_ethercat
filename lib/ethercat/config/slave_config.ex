@@ -5,6 +5,10 @@ defmodule EtherCAT.Config.SlaveConfig do
   Defines how a slave at a specific bus position should be configured,
   including driver selection, expected hardware identity, driver config,
   and entry-to-domain routing.
+
+  This struct serves dual purposes:
+  - **Configuration**: Driver selection, entry routing, and runtime config
+  - **Verification**: Expected vendor/product codes for hardware validation
   """
 
   alias EtherCAT.Config.EntryConfig
@@ -15,7 +19,10 @@ defmodule EtherCAT.Config.SlaveConfig do
     :driver,
     :expected,
     :config,
-    :entries
+    :entries,
+    alias: 0,
+    pdos: [],
+    sdos: []
   ]
 
   @type expected :: %{
@@ -26,10 +33,13 @@ defmodule EtherCAT.Config.SlaveConfig do
   @type t :: %__MODULE__{
           position: non_neg_integer(),
           name: atom() | nil,
-          driver: module(),
+          driver: module() | nil,
           expected: expected() | nil,
           config: map(),
-          entries: [EntryConfig.t()]
+          entries: [EntryConfig.t()],
+          alias: non_neg_integer(),
+          pdos: list(),
+          sdos: list()
         }
 
   @doc """
@@ -39,10 +49,13 @@ defmodule EtherCAT.Config.SlaveConfig do
   - `position` - Bus position (0-based)
   - `opts` - Configuration options:
     - `:name` - Semantic slave name (optional)
-    - `:driver` - Driver module implementing EtherCAT.Slave.Driver
-    - `:expected` - Expected vendor/product codes for verification
-    - `:config` - Driver-specific configuration map
-    - `:entries` - List of EntryConfig structs for domain routing
+    - `:driver` - Driver module implementing EtherCAT.Slave.Driver (optional)
+    - `:expected` - Expected vendor/product codes for verification (optional)
+    - `:config` - Driver-specific configuration map (default: %{})
+    - `:entries` - List of EntryConfig structs for domain routing (default: [])
+    - `:alias` - EtherCAT alias address (default: 0)
+    - `:pdos` - Expected PDO configurations for verification (default: [])
+    - `:sdos` - SDO configurations to apply (default: [])
   """
   @spec new(non_neg_integer(), keyword()) :: t()
   def new(position, opts \\ []) when is_integer(position) and position >= 0 do
@@ -52,7 +65,10 @@ defmodule EtherCAT.Config.SlaveConfig do
       driver: Keyword.get(opts, :driver),
       expected: Keyword.get(opts, :expected),
       config: Keyword.get(opts, :config, %{}),
-      entries: Keyword.get(opts, :entries, [])
+      entries: Keyword.get(opts, :entries, []),
+      alias: Keyword.get(opts, :alias, 0),
+      pdos: Keyword.get(opts, :pdos, []),
+      sdos: Keyword.get(opts, :sdos, [])
     }
   end
 
@@ -60,7 +76,7 @@ defmodule EtherCAT.Config.SlaveConfig do
   Validates slave configuration.
 
   Checks:
-  - Driver module is specified
+  - Driver module is specified (if entries are configured)
   - Expected format is valid if provided
   - All entries are valid EntryConfig structs
   """
@@ -73,6 +89,7 @@ defmodule EtherCAT.Config.SlaveConfig do
     end
   end
 
+  defp validate_driver(%{driver: nil, entries: []}), do: :ok
   defp validate_driver(%{driver: nil}), do: {:error, :driver_required}
   defp validate_driver(%{driver: driver}) when is_atom(driver), do: :ok
   defp validate_driver(_), do: {:error, :invalid_driver}

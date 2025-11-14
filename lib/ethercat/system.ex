@@ -103,17 +103,17 @@ defmodule EtherCAT.System do
   end
 
   @doc """
-  Looks up entry handle for read/write operations.
+  Looks up slave PID for a specific PDO entry.
 
   ## Returns
-  - `{:ok, %PDOEntry{}}` if entry exists
+  - `{:ok, slave_pid}` if entry exists
   - `{:error, reason}` otherwise
   """
   @spec find_entry(t(), atom(), atom(), atom()) ::
-          {:ok, EtherCAT.PDOEntry.t()} | {:error, term()}
+          {:ok, pid()} | {:error, term()}
   def find_entry(%__MODULE__{entry_handles: handles}, slave_name, pdo_name, entry_name) do
     case Map.fetch(handles, {slave_name, pdo_name, entry_name}) do
-      {:ok, handle} -> {:ok, handle}
+      {:ok, slave_pid} -> {:ok, slave_pid}
       :error -> {:error, {:entry_not_found, slave_name, pdo_name, entry_name}}
     end
   end
@@ -201,7 +201,7 @@ defmodule EtherCAT.System do
                  entry_config.entry_name,
                  entry_config.domain
                ) do
-            {:ok, _handle} -> {:cont, :ok}
+            :ok -> {:cont, :ok}
             {:error, reason} -> {:halt, {:error, reason}}
           end
         end)
@@ -220,15 +220,9 @@ defmodule EtherCAT.System do
 
       Enum.map(slave_config.entries, fn entry_config ->
         key = {slave_name, entry_config.pdo_name, entry_config.entry_name}
+        slave_pid = Map.fetch!(slave_map, slave_name)
 
-        value =
-          EtherCAT.PDOEntry.new(
-            Map.fetch!(slave_map, slave_name),
-            entry_config.pdo_name,
-            entry_config.entry_name
-          )
-
-        {key, value}
+        {key, slave_pid}
       end)
     end)
     |> Map.new()

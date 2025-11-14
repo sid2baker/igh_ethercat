@@ -16,16 +16,14 @@ defmodule EtherCAT.HardwareLayout do
 
       layout = %EtherCAT.HardwareLayout{
         slaves: [
-          %EtherCAT.SlaveConfig{
+          %EtherCAT.Config.SlaveConfig{
             position: 0,
-            vendor_id: 0xDEAD,
-            product_code: 0x0001,
+            expected: %{vendor: 0xDEAD, product: 0x0001},
             name: :simple_io
           },
-          %EtherCAT.SlaveConfig{
+          %EtherCAT.Config.SlaveConfig{
             position: 1,
-            vendor_id: 0x00000002,
-            product_code: 0x0C1E3052,
+            expected: %{vendor: 0x00000002, product: 0x0C1E3052},
             name: :temp_sensor
           }
         ]
@@ -57,7 +55,7 @@ defmodule EtherCAT.HardwareLayout do
       end
   """
 
-  alias EtherCAT.SlaveConfig
+  alias EtherCAT.Config.SlaveConfig
 
   @type t :: %__MODULE__{
           slaves: [SlaveConfig.t()]
@@ -96,8 +94,8 @@ defmodule EtherCAT.HardwareLayout do
       # Returns something like:
       # %EtherCAT.HardwareLayout{
       #   slaves: [
-      #     %EtherCAT.SlaveConfig{position: 0, vendor_id: 0x00000002, ...},
-      #     %EtherCAT.SlaveConfig{position: 1, vendor_id: 0xDEAD, ...}
+      #     %EtherCAT.Config.SlaveConfig{position: 0, expected: %{vendor: 0x00000002, ...}, ...},
+      #     %EtherCAT.Config.SlaveConfig{position: 1, expected: %{vendor: 0xDEAD, ...}, ...}
       #   ]
       # }
 
@@ -119,10 +117,17 @@ defmodule EtherCAT.HardwareLayout do
 
           %SlaveConfig{
             position: info.position,
-            vendor_id: info.vendor_id,
-            product_code: info.product_code,
             name: info.name,
-            alias: info.alias
+            driver: nil,
+            expected: %{
+              vendor: info.vendor_id,
+              product: info.product_code
+            },
+            config: %{},
+            entries: [],
+            alias: info.alias,
+            pdos: [],
+            sdos: []
           }
         catch
           :exit, reason ->
@@ -176,7 +181,10 @@ defmodule EtherCAT.HardwareLayout do
       # Define expected layout
       layout = %EtherCAT.HardwareLayout{
         slaves: [
-          %EtherCAT.SlaveConfig{position: 0, vendor_id: 0xDEAD, product_code: 0x0001}
+          %EtherCAT.Config.SlaveConfig{
+            position: 0,
+            expected: %{vendor: 0xDEAD, product: 0x0001}
+          }
         ]
       }
 
@@ -239,8 +247,8 @@ defmodule EtherCAT.HardwareLayout do
           {:missing_slave,
            %{
              position: position,
-             expected_vendor: expected.vendor_id,
-             expected_product: expected.product_code,
+             expected_vendor: expected.expected.vendor,
+             expected_product: expected.expected.product,
              expected_name: expected.name
            }}
           | acc
@@ -288,12 +296,12 @@ defmodule EtherCAT.HardwareLayout do
 
   @doc false
   defp check_vendor_mismatch(mismatches, position, expected, actual) do
-    if expected.vendor_id != actual.vendor_id do
+    if expected.expected.vendor != actual.vendor_id do
       [
         {:wrong_vendor,
          %{
            position: position,
-           expected: expected.vendor_id,
+           expected: expected.expected.vendor,
            actual: actual.vendor_id,
            expected_name: expected.name
          }}
@@ -306,12 +314,12 @@ defmodule EtherCAT.HardwareLayout do
 
   @doc false
   defp check_product_mismatch(mismatches, position, expected, actual) do
-    if expected.product_code != actual.product_code do
+    if expected.expected.product != actual.product_code do
       [
         {:wrong_product,
          %{
            position: position,
-           expected: expected.product_code,
+           expected: expected.expected.product,
            actual: actual.product_code,
            expected_name: expected.name
          }}

@@ -147,8 +147,8 @@ defmodule EtherCAT do
   """
   @spec read(System.t(), atom(), atom(), atom()) :: {:ok, term()} | {:error, term()}
   def read(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.read_entry(entry.slave_pid, entry.pdo_name, entry.entry_name)
+    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.read_entry(slave_pid, pdo_name, entry_name)
     end
   end
 
@@ -173,8 +173,8 @@ defmodule EtherCAT do
   """
   @spec write(System.t(), atom(), atom(), atom(), term()) :: :ok | {:error, term()}
   def write(%System{} = system, slave_name, pdo_name, entry_name, value) do
-    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.write_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, value)
+    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.write_entry(slave_pid, pdo_name, entry_name, value)
     end
   end
 
@@ -205,8 +205,8 @@ defmodule EtherCAT do
   """
   @spec watch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
   def watch(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.watch_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, self())
+    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.watch_entry(slave_pid, pdo_name, entry_name, self())
     end
   end
 
@@ -229,8 +229,8 @@ defmodule EtherCAT do
   """
   @spec unwatch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
   def unwatch(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, entry} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.unwatch_entry(entry.slave_pid, entry.pdo_name, entry.entry_name, self())
+    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
+      Slave.unwatch_entry(slave_pid, pdo_name, entry_name, self())
     end
   end
 
