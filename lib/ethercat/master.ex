@@ -14,7 +14,8 @@ defmodule EtherCAT.Master do
     :domains,
     :task_pid,
     :update_interval,
-    :nif_yield_interval
+    :nif_yield_interval,
+    slaves_operational?: false
   ]
 
   @type domain_info :: %{name: atom(), ref: reference()}
@@ -28,7 +29,9 @@ defmodule EtherCAT.Master do
           # in us
           update_interval: integer(),
           # NIF yielding interval in us (default 100_000 = 100ms)
-          nif_yield_interval: integer()
+          nif_yield_interval: integer(),
+          # True when at least one slave has reached OP state (PDO communication ready)
+          slaves_operational?: boolean()
         }
 
   # Client API
@@ -594,7 +597,19 @@ defmodule EtherCAT.Master do
           %{domains: map_size(data.domains), slaves: length(data.slaves)}
         )
 
-        {:keep_state, %{data | task_pid: task_pid}, []}
+        # Check if slaves are already in OP state (fast transition case)
+        slaves_ready =
+          case Nif.get_master_state(data.master_ref) do
+            {:ok, state} when state.al_state_op > 0 ->
+              Logger.info("Slaves already in operational state - PDO communication ready")
+              true
+
+            _ ->
+              Logger.debug("Waiting for slaves to reach operational state...")
+              false
+          end
+
+        {:keep_state, %{data | task_pid: task_pid, slaves_operational?: slaves_ready}, []}
 
       {:error, reason} ->
         duration = System.monotonic_time() - start_time
@@ -610,10 +625,18 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational(:info, {:master_state_changed, master_state}, _data) do
+  def operational(:info, {:master_state_changed, master_state}, data) do
     require Logger
     Logger.info("Master State Changed: #{inspect(master_state)}")
-    {:keep_state_and_data, []}
+
+    # Check if at least one slave has reached OP state (al_state_op > 0)
+    # This indicates PDO communication is ready
+    if master_state.al_state_op > 0 and not data.slaves_operational? do
+      Logger.info("Slaves reached operational state - PDO communication ready")
+      {:keep_state, %{data | slaves_operational?: true}, []}
+    else
+      {:keep_state_and_data, []}
+    end
   end
 
   def operational(:info, {_domain, :data_changed, _domain_data, data_changes}, _data) do
@@ -635,13 +658,22 @@ defmodule EtherCAT.Master do
   # Domain identifies itself by PID; we look up its NIF reference
   def operational({:call, from}, {:domain_set_value, domain_pid, name, value}, data)
       when is_binary(value) do
-    case Map.get(data.domains, domain_pid) do
-      nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    # Check if slaves have reached OP state before allowing PDO writes
+    unless data.slaves_operational? do
+      {:keep_state_and_data,
+       [{:reply, from,
+         {:error,
+          {:slaves_not_operational,
+           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+    else
+      case Map.get(data.domains, domain_pid) do
+        nil ->
+          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-      domain_info ->
-        result = Nif.set_value(domain_info.ref, name, value)
-        {:keep_state_and_data, [{:reply, from, result}]}
+        domain_info ->
+          result = Nif.set_value(domain_info.ref, name, value)
+          {:keep_state_and_data, [{:reply, from, result}]}
+      end
     end
   end
 
@@ -654,18 +686,27 @@ defmodule EtherCAT.Master do
   end
 
   def operational({:call, from}, {:domain_get_value, domain_pid, name}, data) do
-    case Map.get(data.domains, domain_pid) do
-      nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+    # Check if slaves have reached OP state before allowing PDO reads
+    unless data.slaves_operational? do
+      {:keep_state_and_data,
+       [{:reply, from,
+         {:error,
+          {:slaves_not_operational,
+           "Slaves are still transitioning to OP state. PDO communication not yet available."}}}]}
+    else
+      case Map.get(data.domains, domain_pid) do
+        nil ->
+          {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
 
-      domain_info ->
-        result =
-          case Nif.get_value(domain_info.ref, name) do
-            {:error, _} = error -> error
-            value -> {:ok, value}
-          end
+        domain_info ->
+          result =
+            case Nif.get_value(domain_info.ref, name) do
+              {:error, _} = error -> error
+              value -> {:ok, value}
+            end
 
-        {:keep_state_and_data, [{:reply, from, result}]}
+          {:keep_state_and_data, [{:reply, from, result}]}
+      end
     end
   end
 
