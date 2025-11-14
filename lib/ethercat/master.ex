@@ -509,52 +509,16 @@ defmodule EtherCAT.Master do
   end
 
   # State: stale
-  # Network is up, auto-syncing slaves
+  # Network is up, monitoring hardware fingerprint for stability
 
   def stale(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :stale})
-
-    # Trigger immediate sync on entering stale state
-    send(self(), :auto_sync_slaves)
-
     actions = [{:state_timeout, data.scan_interval, :update_master_state}]
     {:keep_state_and_data, actions}
   end
 
-  def stale(:info, :auto_sync_slaves, data) do
-    start_time = System.monotonic_time()
-
-    with {:ok, master_state} <- Nif.get_master_state(data.master_ref),
-         {:ok, slaves} <- sync_all_slaves(data.master_ref, master_state.slaves_responding) do
-      duration = System.monotonic_time() - start_time
-
-      :telemetry.execute(
-        [:ethercat, :master, :sync_complete],
-        %{duration: duration, count: length(slaves)},
-        %{result: :success}
-      )
-
-      Logger.info("Auto-synced #{length(slaves)} slaves in #{duration}µs")
-      {:next_state, :synced, %{data | slaves: slaves}}
-    else
-      {:error, reason} ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:ethercat, :master, :sync_complete],
-          %{duration: duration},
-          %{result: :error, error: inspect(reason)}
-        )
-
-        Logger.error("Error auto-syncing slaves: #{inspect(reason)}")
-        # Stay in stale, will retry on next state_timeout
-        :keep_state_and_data
-    end
-  end
-
-  def stale({:call, from}, :get_slaves, data) do
-    # Master is still syncing, return error - caller should wait and retry
-    # or use a longer timeout on their get_slaves call
+  def stale({:call, from}, :get_slaves, _data) do
+    # Master is not yet synced, return error
     {:keep_state_and_data, [{:reply, from, {:error, :not_synced_yet}}]}
   end
 
@@ -628,8 +592,59 @@ defmodule EtherCAT.Master do
 
   def synced(:enter, _old_state, data) do
     :telemetry.execute([:ethercat, :master, :state], %{}, %{state: :synced})
-    actions = [{:state_timeout, data.scan_interval, :update_master_state}]
-    {:keep_state_and_data, actions}
+
+    # If we don't have slaves yet, sync them now
+    # (we have slaves if coming from :operational, don't have them if coming from :stale)
+    if length(data.slaves) == 0 do
+      start_time = System.monotonic_time()
+
+      case Nif.get_master_state(data.master_ref) do
+        {:ok, master_state} ->
+          case sync_all_slaves(data.master_ref, master_state.slaves_responding) do
+            {:ok, slaves} ->
+              duration = System.monotonic_time() - start_time
+
+              :telemetry.execute(
+                [:ethercat, :master, :slaves_synced],
+                %{duration: duration, count: length(slaves)},
+                %{result: :success}
+              )
+
+              Logger.info("Synced #{length(slaves)} slaves in #{duration}µs")
+              new_data = %{data | slaves: slaves}
+              actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+              {:keep_state, new_data, actions}
+
+            {:error, reason} ->
+              duration = System.monotonic_time() - start_time
+
+              :telemetry.execute(
+                [:ethercat, :master, :slaves_synced],
+                %{duration: duration},
+                %{result: :error, error: inspect(reason)}
+              )
+
+              Logger.warning(
+                "Failed to sync slaves: #{inspect(reason)}, transitioning back to stale"
+              )
+
+              # Sync failed, go back to stale and retry on next stability window
+              {:next_state, :stale, data}
+          end
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to get master state during sync: #{inspect(reason)}, transitioning back to stale"
+          )
+
+          {:next_state, :stale, data}
+      end
+    else
+      # Already have slaves (e.g., coming from :operational), just continue monitoring
+      Logger.debug("Entering synced state with #{length(data.slaves)} existing slaves")
+      actions = [{:state_timeout, data.scan_interval, :update_master_state}]
+      {:keep_state_and_data, actions}
+    end
   end
 
   def synced({:call, from}, {:start_cyclic_mode, cycle_interval, nif_yield_interval}, data) do
