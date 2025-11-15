@@ -142,6 +142,30 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :get_hardware_diff)
   end
 
+  @doc """
+  Configure hardware using HardwareConfig and start all slave drivers.
+
+  This function:
+  1. Creates domains from the config
+  2. Starts slave driver processes with config-specified names and modules
+  3. Configures all slaves (SDOs, PDOs, domain registration)
+  4. Starts cyclic mode
+  5. Returns a map of slave names to PIDs
+
+  ## Parameters
+  - `master` - Master process (PID or module name)
+  - `config` - HardwareConfig struct with master, domains, and slaves
+
+  ## Returns
+  - `{:ok, %{slave_name => pid}}` - Map of slave names to driver PIDs
+  - `{:error, reason}` - Configuration error
+  """
+  @spec configure_and_start_slaves(pid() | atom(), EtherCAT.Config.HardwareConfig.t()) ::
+          {:ok, %{atom() => pid()}} | {:error, term()}
+  def configure_and_start_slaves(master \\ __MODULE__, config) do
+    :gen_statem.call(master, {:configure_and_start_slaves, config}, 30_000)
+  end
+
   # ============================================================================
   # gen_statem Callbacks
   # ============================================================================
@@ -332,6 +356,30 @@ defmodule EtherCAT.Master do
           {:error, _} = error ->
             {:keep_state_and_data, [{:reply, from, error}]}
         end
+    end
+  end
+
+  def ready({:call, from}, {:configure_and_start_slaves, config}, data) do
+    Logger.info("Configuring hardware from HardwareConfig")
+
+    alias EtherCAT.Config.HardwareConfig
+
+    with :ok <- HardwareConfig.validate(config),
+         {:ok, data_with_domains} <- create_domains_from_config(data, config),
+         {:ok, data_with_slaves} <- start_slaves_from_config(data_with_domains, config),
+         :ok <- configure_all_slaves(data_with_slaves),
+         {:ok, operational_data} <- activate_and_start_cyclic(data_with_slaves, config) do
+      # Build map of slave names to PIDs
+      slave_map =
+        operational_data.slaves
+        |> Enum.map(fn {_position, slave_info} -> {slave_info.name, slave_info.pid} end)
+        |> Map.new()
+
+      {:next_state, :operational, operational_data, [{:reply, from, {:ok, slave_map}}]}
+    else
+      {:error, _} = error ->
+        Logger.error("Failed to configure hardware: #{inspect(error)}")
+        {:keep_state_and_data, [{:reply, from, error}]}
     end
   end
 
@@ -809,6 +857,136 @@ defmodule EtherCAT.Master do
           nil ->
             :keep_state_and_data
         end
+    end
+  end
+
+  # ============================================================================
+  # Hardware Configuration Helpers
+  # ============================================================================
+
+  defp create_domains_from_config(data, config) do
+    result =
+      Enum.reduce_while(config.domains, {:ok, data}, fn domain_config, {:ok, acc_data} ->
+        case Nif.master_create_domain(acc_data.master_ref, self(), domain_config.interval) do
+          {:ok, domain_ref} ->
+            :ok = Nif.domain_set_pid(domain_ref, self())
+            domain_info = %{ref: domain_ref, interval: domain_config.interval}
+            new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)
+            {:cont, {:ok, %{acc_data | domains: new_domains}}}
+
+          {:error, reason} ->
+            {:halt, {:error, {:failed_to_create_domain, domain_config.name, reason}}}
+        end
+      end)
+
+    case result do
+      {:ok, _} = success -> success
+      error -> error
+    end
+  end
+
+  defp start_slaves_from_config(data, config) do
+    # Build map of position => SlaveConfig
+    slaves_by_position = Map.new(config.slaves, fn slave_config -> {slave_config.position, slave_config} end)
+
+    # Check if all expected slaves exist
+    detected_positions = Map.keys(data.slaves)
+    configured_positions = Map.keys(slaves_by_position)
+
+    case configured_positions -- detected_positions do
+      [] ->
+        # Stop old generic slave drivers from scanning phase
+        Enum.each(data.slaves, fn {_position, slave_info} ->
+          if Process.alive?(slave_info.pid) do
+            GenServer.stop(slave_info.pid, :normal)
+          end
+        end)
+
+        # Start drivers with config-specified names and modules
+        result =
+          Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config}, {:ok, acc_slaves} ->
+            case start_configured_slave_driver(data, position, slave_config) do
+              {:ok, slave_info} ->
+                new_slaves = Map.put(acc_slaves, position, slave_info)
+                {:cont, {:ok, new_slaves}}
+
+              {:error, reason} ->
+                {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+            end
+          end)
+
+        case result do
+          {:ok, new_slaves} -> {:ok, %{data | slaves: new_slaves}}
+          error -> error
+        end
+
+      missing ->
+        {:error, {:missing_slaves, missing}}
+    end
+  end
+
+  defp start_configured_slave_driver(data, position, slave_config) do
+    # Get hardware info for this slave
+    {:ok, slave_info} = Nif.master_get_slave(data.master_ref, position)
+
+    {:ok, slave_config_ref} =
+      Nif.master_slave_config(
+        data.master_ref,
+        0,
+        position,
+        slave_info.vendor_id,
+        slave_info.product_code
+      )
+
+    # Use driver from config or fall back to Generic
+    driver_module = slave_config.driver || EtherCAT.Drivers.Generic
+
+    {:ok, pid} =
+      driver_module.start_link(
+        master: self(),
+        position: position,
+        slave_config: slave_config_ref,
+        vendor_id: slave_info.vendor_id,
+        product_code: slave_info.product_code,
+        revision: slave_info.revision_number,
+        serial: slave_info.serial_number,
+        sync_count: slave_info.sync_count,
+        config: slave_config.config || %{}
+      )
+
+    {:ok,
+     %{
+       pid: pid,
+       name: slave_config.name,
+       vendor: slave_info.vendor_id,
+       product: slave_info.product_code,
+       driver: driver_module
+     }}
+  end
+
+  defp activate_and_start_cyclic(data, config) do
+    cycle_interval = config.master.cycle_interval || 10_000
+    nif_yield_interval = config.master.nif_yield_interval || 100_000
+
+    case Nif.master_activate(data.master_ref) do
+      :ok ->
+        domain_refs = data.domains |> Map.values() |> Enum.map(& &1.ref)
+
+        task_pid =
+          spawn_link(fn ->
+            Nif.cyclic_task(
+              self(),
+              data.master_ref,
+              domain_refs,
+              cycle_interval,
+              nif_yield_interval
+            )
+          end)
+
+        {:ok, %{data | task_pid: task_pid, hardware_config: config}}
+
+      {:error, _} = error ->
+        error
     end
   end
 

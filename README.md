@@ -275,12 +275,11 @@ If hardware doesn't match, `EtherCAT.open/1` returns a detailed error:
 
 ## API Reference
 
-### System Operations
+### Configuration
 
-- `EtherCAT.open(config_module, opts)` - Open with Spark DSL configuration
-- `EtherCAT.open(opts)` - Open in discovery mode
-- `EtherCAT.close(system)` - Close and release resources
-- `EtherCAT.generate_config(system)` - Generate config from discovered hardware
+- `EtherCAT.configure_hardware(master_index, config)` - Configure and start slaves, returns `{:ok, %{slave_name => pid}}`
+- `EtherCAT.generate_config(master_index)` - Generate config from discovered hardware
+- `EtherCAT.stop_slaves(master_index)` - Stop all slaves and cyclic mode
 
 ### I/O Operations
 
@@ -288,6 +287,11 @@ If hardware doesn't match, `EtherCAT.open/1` returns a detailed error:
 - `EtherCAT.write(slave_pid, pdo_name, entry_name, value)` - Write entry value
 - `EtherCAT.watch(slave_pid, pdo_name, entry_name)` - Subscribe to changes
 - `EtherCAT.unwatch(slave_pid, pdo_name, entry_name)` - Unsubscribe
+
+### Utility
+
+- `EtherCAT.find_master(master_index)` - Get Master PID
+- `EtherCAT.get_slaves(master_index)` - Get list of slave PIDs
 
 ## Troubleshooting
 

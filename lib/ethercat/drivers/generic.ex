@@ -18,7 +18,7 @@ defmodule EtherCAT.Drivers.Generic do
   use EtherCAT.Slave.Driver
   require Logger
 
-  alias EtherCAT.{Master, Nif, Slave.Driver}
+  alias EtherCAT.{Master, Slave.Driver}
 
   defstruct [
     :master,

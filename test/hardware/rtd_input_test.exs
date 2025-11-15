@@ -32,14 +32,13 @@ defmodule Hardware.RTDInputTest do
 
   describe "Basic Resistance Reading" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
     @tag :rtd
-    test "reads resistance from channel 1 (120Ω)", %{system: system} do
-      assert {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
+    test "reads resistance from channel 1 (120Ω)", %{slaves: slaves} do
+      assert {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
       assert is_number(resistance), "Expected numeric resistance value"
 
       assert_in_range(
@@ -51,8 +50,8 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "reads resistance from channel 2 (100Ω)", %{system: system} do
-      assert {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+    test "reads resistance from channel 2 (100Ω)", %{slaves: slaves} do
+      assert {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
       assert is_number(resistance), "Expected numeric resistance value"
 
       assert_in_range(
@@ -64,16 +63,16 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "channel 1 has no error flags", %{system: system} do
-      assert {:ok, error} = EtherCAT.read(system, :rtd_inputs, :ch1, :error)
+    test "channel 1 has no error flags", %{slaves: slaves} do
+      assert {:ok, error} = EtherCAT.read(slaves.rtd_inputs, :ch1, :error)
 
       # Error should be false or 0
       refute error, "Channel 1 should not have error flag set"
     end
 
     @tag :rtd
-    test "channel 2 has no error flags", %{system: system} do
-      assert {:ok, error} = EtherCAT.read(system, :rtd_inputs, :ch2, :error)
+    test "channel 2 has no error flags", %{slaves: slaves} do
+      assert {:ok, error} = EtherCAT.read(slaves.rtd_inputs, :ch2, :error)
 
       # Error should be false or 0
       refute error, "Channel 2 should not have error flag set"
@@ -82,17 +81,16 @@ defmodule Hardware.RTDInputTest do
 
   describe "Measurement Stability" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
     @tag :rtd
-    test "channel 1 readings are stable over time", %{system: system} do
+    test "channel 1 readings are stable over time", %{slaves: slaves} do
       # Take 20 readings over 2 seconds
       readings =
         for _ <- 1..20 do
-          {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
+          {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
           Process.sleep(100)
           resistance
         end
@@ -112,11 +110,11 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "channel 2 readings are stable over time", %{system: system} do
+    test "channel 2 readings are stable over time", %{slaves: slaves} do
       # Take 20 readings over 2 seconds
       readings =
         for _ <- 1..20 do
-          {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+          {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
           Process.sleep(100)
           resistance
         end
@@ -136,11 +134,11 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "both channels can be read simultaneously", %{system: system} do
+    test "both channels can be read simultaneously", %{slaves: slaves} do
       # Read both channels multiple times
       for _ <- 1..10 do
-        assert {:ok, ch1_resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
-        assert {:ok, ch2_resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+        assert {:ok, ch1_resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
+        assert {:ok, ch2_resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
 
         assert_in_range(ch1_resistance, @ch1_expected_resistance, @resistance_tolerance, "Ch1")
         assert_in_range(ch2_resistance, @ch2_expected_resistance, @resistance_tolerance, "Ch2")
@@ -152,17 +150,16 @@ defmodule Hardware.RTDInputTest do
 
   describe "Rapid Reading" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
     @tag :rtd
-    test "can read channel 1 rapidly without errors", %{system: system} do
+    test "can read channel 1 rapidly without errors", %{slaves: slaves} do
       # Read 100 times as fast as possible
       readings =
         for _ <- 1..100 do
-          assert {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
+          assert {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
           resistance
         end
 
@@ -178,11 +175,11 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "can read channel 2 rapidly without errors", %{system: system} do
+    test "can read channel 2 rapidly without errors", %{slaves: slaves} do
       # Read 100 times as fast as possible
       readings =
         for _ <- 1..100 do
-          assert {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+          assert {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
           resistance
         end
 
@@ -200,14 +197,13 @@ defmodule Hardware.RTDInputTest do
 
   describe "Range Validation" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
     @tag :rtd
-    test "channel 1 reading is within physical limits", %{system: system} do
-      {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
+    test "channel 1 reading is within physical limits", %{slaves: slaves} do
+      {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
 
       # Should be a reasonable resistance value (not negative, not impossibly high)
       assert resistance >= 0.0, "Resistance cannot be negative"
@@ -215,8 +211,8 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "channel 2 reading is within physical limits", %{system: system} do
-      {:ok, resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+    test "channel 2 reading is within physical limits", %{slaves: slaves} do
+      {:ok, resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
 
       # Should be a reasonable resistance value
       assert resistance >= 0.0, "Resistance cannot be negative"
@@ -224,9 +220,9 @@ defmodule Hardware.RTDInputTest do
     end
 
     @tag :rtd
-    test "channels read different values (120Ω vs 100Ω)", %{system: system} do
-      {:ok, ch1_resistance} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
-      {:ok, ch2_resistance} = EtherCAT.read(system, :rtd_inputs, :ch2, :value)
+    test "channels read different values (120Ω vs 100Ω)", %{slaves: slaves} do
+      {:ok, ch1_resistance} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
+      {:ok, ch2_resistance} = EtherCAT.read(slaves.rtd_inputs, :ch2, :value)
 
       # The difference should be approximately 20Ω
       difference = abs(ch1_resistance - ch2_resistance)

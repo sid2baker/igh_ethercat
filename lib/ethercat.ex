@@ -303,6 +303,41 @@ defmodule EtherCAT do
     end
   end
 
+  @doc """
+  Stop all slave drivers and cyclic mode for a master.
+
+  This function:
+  1. Stops cyclic mode
+  2. Stops all slave driver processes
+  3. Clears the slave map
+
+  ## Parameters
+  - `master_index` - Master index (integer)
+
+  ## Returns
+  - `:ok` - Cleanup successful
+  - `{:error, reason}` - Cleanup error
+
+  ## Example
+
+      :ok = EtherCAT.stop_slaves(0)
+  """
+  @spec stop_slaves(non_neg_integer()) :: :ok | {:error, term()}
+  def stop_slaves(master_index) when is_integer(master_index) do
+    with {:ok, master} <- find_master(master_index),
+         :ok <- Master.stop_cyclic(master),
+         {:ok, slave_pids} <- Master.get_slaves(master) do
+      # Stop all slave drivers
+      Enum.each(slave_pids, fn pid ->
+        if Process.alive?(pid) do
+          GenServer.stop(pid, :normal)
+        end
+      end)
+
+      :ok
+    end
+  end
+
   ## Private Helpers
 
   defp get_config(module) when is_atom(module) do
@@ -320,7 +355,12 @@ defmodule EtherCAT do
   defp apply_driver_callback(slave_pid, function, args) do
     case Registry.lookup(EtherCAT.Registry, {:slave, slave_pid}) do
       [{^slave_pid, %{driver: driver_module}}] ->
-        apply(driver_module, function, args)
+        # Check if function is exported
+        if function_exported?(driver_module, function, length(args)) do
+          apply(driver_module, function, args)
+        else
+          {:error, {:callback_not_implemented, driver_module, function, length(args)}}
+        end
 
       [] ->
         {:error, {:slave_not_found, slave_pid}}

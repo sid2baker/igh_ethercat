@@ -18,81 +18,83 @@ defmodule Hardware.SlaveDetectionTest do
   """
 
   describe "System Initialization" do
-    test "successfully configures EtherCAT system" do
-      assert {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      assert %EtherCAT.System{} = system
-      assert is_pid(system.master)
-
-      # Clean up
-      :ok = EtherCAT.stop_system(system)
+    test "successfully configures EtherCAT hardware" do
+      assert {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      assert is_map(slaves)
+      assert map_size(slaves) > 0
     end
 
-    test "system transitions to operational state" do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+    test "hardware enters operational state" do
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
 
       # Give the system time to reach operational state
       Process.sleep(1000)
 
-      # System should be running
-      assert Process.alive?(system.master)
-
-      EtherCAT.stop_system(system)
+      # All slave processes should be alive
+      Enum.each(slaves, fn {_name, pid} ->
+        assert Process.alive?(pid), "Slave #{inspect(_name)} process should be alive"
+      end)
     end
   end
 
   describe "Slave Detection" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
-    test "detects EL1809 digital input slave", %{system: system} do
-      assert {:ok, _pid} = EtherCAT.System.find_slave(system, :digital_inputs)
+    test "detects EL1809 digital input slave", %{slaves: slaves} do
+      assert Map.has_key?(slaves, :digital_inputs)
+      assert is_pid(slaves.digital_inputs)
+      assert Process.alive?(slaves.digital_inputs)
     end
 
-    test "detects EL2809 digital output slave", %{system: system} do
-      assert {:ok, _pid} = EtherCAT.System.find_slave(system, :digital_outputs)
+    test "detects EL2809 digital output slave", %{slaves: slaves} do
+      assert Map.has_key?(slaves, :digital_outputs)
+      assert is_pid(slaves.digital_outputs)
+      assert Process.alive?(slaves.digital_outputs)
     end
 
-    test "detects EL3202 RTD input slave", %{system: system} do
-      assert {:ok, _pid} = EtherCAT.System.find_slave(system, :rtd_inputs)
+    test "detects EL3202 RTD input slave", %{slaves: slaves} do
+      assert Map.has_key?(slaves, :rtd_inputs)
+      assert is_pid(slaves.rtd_inputs)
+      assert Process.alive?(slaves.rtd_inputs)
     end
 
-    test "returns error for non-existent slave", %{system: system} do
-      assert {:error, :slave_not_found} = EtherCAT.System.find_slave(system, :nonexistent)
-    end
+    test "all configured slaves are present", %{slaves: slaves} do
+      # Verify all three slaves are in the map
+      assert Map.has_key?(slaves, :digital_inputs)
+      assert Map.has_key?(slaves, :digital_outputs)
+      assert Map.has_key?(slaves, :rtd_inputs)
 
-    test "all configured slaves are present", %{system: system} do
-      # Verify we can find all three slaves
-      assert {:ok, _} = EtherCAT.System.find_slave(system, :digital_inputs)
-      assert {:ok, _} = EtherCAT.System.find_slave(system, :digital_outputs)
-      assert {:ok, _} = EtherCAT.System.find_slave(system, :rtd_inputs)
+      # Verify all slave processes are alive
+      assert Process.alive?(slaves.digital_inputs)
+      assert Process.alive?(slaves.digital_outputs)
+      assert Process.alive?(slaves.rtd_inputs)
     end
   end
 
   describe "Slave Communication" do
     setup do
-      {:ok, system} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
-      on_exit(fn -> EtherCAT.stop_system(system) end)
-      {:ok, system: system}
+      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      {:ok, slaves: slaves}
     end
 
-    test "can read from digital input slave", %{system: system} do
+    test "can read from digital input slave", %{slaves: slaves} do
       # Should be able to read from any channel
-      assert {:ok, value} = EtherCAT.read(system, :digital_inputs, :ch1, :input)
+      assert {:ok, value} = EtherCAT.read(slaves.digital_inputs, :ch1, :input)
       assert is_boolean(value)
     end
 
-    test "can write to digital output slave", %{system: system} do
+    test "can write to digital output slave", %{slaves: slaves} do
       # Should be able to write to any channel
-      assert :ok = EtherCAT.write(system, :digital_outputs, :ch1, :output, false)
-      assert :ok = EtherCAT.write(system, :digital_outputs, :ch1, :output, true)
+      assert :ok = EtherCAT.write(slaves.digital_outputs, :ch1, :output, false)
+      assert :ok = EtherCAT.write(slaves.digital_outputs, :ch1, :output, true)
     end
 
-    test "can read from RTD input slave", %{system: system} do
+    test "can read from RTD input slave", %{slaves: slaves} do
       # Should be able to read resistance value
-      assert {:ok, value} = EtherCAT.read(system, :rtd_inputs, :ch1, :value)
+      assert {:ok, value} = EtherCAT.read(slaves.rtd_inputs, :ch1, :value)
       assert is_number(value)
     end
   end
