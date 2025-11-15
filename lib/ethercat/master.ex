@@ -284,9 +284,29 @@ defmodule EtherCAT.Master do
   # State: :ready
   # ============================================================================
 
-  def ready(:enter, _old_state, _data) do
+  def ready(:enter, _old_state, data) do
     Logger.info("Entered :ready state - ready for configuration and activation")
-    :keep_state_and_data
+
+    # Auto-create default_domain if it doesn't exist
+    case Map.has_key?(data.domains, :default_domain) do
+      true ->
+        :keep_state_and_data
+
+      false ->
+        Logger.info("Auto-creating :default_domain with 1000µs interval")
+
+        case Nif.master_create_domain(data.master_ref, self(), 1000) do
+          {:ok, domain_ref} ->
+            :ok = Nif.domain_set_pid(domain_ref, self())
+            domain_info = %{ref: domain_ref, interval: 1000}
+            new_domains = Map.put(data.domains, :default_domain, domain_info)
+            {:keep_state, %{data | domains: new_domains}}
+
+          {:error, reason} ->
+            Logger.warning("Failed to create default_domain: #{inspect(reason)}, continuing anyway")
+            :keep_state_and_data
+        end
+    end
   end
 
   def ready({:call, from}, :get_slaves, data) do
@@ -704,15 +724,17 @@ defmodule EtherCAT.Master do
   defp register_pdo_entries(data, position, slave_info, pdo_configs) do
     {:ok, slave_config} = get_slave_config_for_position(data, position)
 
-    Enum.each(pdo_configs, fn pdo_config ->
+    Enum.reduce_while(pdo_configs, :ok, fn pdo_config, :ok ->
       # Determine which domain this PDO belongs to
       domain_name = Map.get(pdo_config, :domain, :default_domain)
 
       case data.domains[domain_name] do
         nil ->
-          Logger.warning(
-            "Slave #{position}: Domain #{domain_name} not found, skipping PDO #{pdo_config.name}"
+          Logger.error(
+            "Slave #{position}: Domain #{domain_name} not found for PDO #{pdo_config.name}"
           )
+
+          {:halt, {:error, {:domain_not_found, domain_name}}}
 
         domain_info ->
           register_pdo_to_domain(
@@ -722,10 +744,10 @@ defmodule EtherCAT.Master do
             slave_info.name,
             pdo_config
           )
+
+          {:cont, :ok}
       end
     end)
-
-    :ok
   end
 
   defp register_pdo_to_domain(slave_config, domain_ref, position, slave_name, pdo_config) do
