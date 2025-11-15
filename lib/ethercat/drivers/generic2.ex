@@ -94,16 +94,20 @@ defmodule EtherCAT.Drivers.Generic2 do
 
   @impl true
   def init(opts) do
-    # Register in Registry for discovery
+    position = Keyword.fetch!(opts, :position)
+    slave_config = Keyword.fetch!(opts, :slave_config)
+
+    # Register in Registry for discovery (include slave_config for Master2 lookup)
     Registry.register(EtherCAT.Registry, {:slave, self()}, %{
       driver: __MODULE__,
-      position: Keyword.fetch!(opts, :position)
+      position: position,
+      slave_config: slave_config
     })
 
     state = %__MODULE__{
       master: Keyword.fetch!(opts, :master),
-      position: Keyword.fetch!(opts, :position),
-      slave_config: Keyword.fetch!(opts, :slave_config),
+      position: position,
+      slave_config: slave_config,
       vendor_id: Keyword.fetch!(opts, :vendor_id),
       product_code: Keyword.fetch!(opts, :product_code),
       revision: Keyword.fetch!(opts, :revision),
@@ -192,18 +196,18 @@ defmodule EtherCAT.Drivers.Generic2 do
   end
 
   def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
+    # Use the new Master2 subscribe API with slave_name, pdo_name, entry_name
+    slave_name = :"slave_#{state.position}"
 
-    result = Master2.subscribe_pdo_entry(state.master, domain, unique_name, subscriber)
+    result = Master2.subscribe(state.master, slave_name, pdo_name, entry_name, subscriber)
     {:reply, result, state}
   end
 
   def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
+    # Use the new Master2 unsubscribe API with slave_name, pdo_name, entry_name
+    slave_name = :"slave_#{state.position}"
 
-    result = Master2.unsubscribe_pdo_entry(state.master, domain, unique_name, subscriber)
+    result = Master2.unsubscribe(state.master, slave_name, pdo_name, entry_name, subscriber)
     {:reply, result, state}
   end
 
