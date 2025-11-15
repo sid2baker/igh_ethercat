@@ -58,26 +58,23 @@ end
 ### 2. Use Your Configuration
 
 ```elixir
-# Open system with configuration
-{:ok, system} = EtherCAT.open(MyMachine)
+# Configure hardware and get slave PIDs
+{:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
 
-# Read using semantic names
-{:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
-{:ok, error} = EtherCAT.read(system, :temp_sensor, :ch1, :error)
+# Read using slave PIDs and semantic names
+{:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
+{:ok, error} = EtherCAT.read(slaves.temp_sensor, :ch1, :error)
 
-# Write using semantic names
-:ok = EtherCAT.write(system, :valve_outputs, :ch1, :value, true)
-:ok = EtherCAT.write(system, :valve_outputs, :ch2, :value, false)
+# Write using slave PIDs and semantic names
+:ok = EtherCAT.write(slaves.valve_outputs, :ch1, :value, true)
+:ok = EtherCAT.write(slaves.valve_outputs, :ch2, :value, false)
 
 # Subscribe to changes
-:ok = EtherCAT.watch(system, :temp_sensor, :ch1, :value)
+:ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
 receive do
   {:pdo_value_changed, _name, new_temp} ->
     IO.puts("Temperature changed: #{new_temp}")
 end
-
-# Cleanup
-EtherCAT.close(system)
 ```
 
 ## Discovery Mode
@@ -85,11 +82,8 @@ EtherCAT.close(system)
 Don't know your hardware configuration yet? Use discovery mode:
 
 ```elixir
-# Connect without configuration
-{:ok, system} = EtherCAT.open()
-
 # Generate configuration from discovered hardware
-config = EtherCAT.generate_config(system)
+{:ok, config} = EtherCAT.generate_config(0)
 IO.inspect(config, pretty: true)
 
 # Use the output to create your Spark DSL module
@@ -108,8 +102,8 @@ EtherCAT.start_cyclic(master)
 
 ### After (Declarative)
 ```elixir
-{:ok, system} = EtherCAT.open(MyMachine)
-{:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)  # Clear!
+{:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+{:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)  # Clear!
 ```
 
 **Benefits:**
@@ -290,10 +284,10 @@ If hardware doesn't match, `EtherCAT.open/1` returns a detailed error:
 
 ### I/O Operations
 
-- `EtherCAT.read(system, slave_name, pdo_name, entry_name)` - Read entry value
-- `EtherCAT.write(system, slave_name, pdo_name, entry_name, value)` - Write entry value
-- `EtherCAT.watch(system, slave_name, pdo_name, entry_name)` - Subscribe to changes
-- `EtherCAT.unwatch(system, slave_name, pdo_name, entry_name)` - Unsubscribe
+- `EtherCAT.read(slave_pid, pdo_name, entry_name)` - Read entry value
+- `EtherCAT.write(slave_pid, pdo_name, entry_name, value)` - Write entry value
+- `EtherCAT.watch(slave_pid, pdo_name, entry_name)` - Subscribe to changes
+- `EtherCAT.unwatch(slave_pid, pdo_name, entry_name)` - Unsubscribe
 
 ## Troubleshooting
 

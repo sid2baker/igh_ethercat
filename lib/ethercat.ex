@@ -9,28 +9,30 @@ defmodule EtherCAT do
   The EtherCAT application automatically starts the Master in your supervision tree.
   Alternatively, start manually:
 
-      {:ok, _pid} = EtherCAT.start_link(master_index: 0, scan_interval: 100_000)
+      {:ok, _pid} = EtherCAT.start_link(master_index: 0)
 
   ### Phase 2: Configure Hardware
 
-      # Option A: Use predefined configuration
-      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
-
-      # Option B: Auto-detect and use current hardware
-      {:ok, system} = EtherCAT.get_system(0)
+      # Configure and get slave PIDs
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      # slaves = %{temp_sensor: #PID<0.123.0>, valve1: #PID<0.124.0>, ...}
 
   ## Usage
 
-      {:ok, value} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
-      :ok = EtherCAT.write(system, :valve1, :control, :command, true)
+  Work directly with slave PIDs:
 
-  ## Reconfiguration
+      {:ok, value} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
+      :ok = EtherCAT.write(slaves.valve1, :control, :command, true)
+      :ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
 
-      {:ok, new_system} = EtherCAT.configure_hardware(0, NewConfig)
+      receive do
+        {:pdo_value_changed, unique_name, value} ->
+          IO.puts("Value changed: \#{value}")
+      end
 
   ## Quick Start
 
-  Define your hardware configuration using the Spark DSL:
+  Define your hardware configuration:
 
       defmodule MyMachine do
         use EtherCAT.Config
@@ -38,11 +40,9 @@ defmodule EtherCAT do
         master do
           index 0
           cycle_interval 10_000
-          nif_yield_interval 100_000
         end
 
         domain :fast_loop, interval: 1
-        domain :slow_loop, interval: 10
 
         slave position: 0, name: :temp_sensor do
           driver EtherCAT.Drivers.EL3202
@@ -54,23 +54,22 @@ defmodule EtherCAT do
           end
 
           entry :ch1, :value, domain: :fast_loop
-          entry :ch1, :error, domain: :slow_loop
+          entry :ch1, :error, domain: :fast_loop
         end
       end
 
   Then configure and use the system:
 
-      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
-      {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
-      :ok = EtherCAT.write(system, :output_slave, :ch1, :value, true)
-      EtherCAT.stop_system(system)
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
+      :ok = EtherCAT.write(slaves.valve1, :ch1, :value, true)
 
   ## Architecture
 
   - **Declarative**: Define hardware config once, reuse everywhere
-  - **Type-safe**: Spark DSL validates at compile time
+  - **Direct access**: Work with slave PIDs directly, no wrapper structs
+  - **Type-safe**: Drivers handle encoding/decoding
   - **Semantic names**: Use `:temp_sensor` instead of position 0
-  - **Multi-domain**: Different update rates for critical vs diagnostic data
   - **Two-phase init**: Infrastructure managed separately from configuration
   """
 
@@ -108,101 +107,30 @@ defmodule EtherCAT do
   ## Configuration API
 
   @doc """
-  Returns the current System loaded on the Master, or creates a new one if none exists.
+  Configure hardware and start slave drivers.
 
-  If no system is currently configured, this will scan the hardware and automatically
-  generate a configuration based on detected slaves.
-
-  ## Parameters
-  - `master` - Master PID or index (integer)
-
-  ## Returns
-  - `{:ok, system}` - Existing or newly created system
-  - `{:error, reason}` - Error finding master or creating system
-
-  ## Examples
-
-      # With master index
-      {:ok, system} = EtherCAT.get_system(0)
-
-      # With master PID
-      {:ok, master_pid} = EtherCAT.find_master(0)
-      {:ok, system} = EtherCAT.get_system(master_pid)
-  """
-  @spec get_system(pid() | non_neg_integer()) :: {:ok, System.t()} | {:error, term()}
-  def get_system(master) when is_pid(master) do
-    case Master.get_current_system(master) do
-      {:ok, nil} ->
-        # No system loaded, generate config and create one
-        with {:ok, config} <- generate_config_from_master(master),
-             {:ok, system} <- System.configure(master, config) do
-          {:ok, system}
-        end
-
-      {:ok, system} when is_struct(system, System) ->
-        # System already exists, return it
-        {:ok, system}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  def get_system(master_index) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index) do
-      get_system(master)
-    end
-  end
-
-  @doc """
-  Configure hardware and create an operational System.
-
-  Automatically stops any existing system and starts cyclic communication.
+  Automatically stops any existing slaves and starts cyclic communication.
 
   ## Parameters
-  - `master` - Master PID or index (integer)
+  - `master_index` - Master index (integer)
   - `config_or_module` - Configuration module or HardwareConfig struct
 
   ## Returns
-  - `{:ok, system}` - Newly configured system
+  - `{:ok, slaves}` - Map of slave names to PIDs: `%{temp_sensor: pid, valve1: pid}`
   - `{:error, reason}` - Configuration error
 
   ## Examples
 
-      # With module-based config and master index
-      {:ok, system} = EtherCAT.configure_hardware(0, MyMachine)
-
-      # With master PID and HardwareConfig struct
-      {:ok, master} = EtherCAT.find_master(0)
-      {:ok, system} = EtherCAT.configure_hardware(master, config)
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
   """
-  @spec configure_hardware(pid() | non_neg_integer(), module() | HardwareConfig.t()) ::
-          {:ok, System.t()} | {:error, term()}
-  def configure_hardware(master, config_or_module) when is_pid(master) do
-    with {:ok, config} <- get_config(config_or_module),
-         {:ok, system} <- System.configure(master, config) do
-      {:ok, system}
-    end
-  end
-
+  @spec configure_hardware(non_neg_integer(), module() | HardwareConfig.t()) ::
+          {:ok, %{atom() => pid()}} | {:error, term()}
   def configure_hardware(master_index, config_or_module) when is_integer(master_index) do
     with {:ok, master} <- find_master(master_index),
-         {:ok, system} <- configure_hardware(master, config_or_module) do
-      {:ok, system}
-    end
-  end
-
-  @doc """
-  Stop a System and release its resources.
-
-  Stops cyclic mode and clears the system reference from the Master.
-  The Master transitions back to synced state and can be reconfigured.
-  """
-  @spec stop_system(System.t()) :: :ok | {:error, term()}
-  def stop_system(%System{master: master} = _system) do
-    with :ok <- Master.stop_cyclic_mode(master),
-         :ok <- Master.unregister_system(master) do
-      :ok
+         {:ok, config} <- get_config(config_or_module),
+         {:ok, slave_pids} <- Master.configure_and_start_slaves(master, config) do
+      {:ok, slave_pids}
     end
   end
 
@@ -228,57 +156,53 @@ defmodule EtherCAT do
     end
   end
 
-  ## I/O API (delegate to System)
+  ## I/O API - Direct slave PID access
 
   @doc """
-  Reads a PDO entry value from the system.
+  Reads a PDO entry value from a slave.
 
   ## Parameters
-  - `system` - System handle
-  - `slave_name` - Slave name from configuration (atom)
+  - `slave_pid` - Slave driver process PID
   - `pdo_name` - PDO identifier (atom)
   - `entry_name` - Entry identifier (atom)
 
   ## Returns
   - `{:ok, value}` - Decoded entry value
-  - `{:error, reason}` - Read error or entry not found
+  - `{:error, reason}` - Read error
 
   ## Example
 
-      {:ok, temp} = EtherCAT.read(system, :temp_sensor, :ch1, :value)
-      {:ok, error_flag} = EtherCAT.read(system, :temp_sensor, :ch1, :error)
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyConfig)
+      {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
   """
-  @spec read(System.t(), atom(), atom(), atom()) :: {:ok, term()} | {:error, term()}
-  def read(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.read_entry(slave_pid, pdo_name, entry_name)
-    end
+  @spec read(pid(), atom(), atom()) :: {:ok, term()} | {:error, term()}
+  def read(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
+    # Delegate to driver's read/3 callback
+    apply_driver_callback(slave_pid, :read, [slave_pid, pdo_name, entry_name])
   end
 
   @doc """
-  Writes a value to a PDO entry in the system.
+  Writes a value to a PDO entry in a slave.
 
   ## Parameters
-  - `system` - System handle
-  - `slave_name` - Slave name from configuration (atom)
+  - `slave_pid` - Slave driver process PID
   - `pdo_name` - PDO identifier (atom)
   - `entry_name` - Entry identifier (atom)
   - `value` - Value to write (will be encoded by driver)
 
   ## Returns
   - `:ok` - Write successful
-  - `{:error, reason}` - Write error or entry not found
+  - `{:error, reason}` - Write error
 
   ## Example
 
-      :ok = EtherCAT.write(system, :valve_outputs, :ch1, :value, true)
-      :ok = EtherCAT.write(system, :motor_drive, :setpoint, :velocity, 1500)
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyConfig)
+      :ok = EtherCAT.write(slaves.valve1, :ch1, :value, true)
   """
-  @spec write(System.t(), atom(), atom(), atom(), term()) :: :ok | {:error, term()}
-  def write(%System{} = system, slave_name, pdo_name, entry_name, value) do
-    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.write_entry(slave_pid, pdo_name, entry_name, value)
-    end
+  @spec write(pid(), atom(), atom(), term()) :: :ok | {:error, term()}
+  def write(slave_pid, pdo_name, entry_name, value) when is_pid(slave_pid) do
+    # Delegate to driver's write/4 callback
+    apply_driver_callback(slave_pid, :write, [slave_pid, pdo_name, entry_name, value])
   end
 
   @doc """
@@ -288,53 +212,50 @@ defmodule EtherCAT do
   messages when the entry value changes.
 
   ## Parameters
-  - `system` - System handle
-  - `slave_name` - Slave name from configuration (atom)
+  - `slave_pid` - Slave driver process PID
   - `pdo_name` - PDO identifier (atom)
   - `entry_name` - Entry identifier (atom)
 
   ## Returns
   - `:ok` - Subscription successful
-  - `{:error, reason}` - Subscription error or entry not found
+  - `{:error, reason}` - Subscription error
 
   ## Example
 
-      :ok = EtherCAT.watch(system, :temp_sensor, :ch1, :value)
+      {:ok, slaves} = EtherCAT.configure_hardware(0, MyConfig)
+      :ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
 
       receive do
         {:pdo_value_changed, _name, temp} ->
           IO.puts("Temperature changed: \#{temp}")
       end
   """
-  @spec watch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
-  def watch(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.watch_entry(slave_pid, pdo_name, entry_name, self())
-    end
+  @spec watch(pid(), atom(), atom()) :: :ok | {:error, term()}
+  def watch(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
+    # Delegate to driver's subscribe/4 callback
+    apply_driver_callback(slave_pid, :subscribe, [slave_pid, pdo_name, entry_name, self()])
   end
 
   @doc """
   Unsubscribes from value change notifications for a PDO entry.
 
   ## Parameters
-  - `system` - System handle
-  - `slave_name` - Slave name from configuration (atom)
+  - `slave_pid` - Slave driver process PID
   - `pdo_name` - PDO identifier (atom)
   - `entry_name` - Entry identifier (atom)
 
   ## Returns
   - `:ok` - Unsubscription successful
-  - `{:error, reason}` - Unsubscription error or entry not found
+  - `{:error, reason}` - Unsubscription error
 
   ## Example
 
-      :ok = EtherCAT.unwatch(system, :temp_sensor, :ch1, :value)
+      :ok = EtherCAT.unwatch(slaves.temp_sensor, :ch1, :value)
   """
-  @spec unwatch(System.t(), atom(), atom(), atom()) :: :ok | {:error, term()}
-  def unwatch(%System{} = system, slave_name, pdo_name, entry_name) do
-    with {:ok, slave_pid} <- System.find_entry(system, slave_name, pdo_name, entry_name) do
-      Slave.unwatch_entry(slave_pid, pdo_name, entry_name, self())
-    end
+  @spec unwatch(pid(), atom(), atom()) :: :ok | {:error, term()}
+  def unwatch(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
+    # Delegate to driver's unsubscribe/4 callback
+    apply_driver_callback(slave_pid, :unsubscribe, [slave_pid, pdo_name, entry_name, self()])
   end
 
   @doc """
@@ -343,7 +264,7 @@ defmodule EtherCAT do
   Use this for hardware discovery mode when you don't know the slave configuration.
 
   ## Parameters
-  - `master` - Master PID or index (integer)
+  - `master_index` - Master index (integer)
 
   ## Returns
   - `{:ok, config}` - Generated HardwareConfig
@@ -351,15 +272,10 @@ defmodule EtherCAT do
 
   ## Example
 
-      {:ok, system} = EtherCAT.open(0)  # Discovery mode
-      {:ok, config} = EtherCAT.generate_config(system)
+      {:ok, config} = EtherCAT.generate_config(0)
       IO.inspect(config, pretty: true)
   """
-  @spec generate_config(System.t() | pid() | non_neg_integer()) ::
-          {:ok, HardwareConfig.t()} | {:error, term()}
-  def generate_config(%System{master: master}), do: Master.generate_config(master)
-  def generate_config(master) when is_pid(master), do: Master.generate_config(master)
-
+  @spec generate_config(non_neg_integer()) :: {:ok, HardwareConfig.t()} | {:error, term()}
   def generate_config(master_index) when is_integer(master_index) do
     with {:ok, master} <- find_master(master_index) do
       Master.generate_config(master)
@@ -370,7 +286,7 @@ defmodule EtherCAT do
   Get list of detected slave PIDs from Master.
 
   ## Parameters
-  - `master` - Master PID or index (integer)
+  - `master_index` - Master index (integer)
 
   ## Returns
   - `{:ok, [pid]}` - List of slave PIDs
@@ -380,9 +296,7 @@ defmodule EtherCAT do
 
       {:ok, slaves} = EtherCAT.get_slaves(0)
   """
-  @spec get_slaves(pid() | non_neg_integer()) :: {:ok, [pid()]} | {:error, term()}
-  def get_slaves(master) when is_pid(master), do: Master.get_slaves(master)
-
+  @spec get_slaves(non_neg_integer()) :: {:ok, [pid()]} | {:error, term()}
   def get_slaves(master_index) when is_integer(master_index) do
     with {:ok, master} <- find_master(master_index) do
       Master.get_slaves(master)
@@ -390,10 +304,6 @@ defmodule EtherCAT do
   end
 
   ## Private Helpers
-
-  defp generate_config_from_master(master) do
-    Master.generate_config(master)
-  end
 
   defp get_config(module) when is_atom(module) do
     if function_exported?(module, :hardware_config, 0) do
@@ -404,6 +314,16 @@ defmodule EtherCAT do
   end
 
   defp get_config(%HardwareConfig{} = config), do: {:ok, config}
-
   defp get_config(other), do: {:error, {:invalid_config, other}}
+
+  # Look up the driver module and call its function
+  defp apply_driver_callback(slave_pid, function, args) do
+    case Registry.lookup(EtherCAT.Registry, {:slave, slave_pid}) do
+      [{^slave_pid, %{driver: driver_module}}] ->
+        apply(driver_module, function, args)
+
+      [] ->
+        {:error, {:slave_not_found, slave_pid}}
+    end
+  end
 end

@@ -252,6 +252,157 @@ defmodule EtherCAT.Slave.Driver do
               :ok | {:error, term()}
 
   # ========================================================================
+  # __using__ macro - Inject helper functions
+  # ========================================================================
+
+  @doc false
+  defmacro __using__(_opts) do
+    quote do
+      import EtherCAT.Slave.Driver, only: [encode_pdo_value: 2, decode_pdo_value: 2]
+
+      @doc """
+      Helper to read a PDO entry from the Master.
+
+      Call this from your driver's read/3 implementation.
+
+      ## Parameters
+      - `master` - Master PID
+      - `domain` - Domain name (atom)
+      - `unique_name` - Unique entry name string
+      - `type` - PDO entry type (for decoding)
+
+      ## Returns
+      - `{:ok, decoded_value}` on success
+      - `{:error, reason}` on failure
+
+      ## Example
+
+          def handle_call({:read, pdo_name, entry_name}, _from, state) do
+            unique_name = build_unique_name(state.position, pdo_name, entry_name)
+            type = get_entry_type(pdo_name, entry_name)
+
+            result = read_from_master(state.master, :default_domain, unique_name, type)
+            {:reply, result, state}
+          end
+      """
+      def read_from_master(master, domain, unique_name, type) do
+        with {:ok, binary} <- EtherCAT.Master.read_pdo_entry(master, domain, unique_name),
+             {:ok, value} <- EtherCAT.Slave.Driver.decode_pdo_value(type, binary) do
+          {:ok, value}
+        end
+      end
+
+      @doc """
+      Helper to write a PDO entry to the Master.
+
+      Call this from your driver's write/4 implementation.
+
+      ## Parameters
+      - `master` - Master PID
+      - `domain` - Domain name (atom)
+      - `unique_name` - Unique entry name string
+      - `type` - PDO entry type (for encoding)
+      - `value` - Value to write
+
+      ## Returns
+      - `:ok` on success
+      - `{:error, reason}` on failure
+
+      ## Example
+
+          def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
+            unique_name = build_unique_name(state.position, pdo_name, entry_name)
+            type = get_entry_type(pdo_name, entry_name)
+
+            result = write_to_master(state.master, :default_domain, unique_name, type, value)
+            {:reply, result, state}
+          end
+      """
+      def write_to_master(master, domain, unique_name, type, value) do
+        with {:ok, binary} <- EtherCAT.Slave.Driver.encode_pdo_value(type, value) do
+          EtherCAT.Master.write_pdo_entry(master, domain, unique_name, binary)
+        end
+      end
+
+      @doc """
+      Helper to subscribe to PDO entry changes via the Master.
+
+      Call this from your driver's subscribe/4 implementation.
+
+      ## Parameters
+      - `master` - Master PID
+      - `domain` - Domain name (atom)
+      - `unique_name` - Unique entry name string
+      - `subscriber` - PID to receive notifications
+
+      ## Returns
+      - `:ok` on success
+      - `{:error, reason}` on failure
+      """
+      def subscribe_to_master(master, domain, unique_name, subscriber) do
+        EtherCAT.Master.subscribe(master, domain, unique_name, subscriber)
+      end
+
+      @doc """
+      Helper to unsubscribe from PDO entry changes via the Master.
+
+      Call this from your driver's unsubscribe/4 implementation.
+
+      ## Parameters
+      - `master` - Master PID
+      - `domain` - Domain name (atom)
+      - `unique_name` - Unique entry name string
+      - `subscriber` - PID to unsubscribe
+
+      ## Returns
+      - `:ok` on success
+      - `{:error, reason}` on failure
+      """
+      def unsubscribe_from_master(master, domain, unique_name, subscriber) do
+        EtherCAT.Master.unsubscribe(master, domain, unique_name, subscriber)
+      end
+
+      @doc """
+      Helper to build a unique entry name for Master lookups.
+
+      ## Parameters
+      - `position` - Slave position (integer)
+      - `pdo_name` - PDO name (atom or string)
+      - `entry_name` - Entry name (atom or string)
+
+      ## Returns
+      - Unique name string like "slave_0:ch1:value"
+
+      ## Example
+
+          unique_name = build_unique_name(0, :ch1, :value)
+          # => "slave_0:ch1:value"
+      """
+      def build_unique_name(position, pdo_name, entry_name) do
+        "slave_#{position}:#{pdo_name}:#{entry_name}"
+      end
+
+      @doc """
+      Default encode - delegates to Driver.encode_pdo_value/2.
+
+      Use this in your driver when you don't need custom encoding.
+      """
+      def default_encode(type, value) do
+        EtherCAT.Slave.Driver.encode_pdo_value(type, value)
+      end
+
+      @doc """
+      Default decode - delegates to Driver.decode_pdo_value/2.
+
+      Use this in your driver when you don't need custom decoding.
+      """
+      def default_decode(type, binary) do
+        EtherCAT.Slave.Driver.decode_pdo_value(type, binary)
+      end
+    end
+  end
+
+  # ========================================================================
   # Default Encoding/Decoding Helpers
   # ========================================================================
 

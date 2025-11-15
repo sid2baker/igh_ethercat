@@ -15,6 +15,7 @@ defmodule EtherCAT.Drivers.Generic do
   """
 
   use GenServer
+  use EtherCAT.Slave.Driver
   require Logger
 
   alias EtherCAT.{Master, Nif, Slave.Driver}
@@ -163,53 +164,35 @@ defmodule EtherCAT.Drivers.Generic do
 
   def handle_call({:read, pdo_name, entry_name}, _from, state) do
     unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
+    type = get_entry_type(state, pdo_name, entry_name)
 
-    case Master.read_pdo_entry(state.master, domain, unique_name) do
-      {:ok, binary} ->
-        # Decode using default logic
-        type = get_entry_type(state, pdo_name, entry_name)
-
-        case Driver.decode_pdo_value(type, binary) do
-          {:ok, value} -> {:reply, {:ok, value}, state}
-          {:error, _} = error -> {:reply, error, state}
-        end
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+    # Use injected helper function
+    result = read_from_master(state.master, :default_domain, unique_name, type)
+    {:reply, result, state}
   end
 
   def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
     unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
     type = get_entry_type(state, pdo_name, entry_name)
 
-    case Driver.encode_pdo_value(type, value) do
-      {:ok, binary} ->
-        result = Master.write_pdo_entry(state.master, domain, unique_name, binary)
-        {:reply, result, state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+    # Use injected helper function
+    result = write_to_master(state.master, :default_domain, unique_name, type, value)
+    {:reply, result, state}
   end
 
   def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    # Build unique_name and use Master.subscribe with domain_name + unique_name
     unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
 
-    result = Master.subscribe(state.master, domain, unique_name, subscriber)
+    # Use injected helper function
+    result = subscribe_to_master(state.master, :default_domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
   def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    # Build unique_name and use Master.unsubscribe with domain_name + unique_name
     unique_name = build_unique_name(state.position, pdo_name, entry_name)
-    domain = :default_domain
 
-    result = Master.unsubscribe(state.master, domain, unique_name, subscriber)
+    # Use injected helper function
+    result = unsubscribe_from_master(state.master, :default_domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
@@ -278,10 +261,6 @@ defmodule EtherCAT.Drivers.Generic do
 
   defp get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
     Master.get_pdo_entry(state.master, state.position, sync_index, pdo_pos, entry_pos)
-  end
-
-  defp build_unique_name(position, pdo_name, entry_name) do
-    "slave_#{position}:#{pdo_name}:#{entry_name}"
   end
 
   defp get_entry_type(state, pdo_name, entry_name) do
