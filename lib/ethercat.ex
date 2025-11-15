@@ -76,7 +76,7 @@ defmodule EtherCAT do
 
   use Supervisor
 
-  alias EtherCAT.{Master, System, Slave}
+  alias EtherCAT.Master
   alias EtherCAT.Config.HardwareConfig
 
   ## Supervision API
