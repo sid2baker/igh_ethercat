@@ -141,16 +141,17 @@ defmodule EtherCAT.Drivers.Generic do
   @impl true
   def handle_call(:get_pdo_config, _from, state) do
     # Convert internal pdo_map to Driver.pdo_config format
+    # SECURITY: Use existing_atom to prevent atom exhaustion from untrusted EEPROM data
     pdo_configs =
       Enum.map(state.pdo_map, fn {pdo_name, pdo_info} ->
         %{
-          name: String.to_atom(pdo_name),
+          name: safe_to_atom(pdo_name),
           sync_manager: pdo_info.sync_manager,
           pdo_index: pdo_info.pdo_index,
           entries:
             Map.new(pdo_info.entries, fn {entry_name, {index, subindex, bit_length}} ->
               type = Driver.infer_type_from_bit_length(bit_length)
-              {String.to_atom(entry_name), {type, index, subindex, bit_length}}
+              {safe_to_atom(entry_name), {type, index, subindex, bit_length}}
             end),
           domain: :default_domain,
           supports_pdo_config?: true
@@ -204,39 +205,98 @@ defmodule EtherCAT.Drivers.Generic do
   # Private Helpers
   # ============================================================================
 
+  # SECURITY: Safely convert string to atom, only if it already exists
+  # This prevents atom exhaustion from untrusted EEPROM data
+  defp safe_to_atom(string) when is_binary(string) do
+    try do
+      String.to_existing_atom(string)
+    rescue
+      ArgumentError ->
+        # Atom doesn't exist - use string instead to prevent atom creation
+        # This is safe because the driver can work with string keys
+        string
+    end
+  end
+
+  defp safe_to_atom(value), do: value
+
   # Discover all PDOs from slave's EEPROM
   defp discover_pdos_from_eeprom(state) do
-    for sync_index <- 0..(state.sync_count - 1) do
-      sync_manager = get_sync_manager(state, sync_index)
+    try do
+      sync_results =
+        for sync_index <- 0..(state.sync_count - 1) do
+          case get_sync_manager(state, sync_index) do
+            {:ok, sync_manager} ->
+              discover_pdos_for_sync_manager(state, sync_index, sync_manager)
 
-      for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
-        pdo = get_pdo(state, sync_index, pdo_pos)
+            {:error, reason} ->
+              Logger.warning(
+                "Failed to get sync manager #{sync_index} for slave #{state.position}: #{inspect(reason)}"
+              )
 
-        entries =
-          for entry_pos <- 0..(pdo.n_entries - 1) do
-            entry = get_pdo_entry(state, sync_index, pdo_pos, entry_pos)
-
-            entry_name =
-              "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
-
-            {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+              []
           end
-          |> Map.new()
+        end
 
-        pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
+      sync_results
+      |> List.flatten()
+      |> Map.new()
+    rescue
+      error ->
+        Logger.error(
+          "Failed to discover PDOs for slave #{state.position}: #{inspect(error)}"
+        )
 
-        direction = normalize_direction(sync_manager.dir)
-        watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+        %{}
+    end
+  end
 
-        {pdo_name,
-         %{
-           sync_manager: {sync_manager.index, direction, watchdog_mode},
-           pdo_index: pdo.index,
-           entries: entries
-         }}
+  defp discover_pdos_for_sync_manager(state, sync_index, sync_manager) do
+    for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
+      case get_pdo(state, sync_index, pdo_pos) do
+        {:ok, pdo} ->
+          entries = discover_pdo_entries(state, sync_index, pdo_pos, pdo.n_entries)
+          pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
+
+          direction = normalize_direction(sync_manager.dir)
+          watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+
+          {pdo_name,
+           %{
+             sync_manager: {sync_manager.index, direction, watchdog_mode},
+             pdo_index: pdo.index,
+             entries: entries
+           }}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{state.position}: #{inspect(reason)}"
+          )
+
+          nil
       end
     end
-    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp discover_pdo_entries(state, sync_index, pdo_pos, n_entries) do
+    for entry_pos <- 0..(n_entries - 1) do
+      case get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
+        {:ok, entry} ->
+          entry_name =
+            "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
+
+          {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to get PDO entry #{entry_pos} for slave #{state.position}: #{inspect(reason)}"
+          )
+
+          nil
+      end
+    end
+    |> Enum.reject(&is_nil/1)
     |> Map.new()
   end
 
@@ -250,15 +310,30 @@ defmodule EtherCAT.Drivers.Generic do
   defp normalize_watchdog_mode(2), do: :disabled
 
   defp get_sync_manager(state, sync_index) do
-    Master.get_sync_manager(state.master, state.position, sync_index)
+    try do
+      result = Master.get_sync_manager(state.master, state.position, sync_index)
+      {:ok, result}
+    rescue
+      error -> {:error, error}
+    end
   end
 
   defp get_pdo(state, sync_index, pdo_pos) do
-    Master.get_pdo(state.master, state.position, sync_index, pdo_pos)
+    try do
+      result = Master.get_pdo(state.master, state.position, sync_index, pdo_pos)
+      {:ok, result}
+    rescue
+      error -> {:error, error}
+    end
   end
 
   defp get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
-    Master.get_pdo_entry(state.master, state.position, sync_index, pdo_pos, entry_pos)
+    try do
+      result = Master.get_pdo_entry(state.master, state.position, sync_index, pdo_pos, entry_pos)
+      {:ok, result}
+    rescue
+      error -> {:error, error}
+    end
   end
 
   defp get_entry_type(state, pdo_name, entry_name) do

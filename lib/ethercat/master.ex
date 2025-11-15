@@ -87,6 +87,21 @@ defmodule EtherCAT.Master do
         }
 
   # ============================================================================
+  # Child Spec for Supervision
+  # ============================================================================
+
+  @doc false
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5000
+    }
+  end
+
+  # ============================================================================
   # Client API
   # ============================================================================
 
@@ -140,6 +155,23 @@ defmodule EtherCAT.Master do
 
   def get_hardware_diff(master \\ __MODULE__) do
     :gen_statem.call(master, :get_hardware_diff)
+  end
+
+  @doc """
+  Generate a hardware configuration from currently detected slaves.
+
+  This is useful for discovering and documenting your hardware setup.
+
+  ## Parameters
+  - `master` - Master process (PID or module name)
+
+  ## Returns
+  - `{:ok, config}` - Generated HardwareConfig struct
+  - `{:error, reason}` - Not yet synced or generation error
+  """
+  @spec generate_config(pid() | atom()) :: {:ok, EtherCAT.Config.HardwareConfig.t()} | {:error, term()}
+  def generate_config(master \\ __MODULE__) do
+    :gen_statem.call(master, :generate_config)
   end
 
   @doc """
@@ -209,13 +241,27 @@ defmodule EtherCAT.Master do
   def terminate(reason, _state, data) do
     Logger.info("Master terminating: #{inspect(reason)}")
 
-    if data.task_pid do
-      Process.exit(data.task_pid, :kill)
+    # Safely cleanup cyclic task
+    if is_map(data) and Map.has_key?(data, :task_pid) and data.task_pid do
+      if Process.alive?(data.task_pid) do
+        Process.exit(data.task_pid, :kill)
+      end
     end
 
-    Enum.each(data.slaves, fn {_position, slave_info} ->
-      if Process.alive?(slave_info.pid), do: GenServer.stop(slave_info.pid)
-    end)
+    # Safely cleanup slave drivers
+    if is_map(data) and Map.has_key?(data, :slaves) and is_map(data.slaves) do
+      Enum.each(data.slaves, fn {_position, slave_info} ->
+        if is_map(slave_info) and Map.has_key?(slave_info, :pid) do
+          if Process.alive?(slave_info.pid) do
+            try do
+              GenServer.stop(slave_info.pid, :normal, 5000)
+            catch
+              :exit, _ -> :ok
+            end
+          end
+        end
+      end)
+    end
 
     :ok
   end
@@ -261,7 +307,7 @@ defmodule EtherCAT.Master do
   # State: :scanning
   # ============================================================================
 
-  def scanning(:enter, _old_state, data) do
+  def scanning(:enter, _old_state, _data) do
     Logger.info("Entered :scanning state - discovering slaves")
     {:keep_state_and_data, [{:next_event, :internal, :discover_slaves}]}
   end
@@ -272,23 +318,36 @@ defmodule EtherCAT.Master do
         slave_count = master_state.slaves_responding
         Logger.info("Discovered #{slave_count} slaves")
 
-        # Start driver processes for each slave
-        slaves =
-          for position <- 0..(slave_count - 1), into: %{} do
-            {:ok, slave_info} = start_slave_driver(data, position)
-            {position, slave_info}
-          end
+        # Start driver processes for each slave with error handling
+        result =
+          Enum.reduce_while(0..(slave_count - 1), {:ok, %{}}, fn position, {:ok, acc_slaves} ->
+            case start_slave_driver(data, position) do
+              {:ok, slave_info} ->
+                {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
 
-        # Generate hardware diff if we have expected config
-        hardware_diff =
-          if data.hardware_config do
-            generate_hardware_diff(data.hardware_config, slaves)
-          else
-            nil
-          end
+              {:error, reason} ->
+                Logger.error("Failed to start driver for slave #{position}: #{inspect(reason)}")
+                {:halt, {:error, {:slave_driver_start_failed, position, reason}}}
+            end
+          end)
 
-        new_data = %{data | slaves: slaves, hardware_diff: hardware_diff}
-        {:next_state, :ready, new_data}
+        case result do
+          {:ok, slaves} ->
+            # Generate hardware diff if we have expected config
+            hardware_diff =
+              if data.hardware_config do
+                generate_hardware_diff(data.hardware_config, slaves)
+              else
+                nil
+              end
+
+            new_data = %{data | slaves: slaves, hardware_diff: hardware_diff}
+            {:next_state, :ready, new_data}
+
+          {:error, reason} ->
+            Logger.error("Failed to start all slave drivers: #{inspect(reason)}")
+            {:next_state, :offline, data}
+        end
 
       {:error, reason} ->
         Logger.error("Failed to discover slaves: #{inspect(reason)}")
@@ -436,6 +495,12 @@ defmodule EtherCAT.Master do
 
   def ready({:call, from}, :get_hardware_diff, data) do
     {:keep_state_and_data, [{:reply, from, {:ok, data.hardware_diff}}]}
+  end
+
+  def ready({:call, from}, :generate_config, data) do
+    # TODO: Implement hardware config generation from discovered slaves
+    # For now, return a placeholder error
+    {:keep_state_and_data, [{:reply, from, {:error, :not_implemented}}]}
   end
 
   def ready({:call, from}, {:subscribe, domain_name, unique_name, subscriber_pid}, data) do
@@ -629,40 +694,37 @@ defmodule EtherCAT.Master do
   # ============================================================================
 
   defp start_slave_driver(data, position) do
-    {:ok, slave_info} = Nif.master_get_slave(data.master_ref, position)
-
-    {:ok, slave_config} =
-      Nif.master_slave_config(
-        data.master_ref,
-        0,
-        position,
-        slave_info.vendor_id,
-        slave_info.product_code
-      )
-
-    driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code)
-
-    {:ok, pid} =
-      driver_module.start_link(
-        master: self(),
-        position: position,
-        slave_config: slave_config,
-        vendor_id: slave_info.vendor_id,
-        product_code: slave_info.product_code,
-        revision: slave_info.revision_number,
-        serial: slave_info.serial_number,
-        sync_count: slave_info.sync_count,
-        config: %{}
-      )
-
-    {:ok,
-     %{
-       pid: pid,
-       name: :"slave_#{position}",
-       vendor: slave_info.vendor_id,
-       product: slave_info.product_code,
-       driver: driver_module
-     }}
+    with {:ok, slave_info} <- Nif.master_get_slave(data.master_ref, position),
+         {:ok, slave_config} <-
+           Nif.master_slave_config(
+             data.master_ref,
+             0,
+             position,
+             slave_info.vendor_id,
+             slave_info.product_code
+           ),
+         driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code),
+         {:ok, pid} <-
+           driver_module.start_link(
+             master: self(),
+             position: position,
+             slave_config: slave_config,
+             vendor_id: slave_info.vendor_id,
+             product_code: slave_info.product_code,
+             revision: slave_info.revision_number,
+             serial: slave_info.serial_number,
+             sync_count: slave_info.sync_count,
+             config: %{}
+           ) do
+      {:ok,
+       %{
+         pid: pid,
+         name: :"slave_#{position}",
+         vendor: slave_info.vendor_id,
+         product: slave_info.product_code,
+         driver: driver_module
+       }}
+    end
   end
 
   defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Drivers.Generic
@@ -683,13 +745,19 @@ defmodule EtherCAT.Master do
 
     Logger.debug("Configuring slave #{position} (#{inspect(driver_module)})")
 
-    # Step 1: Get and write SDO configuration
+    with {:ok, slave_config} <- get_slave_config_for_position(data, position),
+         :ok <- configure_slave_sdos(slave_config, position, driver_module, slave_pid),
+         pdo_configs = driver_module.get_pdo_config(slave_pid),
+         :ok <- configure_slave_pdos(data, position, pdo_configs),
+         :ok <- register_pdo_entries(data, position, slave_info, pdo_configs) do
+      :ok
+    end
+  end
+
+  defp configure_slave_sdos(slave_config, position, driver_module, slave_pid) do
     sdo_configs = driver_module.get_sdo_config(slave_pid)
 
     Enum.each(sdo_configs, fn {index, subindex, sdo_data} ->
-      # Get slave_config from driver
-      {:ok, slave_config} = get_slave_config_for_position(data, position)
-
       case Nif.slave_config_sdo(slave_config, index, subindex, sdo_data) do
         :ok ->
           Logger.debug(
@@ -703,39 +771,53 @@ defmodule EtherCAT.Master do
       end
     end)
 
-    # Step 2: Get PDO configuration from driver
-    pdo_configs = driver_module.get_pdo_config(slave_pid)
+    :ok
+  end
 
-    # Step 3: Group PDOs by sync manager
+  defp configure_slave_pdos(data, position, pdo_configs) do
+    # Group PDOs by sync manager
     pdos_by_sm =
       Enum.group_by(pdo_configs, fn pdo_config ->
         {sm_index, _direction, _watchdog} = pdo_config.sync_manager
         sm_index
       end)
 
-    # Step 4: Configure each sync manager
-    Enum.each(pdos_by_sm, fn {sm_index, sm_pdos} ->
-      configure_sync_manager(data, position, sm_index, sm_pdos)
+    # Configure each sync manager
+    Enum.reduce_while(pdos_by_sm, :ok, fn {sm_index, sm_pdos}, :ok ->
+      case configure_sync_manager(data, position, sm_index, sm_pdos) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
     end)
-
-    # Step 5: Register PDO entries to domains
-    register_pdo_entries(data, position, slave_info, pdo_configs)
   end
 
-  defp configure_sync_manager(data, position, sm_index, sm_pdos) do
-    {:ok, slave_config} = get_slave_config_for_position(data, position)
+  defp configure_sync_manager(_data, _position, _sm_index, []) do
+    # Empty PDO list - nothing to configure
+    :ok
+  end
 
-    # Get SM config from first PDO
-    {_sm_index, direction, watchdog} = hd(sm_pdos).sync_manager
+  defp configure_sync_manager(data, position, sm_index, sm_pdos) when is_list(sm_pdos) do
+    with {:ok, slave_config} <- get_slave_config_for_position(data, position),
+         [first_pdo | _] = sm_pdos,
+         {_sm_index, direction, watchdog} = first_pdo.sync_manager,
+         :ok <- do_configure_sync_manager(slave_config, position, sm_index, direction, watchdog),
+         :ok <- do_clear_and_assign_pdos(slave_config, position, sm_index, sm_pdos),
+         :ok <- do_configure_pdo_mappings(slave_config, position, sm_pdos, first_pdo) do
+      :ok
+    end
+  end
 
-    # Step 1: Configure sync manager
+  defp do_configure_sync_manager(slave_config, position, sm_index, direction, watchdog) do
     Logger.debug("Slave #{position}: Configuring SM#{sm_index} (#{direction})")
     Nif.slave_config_sync_manager(slave_config, sm_index, direction, watchdog)
+    :ok
+  end
 
-    # Step 2: Clear PDO assignments
+  defp do_clear_and_assign_pdos(slave_config, position, sm_index, sm_pdos) do
+    # Clear PDO assignments
     Nif.slave_config_pdo_assign_clear(slave_config, sm_index)
 
-    # Step 3: Add all PDO assignments for this SM
+    # Add all PDO assignments for this SM
     pdo_indices = Enum.map(sm_pdos, & &1.pdo_index) |> Enum.uniq()
 
     Enum.each(pdo_indices, fn pdo_index ->
@@ -746,14 +828,19 @@ defmodule EtherCAT.Master do
       )
     end)
 
-    # Step 4: Configure PDO mappings (if device supports it)
-    supports_pdo_config = Map.get(hd(sm_pdos), :supports_pdo_config?, true)
+    :ok
+  end
+
+  defp do_configure_pdo_mappings(slave_config, position, sm_pdos, first_pdo) do
+    supports_pdo_config = Map.get(first_pdo, :supports_pdo_config?, true)
 
     if supports_pdo_config do
       Enum.each(sm_pdos, fn pdo_config ->
         configure_pdo_mappings(slave_config, position, pdo_config)
       end)
     end
+
+    :ok
   end
 
   defp configure_pdo_mappings(slave_config, position, pdo_config) do
@@ -780,58 +867,67 @@ defmodule EtherCAT.Master do
   end
 
   defp register_pdo_entries(data, position, slave_info, pdo_configs) do
-    {:ok, slave_config} = get_slave_config_for_position(data, position)
+    with {:ok, slave_config} <- get_slave_config_for_position(data, position) do
+      Enum.reduce_while(pdo_configs, :ok, fn pdo_config, :ok ->
+        # Determine which domain this PDO belongs to
+        domain_name = Map.get(pdo_config, :domain, :default_domain)
 
-    Enum.reduce_while(pdo_configs, :ok, fn pdo_config, :ok ->
-      # Determine which domain this PDO belongs to
-      domain_name = Map.get(pdo_config, :domain, :default_domain)
+        case data.domains[domain_name] do
+          nil ->
+            Logger.error(
+              "Slave #{position}: Domain #{domain_name} not found for PDO #{pdo_config.name}"
+            )
 
-      case data.domains[domain_name] do
-        nil ->
-          Logger.error(
-            "Slave #{position}: Domain #{domain_name} not found for PDO #{pdo_config.name}"
-          )
+            {:halt, {:error, {:domain_not_found, domain_name}}}
 
-          {:halt, {:error, {:domain_not_found, domain_name}}}
-
-        domain_info ->
-          register_pdo_to_domain(
-            slave_config,
-            domain_info.ref,
-            position,
-            slave_info.name,
-            pdo_config
-          )
-
-          {:cont, :ok}
-      end
-    end)
+          domain_info ->
+            case register_pdo_to_domain(
+                   slave_config,
+                   domain_info.ref,
+                   position,
+                   slave_info.name,
+                   pdo_config
+                 ) do
+              :ok -> {:cont, :ok}
+              {:error, _} = error -> {:halt, error}
+            end
+        end
+      end)
+    end
   end
 
   defp register_pdo_to_domain(slave_config, domain_ref, position, slave_name, pdo_config) do
     {_sm_index, direction, _watchdog} = pdo_config.sync_manager
 
-    Enum.each(pdo_config.entries, fn {entry_name,
-                                      {_type, entry_index, entry_subindex, bit_length}} ->
-      # Build unique name for this entry
-      unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
+    try do
+      Enum.each(pdo_config.entries, fn {entry_name,
+                                        {_type, entry_index, entry_subindex, bit_length}} ->
+        # Build unique name for this entry
+        unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
 
-      # Register with NIF
-      _offset =
-        Nif.slave_config_reg_pdo_entry(
-          slave_config,
-          unique_name,
-          entry_index,
-          entry_subindex,
-          bit_length,
-          domain_ref,
-          direction
+        # Register with NIF (can raise on error)
+        _offset =
+          Nif.slave_config_reg_pdo_entry(
+            slave_config,
+            unique_name,
+            entry_index,
+            entry_subindex,
+            bit_length,
+            domain_ref,
+            direction
+          )
+
+        Logger.debug(
+          "Slave #{position}: Registered #{unique_name} to domain (direction: #{direction})"
         )
+      end)
 
-      Logger.debug(
-        "Slave #{position}: Registered #{unique_name} to domain (direction: #{direction})"
-      )
-    end)
+      :ok
+    rescue
+      error ->
+        Logger.error("Failed to register PDO entries for slave #{position}: #{inspect(error)}")
+        {:error, {:pdo_registration_failed, error}}
+    end
   end
 
   defp get_slave_config_for_position(data, position) do
@@ -940,41 +1036,37 @@ defmodule EtherCAT.Master do
 
   defp start_configured_slave_driver(data, position, slave_config) do
     # Get hardware info for this slave
-    {:ok, slave_info} = Nif.master_get_slave(data.master_ref, position)
-
-    {:ok, slave_config_ref} =
-      Nif.master_slave_config(
-        data.master_ref,
-        0,
-        position,
-        slave_info.vendor_id,
-        slave_info.product_code
-      )
-
-    # Use driver from config or fall back to Generic
-    driver_module = slave_config.driver || EtherCAT.Drivers.Generic
-
-    {:ok, pid} =
-      driver_module.start_link(
-        master: self(),
-        position: position,
-        slave_config: slave_config_ref,
-        vendor_id: slave_info.vendor_id,
-        product_code: slave_info.product_code,
-        revision: slave_info.revision_number,
-        serial: slave_info.serial_number,
-        sync_count: slave_info.sync_count,
-        config: slave_config.config || %{}
-      )
-
-    {:ok,
-     %{
-       pid: pid,
-       name: slave_config.name,
-       vendor: slave_info.vendor_id,
-       product: slave_info.product_code,
-       driver: driver_module
-     }}
+    with {:ok, slave_info} <- Nif.master_get_slave(data.master_ref, position),
+         {:ok, slave_config_ref} <-
+           Nif.master_slave_config(
+             data.master_ref,
+             0,
+             position,
+             slave_info.vendor_id,
+             slave_info.product_code
+           ),
+         driver_module = slave_config.driver || EtherCAT.Drivers.Generic,
+         {:ok, pid} <-
+           driver_module.start_link(
+             master: self(),
+             position: position,
+             slave_config: slave_config_ref,
+             vendor_id: slave_info.vendor_id,
+             product_code: slave_info.product_code,
+             revision: slave_info.revision_number,
+             serial: slave_info.serial_number,
+             sync_count: slave_info.sync_count,
+             config: slave_config.config || %{}
+           ) do
+      {:ok,
+       %{
+         pid: pid,
+         name: slave_config.name,
+         vendor: slave_info.vendor_id,
+         product: slave_info.product_code,
+         driver: driver_module
+       }}
+    end
   end
 
   defp activate_and_start_cyclic(data, config) do
