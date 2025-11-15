@@ -32,9 +32,13 @@ defmodule EtherCAT.Master do
 
   ```elixir
   subscribers: %{
-    {slave_name, pdo_name, entry_name} => [pid, ...]
+    {domain_name, unique_name} => [pid, ...]
   }
   ```
+
+  Where:
+  - `domain_name` - Domain identifier (e.g., `:default_domain`)
+  - `unique_name` - Full entry identifier (e.g., `"slave_0:pdo:entry"`)
 
   ## Hardware Diff Structure
 
@@ -72,8 +76,8 @@ defmodule EtherCAT.Master do
           slaves: %{non_neg_integer() => map()},
           # Map of domain_name => %{ref, interval}
           domains: %{atom() => %{ref: reference(), interval: pos_integer()}},
-          # Map of {slave_name, pdo, entry} => [subscriber_pids]
-          subscribers: %{{atom(), atom(), atom()} => [pid()]},
+          # Map of {domain_name, unique_name} => [subscriber_pids]
+          subscribers: %{{atom(), String.t()} => [pid()]},
           task_pid: pid() | nil,
           scan_interval: pos_integer(),
           # Expected hardware configuration
@@ -114,12 +118,12 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, {:write_pdo_entry, domain_name, unique_name, binary_data})
   end
 
-  def subscribe(master \\ __MODULE__, slave_name, pdo_name, entry_name, subscriber_pid) do
-    :gen_statem.call(master, {:subscribe, slave_name, pdo_name, entry_name, subscriber_pid})
+  def subscribe(master \\ __MODULE__, domain_name, unique_name, subscriber_pid) do
+    :gen_statem.call(master, {:subscribe, domain_name, unique_name, subscriber_pid})
   end
 
-  def unsubscribe(master \\ __MODULE__, slave_name, pdo_name, entry_name, subscriber_pid) do
-    :gen_statem.call(master, {:unsubscribe, slave_name, pdo_name, entry_name, subscriber_pid})
+  def unsubscribe(master \\ __MODULE__, domain_name, unique_name, subscriber_pid) do
+    :gen_statem.call(master, {:unsubscribe, domain_name, unique_name, subscriber_pid})
   end
 
   def get_sync_manager(master \\ __MODULE__, position, sync_index) do
@@ -363,17 +367,17 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.hardware_diff}}]}
   end
 
-  def ready({:call, from}, {:subscribe, slave_name, pdo_name, entry_name, subscriber_pid}, data) do
+  def ready({:call, from}, {:subscribe, domain_name, unique_name, subscriber_pid}, data) do
     Process.monitor(subscriber_pid)
 
-    key = {slave_name, pdo_name, entry_name}
+    key = {domain_name, unique_name}
     new_subscribers = Map.update(data.subscribers, key, [subscriber_pid], &[subscriber_pid | &1])
 
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
   end
 
-  def ready({:call, from}, {:unsubscribe, slave_name, pdo_name, entry_name, subscriber_pid}, data) do
-    key = {slave_name, pdo_name, entry_name}
+  def ready({:call, from}, {:unsubscribe, domain_name, unique_name, subscriber_pid}, data) do
+    key = {domain_name, unique_name}
 
     new_subscribers =
       case data.subscribers[key] do
@@ -479,12 +483,18 @@ defmodule EtherCAT.Master do
   end
 
   # Handle data change notifications from NIF
-  def operational(:info, {:data_changed, unique_name, value}, data) do
-    # Parse unique_name to extract slave/pdo/entry
-    # Format: "slave_0:pdo_name:entry_name" or "slave_name:pdo_name:entry_name"
-    case parse_unique_name(unique_name) do
-      {:ok, slave_name, pdo_name, entry_name} ->
-        key = {slave_name, pdo_name, entry_name}
+  # NIF sends: {:data_changed, domain_ref, unique_name, value}
+  def operational(:info, {:data_changed, domain_ref, unique_name, value}, data) do
+    # Find domain_name from domain_ref
+    domain_name = find_domain_name(data.domains, domain_ref)
+
+    case domain_name do
+      nil ->
+        Logger.warning("Received data_changed for unknown domain: #{inspect(domain_ref)}")
+        :keep_state_and_data
+
+      domain_name ->
+        key = {domain_name, unique_name}
 
         case data.subscribers[key] do
           nil ->
@@ -492,13 +502,29 @@ defmodule EtherCAT.Master do
 
           pids ->
             Enum.each(pids, fn pid ->
-              send(pid, {:pdo_value_changed, slave_name, pdo_name, entry_name, value})
+              send(pid, {:pdo_value_changed, domain_name, unique_name, value})
             end)
 
             :keep_state_and_data
         end
+    end
+  end
 
-      :error ->
+  # Fallback for old NIF format (if it only sends 2-tuple)
+  def operational(:info, {:data_changed, unique_name, value}, data) do
+    # Assume default_domain if NIF doesn't specify
+    domain_name = :default_domain
+    key = {domain_name, unique_name}
+
+    case data.subscribers[key] do
+      nil ->
+        :keep_state_and_data
+
+      pids ->
+        Enum.each(pids, fn pid ->
+          send(pid, {:pdo_value_changed, domain_name, unique_name, value})
+        end)
+
         :keep_state_and_data
     end
   end
@@ -764,15 +790,10 @@ defmodule EtherCAT.Master do
     end
   end
 
-  defp parse_unique_name(unique_name) do
-    case String.split(unique_name, ":") do
-      [slave_part, pdo, entry] ->
-        slave_name = String.to_atom(slave_part)
-        {:ok, slave_name, String.to_atom(pdo), String.to_atom(entry)}
-
-      _ ->
-        :error
-    end
+  defp find_domain_name(domains, domain_ref) do
+    Enum.find_value(domains, fn {name, info} ->
+      if info.ref == domain_ref, do: name
+    end)
   end
 
   # ============================================================================

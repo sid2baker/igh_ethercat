@@ -196,18 +196,20 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    # Use the new Master subscribe API with slave_name, pdo_name, entry_name
-    slave_name = :"slave_#{state.position}"
+    # Build unique_name and use Master.subscribe with domain_name + unique_name
+    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    domain = :default_domain
 
-    result = Master.subscribe(state.master, slave_name, pdo_name, entry_name, subscriber)
+    result = Master.subscribe(state.master, domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
   def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    # Use the new Master unsubscribe API with slave_name, pdo_name, entry_name
-    slave_name = :"slave_#{state.position}"
+    # Build unique_name and use Master.unsubscribe with domain_name + unique_name
+    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    domain = :default_domain
 
-    result = Master.unsubscribe(state.master, slave_name, pdo_name, entry_name, subscriber)
+    result = Master.unsubscribe(state.master, domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
