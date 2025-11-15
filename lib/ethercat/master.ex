@@ -327,7 +327,10 @@ defmodule EtherCAT.Master do
             {:keep_state, %{data | domains: new_domains}}
 
           {:error, reason} ->
-            Logger.warning("Failed to create default_domain: #{inspect(reason)}, continuing anyway")
+            Logger.warning(
+              "Failed to create default_domain: #{inspect(reason)}, continuing anyway"
+            )
+
             :keep_state_and_data
         end
     end
@@ -454,7 +457,10 @@ defmodule EtherCAT.Master do
 
         pids ->
           updated = List.delete(pids, subscriber_pid)
-          if updated == [], do: Map.delete(data.subscribers, key), else: Map.put(data.subscribers, key, updated)
+
+          if updated == [],
+            do: Map.delete(data.subscribers, key),
+            else: Map.put(data.subscribers, key, updated)
       end
 
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
@@ -734,7 +740,10 @@ defmodule EtherCAT.Master do
 
     Enum.each(pdo_indices, fn pdo_index ->
       Nif.slave_config_pdo_assign_add(slave_config, sm_index, pdo_index)
-      Logger.debug("Slave #{position}: Assigned PDO 0x#{Integer.to_string(pdo_index, 16)} to SM#{sm_index}")
+
+      Logger.debug(
+        "Slave #{position}: Assigned PDO 0x#{Integer.to_string(pdo_index, 16)} to SM#{sm_index}"
+      )
     end)
 
     # Step 4: Configure PDO mappings (if device supports it)
@@ -754,7 +763,8 @@ defmodule EtherCAT.Master do
     Nif.slave_config_pdo_mapping_clear(slave_config, pdo_index)
 
     # Add all entry mappings
-    Enum.each(pdo_config.entries, fn {entry_name, {_type, entry_index, entry_subindex, bit_length}} ->
+    Enum.each(pdo_config.entries, fn {entry_name,
+                                      {_type, entry_index, entry_subindex, bit_length}} ->
       Nif.slave_config_pdo_mapping_add(
         slave_config,
         pdo_index,
@@ -801,7 +811,8 @@ defmodule EtherCAT.Master do
   defp register_pdo_to_domain(slave_config, domain_ref, position, slave_name, pdo_config) do
     {_sm_index, direction, _watchdog} = pdo_config.sync_manager
 
-    Enum.each(pdo_config.entries, fn {entry_name, {_type, entry_index, entry_subindex, bit_length}} ->
+    Enum.each(pdo_config.entries, fn {entry_name,
+                                      {_type, entry_index, entry_subindex, bit_length}} ->
       # Build unique name for this entry
       unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
 
@@ -887,7 +898,8 @@ defmodule EtherCAT.Master do
 
   defp start_slaves_from_config(data, config) do
     # Build map of position => SlaveConfig
-    slaves_by_position = Map.new(config.slaves, fn slave_config -> {slave_config.position, slave_config} end)
+    slaves_by_position =
+      Map.new(config.slaves, fn slave_config -> {slave_config.position, slave_config} end)
 
     # Check if all expected slaves exist
     detected_positions = Map.keys(data.slaves)
@@ -904,7 +916,8 @@ defmodule EtherCAT.Master do
 
         # Start drivers with config-specified names and modules
         result =
-          Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config}, {:ok, acc_slaves} ->
+          Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
+                                                               {:ok, acc_slaves} ->
             case start_configured_slave_driver(data, position, slave_config) do
               {:ok, slave_info} ->
                 new_slaves = Map.put(acc_slaves, position, slave_info)

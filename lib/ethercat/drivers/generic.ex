@@ -133,9 +133,7 @@ defmodule EtherCAT.Drivers.Generic do
   def handle_continue(:discover_pdos, state) do
     pdo_map = discover_pdos_from_eeprom(state)
 
-    Logger.debug(
-      "Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs"
-    )
+    Logger.debug("Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs")
 
     {:noreply, %{state | pdo_map: pdo_map}}
   end
