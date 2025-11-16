@@ -38,70 +38,34 @@ defmodule TestHardwareConfig do
           entries: []
         },
         # EL1809 - 16-channel digital input at position 1
+        # TODO: Add proper entry configuration when specific driver is implemented
         %SlaveConfig{
           position: 1,
           name: :digital_inputs,
-          driver: EtherCAT.Drivers.EL1809,
+          driver: nil,
           expected: %{vendor: 0x00000002, product: 0x07113052},
           config: %{},
-          entries:
-            Enum.map(1..16, fn i ->
-              %EntryConfig{
-                pdo_name: String.to_atom("ch#{i}"),
-                entry_name: :input,
-                domain: :io_domain
-              }
-            end)
+          entries: []
         },
         # EL2809 - 16-channel digital output at position 2
+        # TODO: Add proper entry configuration when specific driver is implemented
         %SlaveConfig{
           position: 2,
           name: :digital_outputs,
-          driver: EtherCAT.Drivers.EL2809,
+          driver: nil,
           expected: %{vendor: 0x00000002, product: 0x0AF93052},
           config: %{},
-          entries:
-            Enum.map(1..16, fn i ->
-              %EntryConfig{
-                pdo_name: String.to_atom("ch#{i}"),
-                entry_name: :output,
-                domain: :io_domain
-              }
-            end)
+          entries: []
         },
         # EL3202 - 2-channel RTD input at position 3
-        # Configured in OHMS mode to read resistor values directly
+        # TODO: Add proper entry configuration and SDO config when specific driver is implemented
         %SlaveConfig{
           position: 3,
           name: :rtd_inputs,
-          driver: EtherCAT.Drivers.EL3202,
+          driver: nil,
           expected: %{vendor: 0x00000002, product: 0x0C823052},
-          config: %{
-            # OHMS mode
-            ch1_rtd_element: 8,
-            # 2-wire
-            ch1_connection: 0,
-            ch1_enable_user_scale: true,
-            # No offset
-            ch1_user_scale_offset: 0,
-            # 32768 * 1.257 (120/95.5)
-            ch1_user_scale_gain: 41190,
-            # OHMS mode
-            ch2_rtd_element: 8,
-            # 2-wire
-            ch2_connection: 0,
-            ch2_enable_user_scale: true,
-            # No offset
-            ch2_user_scale_offset: 0,
-            # 32768 * 1.259 (100/79.4)
-            ch2_user_scale_gain: 41264
-          },
-          entries: [
-            %EntryConfig{pdo_name: :ch1, entry_name: :value, domain: :io_domain},
-            %EntryConfig{pdo_name: :ch1, entry_name: :error, domain: :io_domain},
-            %EntryConfig{pdo_name: :ch2, entry_name: :value, domain: :io_domain},
-            %EntryConfig{pdo_name: :ch2, entry_name: :error, domain: :io_domain}
-          ]
+          config: %{},
+          entries: []
         }
       ]
     }
