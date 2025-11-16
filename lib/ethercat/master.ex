@@ -902,24 +902,27 @@ defmodule EtherCAT.Master do
     try do
       Enum.each(pdo_config.entries, fn {entry_name,
                                         {_type, entry_index, entry_subindex, bit_length}} ->
-        # Build unique name for this entry
-        unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
+        # Skip gap entries (0x0000:0x00) - these are padding and should not be registered
+        if entry_index != 0 or entry_subindex != 0 do
+          # Build unique name for this entry
+          unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
 
-        # Register with NIF (can raise on error)
-        _offset =
-          Nif.slave_config_reg_pdo_entry(
-            slave_config,
-            unique_name,
-            entry_index,
-            entry_subindex,
-            bit_length,
-            domain_ref,
-            direction
+          # Register with NIF (can raise on error)
+          _offset =
+            Nif.slave_config_reg_pdo_entry(
+              slave_config,
+              unique_name,
+              entry_index,
+              entry_subindex,
+              bit_length,
+              domain_ref,
+              direction
+            )
+
+          Logger.debug(
+            "Slave #{position}: Registered #{unique_name} to domain (direction: #{direction})"
           )
-
-        Logger.debug(
-          "Slave #{position}: Registered #{unique_name} to domain (direction: #{direction})"
-        )
+        end
       end)
 
       :ok
