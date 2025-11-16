@@ -137,6 +137,18 @@ defmodule EtherCAT.Slave.Driver do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  @doc """
+  Get SDO configuration list (default: empty).
+  """
+  def get_sdo_config(_pid), do: []
+
+  @doc """
+  Get PDO configuration (auto-discovered from EEPROM by default).
+  """
+  def get_pdo_config(pid) do
+    GenServer.call(pid, :get_pdo_config)
+  end
+
   @impl true
   def init(opts) do
     position = Keyword.fetch!(opts, :position)
