@@ -1,49 +1,70 @@
 defmodule EtherCAT.Slave.Driver do
   @moduledoc """
-  Behaviour for EtherCAT slave drivers with default implementation base.
+  Behaviour for EtherCAT slave drivers.
 
-  This module defines the behaviour that all EtherCAT slave drivers must implement
-  and provides a `use` macro that injects a complete default implementation.
+  This module defines the contract that all EtherCAT slave drivers must implement
+  and provides shared helper functions for common operations.
 
   ## Default Driver
 
-  When `driver: nil` is specified in SlaveConfig, `EtherCAT.Slave.GenericDriver` is used,
-  which implements this behaviour with auto-discovery and type-based encoding.
+  When `driver: nil` is specified in SlaveConfig, `EtherCAT.Slave.GenericDriver` is used
+  with auto-discovery and type-based encoding.
 
-  ## Custom Drivers
+  ## Custom Encoding (Strategy Pattern)
 
-  ### Simple driver (override encoding only):
+  For simple customization (custom encoding/decoding only), use GenericDriver with a callback module:
 
-      defmodule MyTempSensor do
-        use EtherCAT.Slave.Driver
+      defmodule MyTempEncoder do
+        @behaviour EtherCAT.Slave.Driver
 
-        # Override for custom encoding
-        def encode_pdo_value(:temp, :value, celsius, state) do
+        alias EtherCAT.Slave.Driver
+
+        def encode_pdo_value(:temp, :value, celsius, _state) do
           {:ok, <<round(celsius * 10)::little-signed-16>>}
         end
 
-        # Override for custom decoding
-        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>, state) do
+        def encode_pdo_value(pdo, entry, value, state) do
+          Driver.default_encode(pdo, entry, value, state)
+        end
+
+        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>, _state) do
           {:ok, raw / 10.0}
         end
 
-        # All other PDOs use default type-based encoding (via super/fallback)
+        def decode_pdo_value(pdo, entry, binary, state) do
+          Driver.default_decode(pdo, entry, binary, state)
+        end
       end
 
-  ### Complex driver (full GenServer control):
+      # In SlaveConfig:
+      %SlaveConfig{
+        position: 1,
+        driver: {EtherCAT.Slave.GenericDriver, callback_module: MyTempEncoder},
+        ...
+      }
+
+  ## Complex Drivers (Full GenServer Control)
+
+  For complex drivers that need custom state machines (like CIA 402), implement a full GenServer:
 
       defmodule MyCIA402Driver do
-        use EtherCAT.Slave.Driver
+        use GenServer
+        @behaviour EtherCAT.Slave.Driver
 
-        # Custom state with additional fields
+        alias EtherCAT.Slave.Driver
+
         defstruct [
-          :master, :position, :name, :pdo_map,  # Keep base fields for default encoding
-          :state_machine, :target_position      # Add custom fields
+          :master, :position, :name, :pdo_map,  # Keep for default encoding
+          :state_machine, :target_position      # Custom fields
         ]
 
+        def start_link(opts) do
+          GenServer.start_link(__MODULE__, opts)
+        end
+
         def init(opts) do
-          # Custom initialization
-          {:ok, base_state} = super(opts)
+          # Use helper to build base state
+          {:ok, base_state} = Driver.build_default_state(__MODULE__, opts)
 
           state = %__MODULE__{
             master: base_state.master,
@@ -58,33 +79,48 @@ defmodule EtherCAT.Slave.Driver do
         end
 
         def handle_call({:move_to, position}, _from, state) do
-          # Custom commands for motion control
-          new_state = %{state | target_position: position}
-          {:reply, :ok, new_state}
+          # Custom motion control commands
+          {:reply, :ok, %{state | target_position: position}}
         end
 
-        # Can still use default encoding for most PDOs
+        def handle_call({:write, pdo, entry, value}, _from, state) do
+          # Can use standard write logic with custom encoding
+          with {:ok, binary} <- encode_pdo_value(pdo, entry, value, state),
+               :ok <- EtherCAT.Master.write_pdo_entry(state.master, :default_domain,
+                                                      "#{state.name}:#{pdo}:#{entry}", binary) do
+            {:reply, :ok, state}
+          else
+            error -> {:reply, error, state}
+          end
+        end
+
         def encode_pdo_value(:control_word, :value, value, state) do
-          # Custom CIA 402 control word encoding based on state machine
+          # CIA 402 specific control word based on state machine
           control_word = calculate_control_word(state.state_machine, value)
           {:ok, <<control_word::little-unsigned-16>>}
         end
 
         def encode_pdo_value(pdo, entry, value, state) do
           # Fallback to default for other PDOs
-          super(pdo, entry, value, state)
+          Driver.default_encode(pdo, entry, value, state)
+        end
+
+        def decode_pdo_value(pdo, entry, binary, state) do
+          Driver.default_decode(pdo, entry, binary, state)
+        end
+
+        defp calculate_control_word(state_machine, value) do
+          # CIA 402 state machine logic
+          # ...
         end
       end
 
-  ## Overridable Functions
-
-  - `init/1` - Initialize driver state
-  - `get_sdo_config/1` - Return SDO configuration list
-  - `get_pdo_config/1` - Return PDO configuration (default: auto-discovered from EEPROM)
-  - `encode_pdo_value/4` - Custom encoding logic
-  - `decode_pdo_value/4` - Custom decoding logic
-  - `handle_call/3` - Full GenServer control for custom commands
-  - `terminate/2` - Cleanup on shutdown
+      # In SlaveConfig:
+      %SlaveConfig{
+        position: 1,
+        driver: MyCIA402Driver,
+        ...
+      }
   """
 
   require Logger
@@ -132,193 +168,14 @@ defmodule EtherCAT.Slave.Driver do
               {:ok, term()} | {:error, term()}
 
   # ========================================================================
-  # __using__ Macro - Creates custom drivers
-  # ========================================================================
-
-  @doc false
-  defmacro __using__(_opts) do
-    quote do
-      use GenServer
-      @behaviour EtherCAT.Slave.Driver
-      require Logger
-
-      # Default state structure (can be redefined to add custom fields)
-      # IMPORTANT: Keep :pdo_map if you want to use default encoding fallback
-      defstruct [
-        :master,
-        :position,
-        :name,
-        :slave_config,
-        :vendor_id,
-        :product_code,
-        :revision,
-        :serial,
-        :sync_count,
-        :config,
-        :pdo_map
-      ]
-
-      # ======================================================================
-      # Client API - Provided to all drivers
-      # ======================================================================
-
-      @doc """
-      Start the driver process.
-      """
-      def start_link(opts) do
-        GenServer.start_link(__MODULE__, opts)
-      end
-
-      @doc """
-      Read a PDO entry value.
-      """
-      def read(pid, pdo_name, entry_name) when is_pid(pid) do
-        GenServer.call(pid, {:read, pdo_name, entry_name})
-      end
-
-      @doc """
-      Write a PDO entry value.
-      """
-      def write(pid, pdo_name, entry_name, value) when is_pid(pid) do
-        GenServer.call(pid, {:write, pdo_name, entry_name, value})
-      end
-
-      @doc """
-      Subscribe to value change notifications.
-      """
-      def subscribe(pid, pdo_name, entry_name, subscriber) when is_pid(pid) do
-        GenServer.call(pid, {:subscribe, pdo_name, entry_name, subscriber})
-      end
-
-      @doc """
-      Unsubscribe from value change notifications.
-      """
-      def unsubscribe(pid, pdo_name, entry_name, subscriber) when is_pid(pid) do
-        GenServer.call(pid, {:unsubscribe, pdo_name, entry_name, subscriber})
-      end
-
-      @doc """
-      Get SDO configuration list (default: empty).
-      """
-      def get_sdo_config(_pid), do: []
-
-      @doc """
-      Get PDO configuration (auto-discovered from EEPROM by default).
-      """
-      def get_pdo_config(pid) do
-        GenServer.call(pid, :get_pdo_config)
-      end
-
-      # ======================================================================
-      # GenServer Callbacks - Default implementation
-      # ======================================================================
-
-      @impl true
-      def init(opts) do
-        EtherCAT.Slave.Driver.build_default_state(__MODULE__, opts)
-      end
-
-      @impl true
-      def handle_call(:get_pdo_config, _from, state) do
-        config = EtherCAT.Slave.Driver.convert_pdo_config(state.pdo_map)
-        {:reply, config, state}
-      end
-
-      def handle_call({:read, pdo_name, entry_name}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-        result =
-          with {:ok, binary} <-
-                 EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name),
-               {:ok, value} <- __MODULE__.decode_pdo_value(pdo_name, entry_name, binary, state) do
-            {:ok, value}
-          end
-
-        {:reply, result, state}
-      end
-
-      def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-        result =
-          with {:ok, binary} <- __MODULE__.encode_pdo_value(pdo_name, entry_name, value, state),
-               :ok <-
-                 EtherCAT.Master.write_pdo_entry(
-                   state.master,
-                   :default_domain,
-                   unique_name,
-                   binary
-                 ) do
-            :ok
-          end
-
-        {:reply, result, state}
-      end
-
-      def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-        result =
-          EtherCAT.Master.subscribe(state.master, :default_domain, unique_name, subscriber)
-
-        {:reply, result, state}
-      end
-
-      def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-        result =
-          EtherCAT.Master.unsubscribe(state.master, :default_domain, unique_name, subscriber)
-
-        {:reply, result, state}
-      end
-
-      @impl true
-      def terminate(reason, state) do
-        Logger.info("Driver terminating for slave #{state.position}: #{inspect(reason)}")
-        :ok
-      end
-
-      # ======================================================================
-      # Behaviour Callbacks - Default implementation
-      # ======================================================================
-
-      @doc """
-      Default encode implementation with type lookup from pdo_map.
-      Custom drivers can override for specific PDOs and call super for others.
-      """
-      @impl true
-      def encode_pdo_value(pdo_name, entry_name, value, state) do
-        EtherCAT.Slave.Driver.default_encode(pdo_name, entry_name, value, state)
-      end
-
-      @doc """
-      Default decode implementation with type lookup from pdo_map.
-      Custom drivers can override for specific PDOs and call super for others.
-      """
-      @impl true
-      def decode_pdo_value(pdo_name, entry_name, binary, state) do
-        EtherCAT.Slave.Driver.default_decode(pdo_name, entry_name, binary, state)
-      end
-
-      # Make functions overridable for custom drivers
-      defoverridable init: 1,
-                     get_sdo_config: 1,
-                     get_pdo_config: 1,
-                     encode_pdo_value: 4,
-                     decode_pdo_value: 4,
-                     handle_call: 3,
-                     terminate: 2
-    end
-  end
-
-  # ========================================================================
-  # Public Helper Functions (shared between GenericDriver and custom drivers)
+  # Public Helper Functions
   # ========================================================================
 
   @doc """
   Build default state structure for a driver module.
-  Used by both GenericDriver and custom drivers via `use`.
+
+  This helper is used by GenericDriver and can be used by custom drivers
+  to build their initial state with auto-discovered PDO mappings.
   """
   def build_default_state(module, opts) do
     position = Keyword.fetch!(opts, :position)
@@ -340,7 +197,8 @@ defmodule EtherCAT.Slave.Driver do
         serial: Keyword.fetch!(opts, :serial),
         sync_count: Keyword.fetch!(opts, :sync_count),
         config: Keyword.get(opts, :config, %{}),
-        pdo_map: pdo_map
+        pdo_map: pdo_map,
+        callback_module: Keyword.get(opts, :callback_module)
       ])
 
     Logger.info(
@@ -355,7 +213,9 @@ defmodule EtherCAT.Slave.Driver do
 
   @doc """
   Default encode implementation using type-based encoding.
-  Custom drivers can call this from their encode_pdo_value/4 for fallback behavior.
+
+  This function infers the type from bit length and encodes accordingly.
+  Can be called by custom drivers as a fallback for PDOs they don't handle specially.
   """
   def default_encode(pdo_name, entry_name, value, %{pdo_map: pdo_map}) do
     type = get_entry_type(pdo_map, pdo_name, entry_name)
@@ -364,7 +224,9 @@ defmodule EtherCAT.Slave.Driver do
 
   @doc """
   Default decode implementation using type-based decoding.
-  Custom drivers can call this from their decode_pdo_value/4 for fallback behavior.
+
+  This function infers the type from bit length and decodes accordingly.
+  Can be called by custom drivers as a fallback for PDOs they don't handle specially.
   """
   def default_decode(pdo_name, entry_name, binary, %{pdo_map: pdo_map}) do
     type = get_entry_type(pdo_map, pdo_name, entry_name)
