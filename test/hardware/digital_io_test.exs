@@ -18,9 +18,9 @@ defmodule Hardware.DigitalIOTest do
   3. Complex bit patterns can be written and read back
   4. Timing characteristics are acceptable
 
-  Run with: ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
+  Run with: mix test --only hardware:digital_io
 
-  Note: The EtherCAT Master is started by test_helper.exs for hardware tests.
+  Note: The EtherCAT Master is started by test_helper.exs.
 
   ## PDO Naming (Generic Driver Autodiscovery)
 

@@ -12,9 +12,9 @@ defmodule Hardware.SlaveDetectionTest do
   - Position 2: EL2809 (16-channel digital output)
   - Position 3: EL3202 (2-channel RTD input)
 
-  Run with: ETHERCAT_HARDWARE=true mix test --only hardware
+  Run with: mix test --only hardware
 
-  Note: The EtherCAT Master is started by test_helper.exs for hardware tests.
+  Note: The EtherCAT Master is started by test_helper.exs.
   """
 
   describe "System Initialization" do
