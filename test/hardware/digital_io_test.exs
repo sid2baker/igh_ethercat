@@ -18,7 +18,7 @@ defmodule Hardware.DigitalIOTest do
   3. Complex bit patterns can be written and read back
   4. Timing characteristics are acceptable
 
-  Run with: mix test --only hardware:digital_io
+  Run with: mix test
 
   Note: The EtherCAT Master is started by test_helper.exs.
 

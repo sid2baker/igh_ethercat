@@ -18,7 +18,7 @@ defmodule Hardware.RTDInputTest do
   3. No error flags are present
   4. Readings are stable over time
 
-  Run with: mix test --only hardware:rtd
+  Run with: mix test
 
   Note: The EtherCAT Master is started by test_helper.exs.
   """
