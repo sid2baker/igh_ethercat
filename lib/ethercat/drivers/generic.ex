@@ -32,9 +32,7 @@ defmodule EtherCAT.Drivers.Generic do
     :sync_count,
     :config,
     :pdo_map,
-    :entry_map,
-    :discovery_complete,
-    :pending_pdo_calls
+    :entry_map
   ]
 
   # ============================================================================
@@ -101,6 +99,7 @@ defmodule EtherCAT.Drivers.Generic do
     position = Keyword.fetch!(opts, :position)
     name = Keyword.fetch!(opts, :name)
     slave_config = Keyword.fetch!(opts, :slave_config)
+    eeprom_data = Keyword.fetch!(opts, :eeprom_data)
 
     # Register in Registry for discovery (include slave_config for Master lookup)
     Registry.register(EtherCAT.Registry, {:slave, self()}, %{
@@ -108,6 +107,9 @@ defmodule EtherCAT.Drivers.Generic do
       position: position,
       slave_config: slave_config
     })
+
+    # Process EEPROM data synchronously (no Master calls needed)
+    pdo_map = process_eeprom_data(eeprom_data, position)
 
     state = %__MODULE__{
       master: Keyword.fetch!(opts, :master),
@@ -120,45 +122,22 @@ defmodule EtherCAT.Drivers.Generic do
       serial: Keyword.fetch!(opts, :serial),
       sync_count: Keyword.fetch!(opts, :sync_count),
       config: Keyword.get(opts, :config, %{}),
-      pdo_map: %{},
-      entry_map: %{},
-      discovery_complete: false,
-      pending_pdo_calls: []
+      pdo_map: pdo_map,
+      entry_map: %{}
     }
 
     Logger.info(
       "Generic driver started for slave #{state.position} " <>
         "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
-        "product: 0x#{Integer.to_string(state.product_code, 16)})"
+        "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
+        "with #{map_size(pdo_map)} PDOs"
     )
 
-    # Schedule async PDO discovery to avoid deadlock when Master is blocked
-    {:ok, state, {:continue, :discover_pdos}}
+    {:ok, state}
   end
 
   @impl true
-  def handle_continue(:discover_pdos, state) do
-    pdo_map = discover_pdos_from_eeprom(state)
-    Logger.debug("Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs")
-
-    new_state = %{state | pdo_map: pdo_map, discovery_complete: true}
-
-    # Reply to any pending get_pdo_config calls
-    Enum.each(state.pending_pdo_calls, fn from ->
-      GenServer.reply(from, convert_pdo_config(new_state))
-    end)
-
-    {:noreply, %{new_state | pending_pdo_calls: []}}
-  end
-
-  @impl true
-  def handle_call(:get_pdo_config, from, %{discovery_complete: false} = state) do
-    # PDO discovery still in progress, defer reply until discovery completes
-    {:noreply, %{state | pending_pdo_calls: [from | state.pending_pdo_calls]}}
-  end
-
   def handle_call(:get_pdo_config, _from, state) do
-    # Discovery complete, return config immediately
     {:reply, convert_pdo_config(state), state}
   end
 
@@ -206,6 +185,46 @@ defmodule EtherCAT.Drivers.Generic do
   # Private Helpers
   # ============================================================================
 
+  # Process EEPROM data provided by Master into pdo_map format
+  defp process_eeprom_data(eeprom_data, position) do
+    try do
+      eeprom_data
+      |> Enum.flat_map(fn {_sync_index, sync_data} ->
+        sync_manager = sync_data.sync_manager
+        pdos = sync_data.pdos || %{}
+
+        Enum.map(pdos, fn {_pdo_pos, pdo_data} ->
+          pdo = pdo_data.pdo
+          entries = pdo_data.entries || %{}
+
+          pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
+          direction = normalize_direction(sync_manager.dir)
+          watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+
+          entry_map =
+            Enum.map(entries, fn {_entry_pos, entry} ->
+              index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
+              entry_name = "0x#{index_hex}:#{entry.subindex}"
+              {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+            end)
+            |> Map.new()
+
+          {pdo_name,
+           %{
+             sync_manager: {sync_manager.index, direction, watchdog_mode},
+             pdo_index: pdo.index,
+             entries: entry_map
+           }}
+        end)
+      end)
+      |> Map.new()
+    rescue
+      error ->
+        Logger.error("Failed to process EEPROM data for slave #{position}: #{inspect(error)}")
+        %{}
+    end
+  end
+
   # Convert internal pdo_map to Driver.pdo_config format
   defp convert_pdo_config(state) do
     # SECURITY: Use existing_atom to prevent atom exhaustion from untrusted EEPROM data
@@ -240,98 +259,6 @@ defmodule EtherCAT.Drivers.Generic do
 
   defp safe_to_atom(value), do: value
 
-  # Discover all PDOs from slave's EEPROM
-  defp discover_pdos_from_eeprom(state) do
-    try do
-      sync_results =
-        if state.sync_count > 0 do
-          for sync_index <- 0..(state.sync_count - 1) do
-            case get_sync_manager(state, sync_index) do
-              {:ok, sync_manager} ->
-                discover_pdos_for_sync_manager(state, sync_index, sync_manager)
-
-              {:error, reason} ->
-                Logger.warning(
-                  "Failed to get sync manager #{sync_index} for slave #{state.position}: #{inspect(reason)}"
-                )
-
-                []
-            end
-          end
-        else
-          []
-        end
-
-      sync_results
-      |> List.flatten()
-      |> Map.new()
-    rescue
-      error ->
-        Logger.error(
-          "Failed to discover PDOs for slave #{state.position}: #{inspect(error)}"
-        )
-
-        %{}
-    end
-  end
-
-  defp discover_pdos_for_sync_manager(state, sync_index, sync_manager) do
-    if sync_manager.n_pdos > 0 do
-      for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
-        case get_pdo(state, sync_index, pdo_pos) do
-          {:ok, pdo} ->
-            entries = discover_pdo_entries(state, sync_index, pdo_pos, pdo.n_entries)
-            pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
-
-            direction = normalize_direction(sync_manager.dir)
-            watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
-
-            {pdo_name,
-             %{
-               sync_manager: {sync_manager.index, direction, watchdog_mode},
-               pdo_index: pdo.index,
-               entries: entries
-             }}
-
-          {:error, reason} ->
-            Logger.warning(
-              "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{state.position}: #{inspect(reason)}"
-            )
-
-            nil
-        end
-      end
-      |> Enum.reject(&is_nil/1)
-    else
-      []
-    end
-  end
-
-  defp discover_pdo_entries(state, sync_index, pdo_pos, n_entries) do
-    if n_entries > 0 do
-      for entry_pos <- 0..(n_entries - 1) do
-        case get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
-          {:ok, entry} ->
-            index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
-            entry_name = "0x#{index_hex}:#{entry.subindex}"
-
-            {entry_name, {entry.index, entry.subindex, entry.bit_length}}
-
-          {:error, reason} ->
-            Logger.warning(
-              "Failed to get PDO entry #{entry_pos} for slave #{state.position}: #{inspect(reason)}"
-            )
-
-            nil
-        end
-      end
-      |> Enum.reject(&is_nil/1)
-      |> Map.new()
-    else
-      %{}
-    end
-  end
-
   defp normalize_direction(0), do: :invalid
   defp normalize_direction(1), do: :output
   defp normalize_direction(2), do: :input
@@ -340,33 +267,6 @@ defmodule EtherCAT.Drivers.Generic do
   defp normalize_watchdog_mode(0), do: :default
   defp normalize_watchdog_mode(1), do: :enabled
   defp normalize_watchdog_mode(2), do: :disabled
-
-  defp get_sync_manager(state, sync_index) do
-    try do
-      result = Master.get_sync_manager(state.master, state.position, sync_index)
-      {:ok, result}
-    rescue
-      error -> {:error, error}
-    end
-  end
-
-  defp get_pdo(state, sync_index, pdo_pos) do
-    try do
-      result = Master.get_pdo(state.master, state.position, sync_index, pdo_pos)
-      {:ok, result}
-    rescue
-      error -> {:error, error}
-    end
-  end
-
-  defp get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
-    try do
-      result = Master.get_pdo_entry(state.master, state.position, sync_index, pdo_pos, entry_pos)
-      {:ok, result}
-    rescue
-      error -> {:error, error}
-    end
-  end
 
   defp get_entry_type(state, pdo_name, entry_name) do
     pdo_name_str = to_string(pdo_name)

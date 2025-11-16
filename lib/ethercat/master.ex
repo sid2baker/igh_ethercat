@@ -705,6 +705,7 @@ defmodule EtherCAT.Master do
              slave_info.vendor_id,
              slave_info.product_code
            ),
+         {:ok, eeprom_data} <- read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
          driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code),
          {:ok, pid} <-
            driver_module.start_link(
@@ -717,6 +718,7 @@ defmodule EtherCAT.Master do
              revision: slave_info.revision_number,
              serial: slave_info.serial_number,
              sync_count: slave_info.sync_count,
+             eeprom_data: eeprom_data,
              config: %{}
            ) do
       {:ok,
@@ -732,6 +734,85 @@ defmodule EtherCAT.Master do
 
   defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Drivers.Generic
   defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Drivers.Generic
+
+  # Read all EEPROM data for a slave (sync managers, PDOs, entries)
+  # This is done by Master to avoid circular dependency with drivers
+  defp read_slave_eeprom_data(master_ref, position, sync_count) do
+    try do
+      sync_results =
+        if sync_count > 0 do
+          for sync_index <- 0..(sync_count - 1) do
+            case Nif.master_get_sync_manager(master_ref, position, sync_index) do
+              sync_manager when is_map(sync_manager) ->
+                pdos = read_sync_manager_pdos(master_ref, position, sync_index, sync_manager.n_pdos)
+                {sync_index, %{sync_manager: sync_manager, pdos: pdos}}
+
+              error ->
+                Logger.warning(
+                  "Failed to get sync manager #{sync_index} for slave #{position}: #{inspect(error)}"
+                )
+
+                nil
+            end
+          end
+          |> Enum.reject(&is_nil/1)
+          |> Map.new()
+        else
+          %{}
+        end
+
+      {:ok, sync_results}
+    rescue
+      error ->
+        Logger.error("Failed to read EEPROM data for slave #{position}: #{inspect(error)}")
+        {:error, error}
+    end
+  end
+
+  defp read_sync_manager_pdos(master_ref, position, sync_index, n_pdos) do
+    if n_pdos > 0 do
+      for pdo_pos <- 0..(n_pdos - 1) do
+        case Nif.master_get_pdo(master_ref, position, sync_index, pdo_pos) do
+          pdo when is_map(pdo) ->
+            entries = read_pdo_entries(master_ref, position, sync_index, pdo_pos, pdo.n_entries)
+            {pdo_pos, %{pdo: pdo, entries: entries}}
+
+          error ->
+            Logger.warning(
+              "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{position}: #{inspect(error)}"
+            )
+
+            nil
+        end
+      end
+      |> Enum.reject(&is_nil/1)
+      |> Map.new()
+    else
+      %{}
+    end
+  end
+
+  defp read_pdo_entries(master_ref, position, sync_index, pdo_pos, n_entries) do
+    if n_entries > 0 do
+      for entry_pos <- 0..(n_entries - 1) do
+        case Nif.master_get_pdo_entry(master_ref, position, sync_index, pdo_pos, entry_pos) do
+          entry when is_map(entry) ->
+            {entry_pos, entry}
+
+          error ->
+            Logger.warning(
+              "Failed to get PDO entry #{entry_pos} for slave #{position}: #{inspect(error)}"
+            )
+
+            nil
+        end
+      end
+      |> Enum.reject(&is_nil/1)
+      |> Map.new()
+    else
+      %{}
+    end
+  end
 
   defp configure_all_slaves(data) do
     Enum.reduce_while(data.slaves, :ok, fn {position, slave_info}, :ok ->
@@ -1059,6 +1140,7 @@ defmodule EtherCAT.Master do
              slave_info.vendor_id,
              slave_info.product_code
            ),
+         {:ok, eeprom_data} <- read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
          driver_module = slave_config.driver || EtherCAT.Drivers.Generic,
          {:ok, pid} <-
            driver_module.start_link(
@@ -1071,6 +1153,7 @@ defmodule EtherCAT.Master do
              revision: slave_info.revision_number,
              serial: slave_info.serial_number,
              sync_count: slave_info.sync_count,
+             eeprom_data: eeprom_data,
              config: slave_config.config || %{}
            ) do
       {:ok,
