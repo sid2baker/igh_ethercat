@@ -1016,23 +1016,24 @@ defmodule EtherCAT.Nif do
               defer accessor.mutex.unlock();
 
               for (accessor.layout.entries.items) |*entry| {
-                  // Extract current value from domain data into temp buffer
-                  var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
-                  extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
+                  if (entry.direction == .input) {
+                      // INPUTS: Only update and notify on change
+                      // Extract current value from domain data into temp buffer
+                      var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
+                      extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
-                  // Compare with stored current_value
-                  const byte_count = (entry.bit_length + 7) / 8;
-                  var changed = false;
-                  var i: usize = 0;
-                  while (i < byte_count and i < MAX_PDO_ENTRY_BYTES) : (i += 1) {
-                      if (domain_value[i] != entry.current_value[i]) {
-                          changed = true;
-                          break;
+                      // Compare with stored current_value
+                      const byte_count = (entry.bit_length + 7) / 8;
+                      var changed = false;
+                      var i: usize = 0;
+                      while (i < byte_count and i < MAX_PDO_ENTRY_BYTES) : (i += 1) {
+                          if (domain_value[i] != entry.current_value[i]) {
+                              changed = true;
+                              break;
+                          }
                       }
-                  }
 
-                  if (changed) {
-                      if (entry.direction == .input) {
+                      if (changed) {
                           // Input changed: extract raw binary and notify
                           const required_bytes = (entry.bit_length + 7) / 8;
                           var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
@@ -1043,18 +1044,14 @@ defmodule EtherCAT.Nif do
 
                           // Update stored value
                           entry.current_value = domain_value;
-                      } else {
-                          // Output changed: notify immediately and update domain value
-                          // FIX H1: Handle error return from write_bits_to_domain
-                          write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
-                              std.log.err("Failed to write bits to domain: {}", .{err});
-                              continue;  // Skip this entry and continue with others
-                          };
-
-                          // For outputs, send the stored current_value buffer to Master
-                          const required_bytes = (entry.bit_length + 7) / 8;
-                          _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
                       }
+                  } else {
+                      // OUTPUTS: Always write current_value to domain buffer every cycle
+                      // This ensures outputs maintain their state even if domain_process overwrites buffer
+                      write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
+                          std.log.err("Failed to write bits to domain: {}", .{err});
+                          continue;  // Skip this entry and continue with others
+                      };
                   }
               }
 
