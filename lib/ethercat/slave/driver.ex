@@ -176,6 +176,9 @@ defmodule EtherCAT.Slave.Driver do
 
   This helper is used by GenericDriver and can be used by custom drivers
   to build their initial state with auto-discovered PDO mappings.
+
+  Only sets common fields that all drivers need. Custom drivers can extend
+  the returned state with their own fields.
   """
   def build_default_state(module, opts) do
     position = Keyword.fetch!(opts, :position)
@@ -185,14 +188,23 @@ defmodule EtherCAT.Slave.Driver do
     # Auto-discover PDO mappings from EEPROM
     pdo_map = process_eeprom_data(eeprom_data, position)
 
-    state =
-      struct!(module, [
-        master: Keyword.fetch!(opts, :master),
-        position: position,
-        name: name,
-        pdo_map: pdo_map,
-        callback_module: Keyword.get(opts, :callback_module)
-      ])
+    # Build field list - only common fields that all drivers have
+    fields = [
+      master: Keyword.fetch!(opts, :master),
+      position: position,
+      name: name,
+      pdo_map: pdo_map
+    ]
+
+    # Add optional callback_module if the struct has that field (GenericDriver only)
+    fields =
+      if :callback_module in Map.keys(struct(module)) do
+        Keyword.put(fields, :callback_module, Keyword.get(opts, :callback_module))
+      else
+        fields
+      end
+
+    state = struct!(module, fields)
 
     Logger.info("Driver started for slave #{position} (#{name}) with #{map_size(pdo_map)} PDOs")
 
