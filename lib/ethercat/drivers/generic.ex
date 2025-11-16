@@ -224,18 +224,22 @@ defmodule EtherCAT.Drivers.Generic do
   defp discover_pdos_from_eeprom(state) do
     try do
       sync_results =
-        for sync_index <- 0..(state.sync_count - 1) do
-          case get_sync_manager(state, sync_index) do
-            {:ok, sync_manager} ->
-              discover_pdos_for_sync_manager(state, sync_index, sync_manager)
+        if state.sync_count > 0 do
+          for sync_index <- 0..(state.sync_count - 1) do
+            case get_sync_manager(state, sync_index) do
+              {:ok, sync_manager} ->
+                discover_pdos_for_sync_manager(state, sync_index, sync_manager)
 
-            {:error, reason} ->
-              Logger.warning(
-                "Failed to get sync manager #{sync_index} for slave #{state.position}: #{inspect(reason)}"
-              )
+              {:error, reason} ->
+                Logger.warning(
+                  "Failed to get sync manager #{sync_index} for slave #{state.position}: #{inspect(reason)}"
+                )
 
-              []
+                []
+            end
           end
+        else
+          []
         end
 
       sync_results
@@ -252,52 +256,60 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   defp discover_pdos_for_sync_manager(state, sync_index, sync_manager) do
-    for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
-      case get_pdo(state, sync_index, pdo_pos) do
-        {:ok, pdo} ->
-          entries = discover_pdo_entries(state, sync_index, pdo_pos, pdo.n_entries)
-          pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
+    if sync_manager.n_pdos > 0 do
+      for pdo_pos <- 0..(sync_manager.n_pdos - 1) do
+        case get_pdo(state, sync_index, pdo_pos) do
+          {:ok, pdo} ->
+            entries = discover_pdo_entries(state, sync_index, pdo_pos, pdo.n_entries)
+            pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
 
-          direction = normalize_direction(sync_manager.dir)
-          watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+            direction = normalize_direction(sync_manager.dir)
+            watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
 
-          {pdo_name,
-           %{
-             sync_manager: {sync_manager.index, direction, watchdog_mode},
-             pdo_index: pdo.index,
-             entries: entries
-           }}
+            {pdo_name,
+             %{
+               sync_manager: {sync_manager.index, direction, watchdog_mode},
+               pdo_index: pdo.index,
+               entries: entries
+             }}
 
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{state.position}: #{inspect(reason)}"
-          )
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{state.position}: #{inspect(reason)}"
+            )
 
-          nil
+            nil
+        end
       end
+      |> Enum.reject(&is_nil/1)
+    else
+      []
     end
-    |> Enum.reject(&is_nil/1)
   end
 
   defp discover_pdo_entries(state, sync_index, pdo_pos, n_entries) do
-    for entry_pos <- 0..(n_entries - 1) do
-      case get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
-        {:ok, entry} ->
-          entry_name =
-            "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
+    if n_entries > 0 do
+      for entry_pos <- 0..(n_entries - 1) do
+        case get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
+          {:ok, entry} ->
+            entry_name =
+              "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
 
-          {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+            {entry_name, {entry.index, entry.subindex, entry.bit_length}}
 
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to get PDO entry #{entry_pos} for slave #{state.position}: #{inspect(reason)}"
-          )
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to get PDO entry #{entry_pos} for slave #{state.position}: #{inspect(reason)}"
+            )
 
-          nil
+            nil
+        end
       end
+      |> Enum.reject(&is_nil/1)
+      |> Map.new()
+    else
+      %{}
     end
-    |> Enum.reject(&is_nil/1)
-    |> Map.new()
   end
 
   defp normalize_direction(0), do: :invalid
