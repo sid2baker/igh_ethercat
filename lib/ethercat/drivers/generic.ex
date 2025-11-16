@@ -31,7 +31,9 @@ defmodule EtherCAT.Drivers.Generic do
     :sync_count,
     :config,
     :pdo_map,
-    :entry_map
+    :entry_map,
+    :discovery_complete,
+    :pending_pdo_calls
   ]
 
   # ============================================================================
@@ -116,7 +118,9 @@ defmodule EtherCAT.Drivers.Generic do
       sync_count: Keyword.fetch!(opts, :sync_count),
       config: Keyword.get(opts, :config, %{}),
       pdo_map: %{},
-      entry_map: %{}
+      entry_map: %{},
+      discovery_complete: false,
+      pending_pdo_calls: []
     }
 
     Logger.info(
@@ -125,35 +129,34 @@ defmodule EtherCAT.Drivers.Generic do
         "product: 0x#{Integer.to_string(state.product_code, 16)})"
     )
 
-    # Auto-discover PDO configuration synchronously to ensure driver is ready
-    # before Master tries to configure it
-    pdo_map = discover_pdos_from_eeprom(state)
-    Logger.debug("Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs")
-
-    {:ok, %{state | pdo_map: pdo_map}}
+    # Schedule async PDO discovery to avoid deadlock when Master is blocked
+    {:ok, state, {:continue, :discover_pdos}}
   end
 
   @impl true
-  def handle_call(:get_pdo_config, _from, state) do
-    # Convert internal pdo_map to Driver.pdo_config format
-    # SECURITY: Use existing_atom to prevent atom exhaustion from untrusted EEPROM data
-    pdo_configs =
-      Enum.map(state.pdo_map, fn {pdo_name, pdo_info} ->
-        %{
-          name: safe_to_atom(pdo_name),
-          sync_manager: pdo_info.sync_manager,
-          pdo_index: pdo_info.pdo_index,
-          entries:
-            Map.new(pdo_info.entries, fn {entry_name, {index, subindex, bit_length}} ->
-              type = Driver.infer_type_from_bit_length(bit_length)
-              {safe_to_atom(entry_name), {type, index, subindex, bit_length}}
-            end),
-          domain: :default_domain,
-          supports_pdo_config?: true
-        }
-      end)
+  def handle_continue(:discover_pdos, state) do
+    pdo_map = discover_pdos_from_eeprom(state)
+    Logger.debug("Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs")
 
-    {:reply, pdo_configs, state}
+    new_state = %{state | pdo_map: pdo_map, discovery_complete: true}
+
+    # Reply to any pending get_pdo_config calls
+    Enum.each(state.pending_pdo_calls, fn from ->
+      GenServer.reply(from, convert_pdo_config(new_state))
+    end)
+
+    {:noreply, %{new_state | pending_pdo_calls: []}}
+  end
+
+  @impl true
+  def handle_call(:get_pdo_config, from, %{discovery_complete: false} = state) do
+    # PDO discovery still in progress, defer reply until discovery completes
+    {:noreply, %{state | pending_pdo_calls: [from | state.pending_pdo_calls]}}
+  end
+
+  def handle_call(:get_pdo_config, _from, state) do
+    # Discovery complete, return config immediately
+    {:reply, convert_pdo_config(state), state}
   end
 
   def handle_call({:read, pdo_name, entry_name}, _from, state) do
@@ -199,6 +202,25 @@ defmodule EtherCAT.Drivers.Generic do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Convert internal pdo_map to Driver.pdo_config format
+  defp convert_pdo_config(state) do
+    # SECURITY: Use existing_atom to prevent atom exhaustion from untrusted EEPROM data
+    Enum.map(state.pdo_map, fn {pdo_name, pdo_info} ->
+      %{
+        name: safe_to_atom(pdo_name),
+        sync_manager: pdo_info.sync_manager,
+        pdo_index: pdo_info.pdo_index,
+        entries:
+          Map.new(pdo_info.entries, fn {entry_name, {index, subindex, bit_length}} ->
+            type = Driver.infer_type_from_bit_length(bit_length)
+            {safe_to_atom(entry_name), {type, index, subindex, bit_length}}
+          end),
+        domain: :default_domain,
+        supports_pdo_config?: true
+      }
+    end)
+  end
 
   # SECURITY: Safely convert string to atom, only if it already exists
   # This prevents atom exhaustion from untrusted EEPROM data
