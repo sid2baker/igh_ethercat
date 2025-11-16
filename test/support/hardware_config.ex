@@ -15,7 +15,7 @@ defmodule TestHardwareConfig do
   - EL3202 Channel 2: 100Ω resistor connected
   """
 
-  alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig, EntryConfig}
+  alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig}
 
   def hardware_config do
     %HardwareConfig{

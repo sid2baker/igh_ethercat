@@ -125,17 +125,12 @@ defmodule EtherCAT.Drivers.Generic do
         "product: 0x#{Integer.to_string(state.product_code, 16)})"
     )
 
-    # Auto-discover PDO configuration
-    {:ok, state, {:continue, :discover_pdos}}
-  end
-
-  @impl true
-  def handle_continue(:discover_pdos, state) do
+    # Auto-discover PDO configuration synchronously to ensure driver is ready
+    # before Master tries to configure it
     pdo_map = discover_pdos_from_eeprom(state)
-
     Logger.debug("Slave #{state.position}: Discovered #{map_size(pdo_map)} PDOs")
 
-    {:noreply, %{state | pdo_map: pdo_map}}
+    {:ok, %{state | pdo_map: pdo_map}}
   end
 
   @impl true
