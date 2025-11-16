@@ -379,9 +379,8 @@ defmodule EtherCAT.Master do
       false ->
         Logger.info("Auto-creating :default_domain with 1000µs interval")
 
-        case Nif.master_create_domain(data.master_ref, self(), 1000) do
+        case Nif.master_create_domain(data.master_ref, :default_domain, 1000) do
           {:ok, domain_ref} ->
-            :ok = Nif.domain_set_pid(domain_ref, self())
             domain_info = %{ref: domain_ref, interval: 1000}
             new_domains = Map.put(data.domains, :default_domain, domain_info)
             {:keep_state, %{data | domains: new_domains}}
@@ -407,10 +406,8 @@ defmodule EtherCAT.Master do
         {:keep_state_and_data, [{:reply, from, {:error, :domain_already_exists}}]}
 
       false ->
-        case Nif.master_create_domain(data.master_ref, self(), interval) do
+        case Nif.master_create_domain(data.master_ref, name, interval) do
           {:ok, domain_ref} ->
-            :ok = Nif.domain_set_pid(domain_ref, self())
-
             domain_info = %{ref: domain_ref, interval: interval}
             new_domains = Map.put(data.domains, name, domain_info)
 
@@ -623,37 +620,9 @@ defmodule EtherCAT.Master do
   end
 
   # Handle data change notifications from NIF
-  # NIF sends: {:data_changed, domain_ref, unique_name, value}
-  def operational(:info, {:data_changed, domain_ref, unique_name, value}, data) do
-    # Find domain_name from domain_ref
-    domain_name = find_domain_name(data.domains, domain_ref)
-
-    case domain_name do
-      nil ->
-        Logger.warning("Received data_changed for unknown domain: #{inspect(domain_ref)}")
-        :keep_state_and_data
-
-      domain_name ->
-        key = {domain_name, unique_name}
-
-        case data.subscribers[key] do
-          nil ->
-            :keep_state_and_data
-
-          pids ->
-            Enum.each(pids, fn pid ->
-              send(pid, {:pdo_value_changed, domain_name, unique_name, value})
-            end)
-
-            :keep_state_and_data
-        end
-    end
-  end
-
-  # Fallback for old NIF format (if it only sends 2-tuple)
-  def operational(:info, {:data_changed, unique_name, value}, data) do
-    # Assume default_domain if NIF doesn't specify
-    domain_name = :default_domain
+  # NIF sends: {:data_changed, domain_name, unique_name, value}
+  # Where unique_name = "slave_name:pdo_name:entry_name"
+  def operational(:info, {:data_changed, domain_name, unique_name, value}, data) do
     key = {domain_name, unique_name}
 
     case data.subscribers[key] do
@@ -667,6 +636,27 @@ defmodule EtherCAT.Master do
 
         :keep_state_and_data
     end
+  end
+
+  # Handle output change notifications from NIF (for telemetry/debugging)
+  # NIF sends: {:output_changed, domain_name, unique_name, value}
+  def operational(:info, {:output_changed, _domain_name, _unique_name, _value}, _data) do
+    # Currently unused - could be used for output monitoring/telemetry
+    :keep_state_and_data
+  end
+
+  # Handle domain working counter changes
+  # NIF sends: {:wc_changed, domain_name, working_counter}
+  def operational(:info, {:wc_changed, _domain_name, _working_counter}, _data) do
+    # Could be used for domain health monitoring
+    :keep_state_and_data
+  end
+
+  # Handle domain state changes
+  # NIF sends: {:state_changed, domain_name, wc_state}
+  def operational(:info, {:state_changed, _domain_name, _wc_state}, _data) do
+    # Could be used for domain state monitoring
+    :keep_state_and_data
   end
 
   def operational(:info, {:DOWN, _ref, :process, pid, _reason}, data) do
@@ -1057,9 +1047,8 @@ defmodule EtherCAT.Master do
   defp create_domains_from_config(data, config) do
     result =
       Enum.reduce_while(config.domains, {:ok, data}, fn domain_config, {:ok, acc_data} ->
-        case Nif.master_create_domain(acc_data.master_ref, self(), domain_config.interval) do
+        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, domain_config.interval) do
           {:ok, domain_ref} ->
-            :ok = Nif.domain_set_pid(domain_ref, self())
             domain_info = %{ref: domain_ref, interval: domain_config.interval}
             new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)
             {:cont, {:ok, %{acc_data | domains: new_domains}}}
@@ -1188,12 +1177,6 @@ defmodule EtherCAT.Master do
       {:error, _} = error ->
         error
     end
-  end
-
-  defp find_domain_name(domains, domain_ref) do
-    Enum.find_value(domains, fn {name, info} ->
-      if info.ref == domain_ref, do: name
-    end)
   end
 
   # ============================================================================
