@@ -46,7 +46,7 @@ defmodule EtherCAT.Config.SlaveConfig do
   - `alias` - Bus alias (when 0 position is used)
   - `opts` - Configuration options:
     - `:name` - Semantic slave name (optional)
-    - `:driver` - Driver module implementing EtherCAT.Slave.Driver (optional)
+    - `:driver` - Driver module implementing EtherCAT.Slave.Driver (optional, defaults to GenericDriver)
     - `:expected` - Expected vendor/product codes for verification (optional)
     - `:config` - Driver-specific configuration map (default: %{})
     - `:entries` - List of EntryConfig structs for domain routing (default: [])

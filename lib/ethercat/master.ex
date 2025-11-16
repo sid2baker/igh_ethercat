@@ -712,14 +712,7 @@ defmodule EtherCAT.Master do
              master: self(),
              position: position,
              name: slave_name,
-             slave_config: slave_config,
-             vendor_id: slave_info.vendor_id,
-             product_code: slave_info.product_code,
-             revision: slave_info.revision_number,
-             serial: slave_info.serial_number,
-             sync_count: slave_info.sync_count,
-             eeprom_data: eeprom_data,
-             config: %{}
+             eeprom_data: eeprom_data
            ) do
       {:ok,
        %{
@@ -733,8 +726,18 @@ defmodule EtherCAT.Master do
     end
   end
 
-  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Slave.Driver
-  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Slave.Driver
+  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Slave.GenericDriver
+  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Slave.GenericDriver
+
+  # Parse driver configuration
+  # Returns {driver_module, driver_opts}
+  # Supports:
+  #   - nil -> {GenericDriver, []}
+  #   - Module -> {Module, []}
+  #   - {Module, opts} -> {Module, opts}
+  defp parse_driver_config(nil), do: {EtherCAT.Slave.GenericDriver, []}
+  defp parse_driver_config({module, opts}) when is_atom(module) and is_list(opts), do: {module, opts}
+  defp parse_driver_config(module) when is_atom(module), do: {module, []}
 
   # Read all EEPROM data for a slave (sync managers, PDOs, entries)
   # This is done by Master to avoid circular dependency with drivers
@@ -1094,11 +1097,11 @@ defmodule EtherCAT.Master do
           Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
                                                                {:ok, acc_slaves} ->
             existing_slave = data.slaves[position]
-            requested_driver = slave_config.driver || EtherCAT.Slave.Driver
+            {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
 
             # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
-            if existing_slave.driver == EtherCAT.Slave.Driver and
-                 requested_driver == EtherCAT.Slave.Driver and
+            if existing_slave.driver == EtherCAT.Slave.GenericDriver and
+                 requested_driver == EtherCAT.Slave.GenericDriver and
                  existing_slave.name == slave_config.name do
               # Reuse existing driver - same driver type and name
               {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
@@ -1141,20 +1144,18 @@ defmodule EtherCAT.Master do
            ),
          {:ok, eeprom_data} <-
            read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
-         driver_module = slave_config.driver || EtherCAT.Slave.Driver,
+         {driver_module, driver_opts} = parse_driver_config(slave_config.driver),
          {:ok, pid} <-
            driver_module.start_link(
-             master: self(),
-             position: position,
-             name: slave_config.name,
-             slave_config: slave_config_ref,
-             vendor_id: slave_info.vendor_id,
-             product_code: slave_info.product_code,
-             revision: slave_info.revision_number,
-             serial: slave_info.serial_number,
-             sync_count: slave_info.sync_count,
-             eeprom_data: eeprom_data,
-             config: slave_config.config || %{}
+             Keyword.merge(
+               [
+                 master: self(),
+                 position: position,
+                 name: slave_config.name,
+                 eeprom_data: eeprom_data
+               ],
+               driver_opts
+             )
            ) do
       {:ok,
        %{
