@@ -23,6 +23,7 @@ defmodule EtherCAT.Drivers.Generic do
   defstruct [
     :master,
     :position,
+    :name,
     :slave_config,
     :vendor_id,
     :product_code,
@@ -110,6 +111,7 @@ defmodule EtherCAT.Drivers.Generic do
     state = %__MODULE__{
       master: Keyword.fetch!(opts, :master),
       position: position,
+      name: slave_config.name,
       slave_config: slave_config,
       vendor_id: Keyword.fetch!(opts, :vendor_id),
       product_code: Keyword.fetch!(opts, :product_code),
@@ -160,7 +162,7 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   def handle_call({:read, pdo_name, entry_name}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    unique_name = build_unique_name(state.name, pdo_name, entry_name)
     type = get_entry_type(state, pdo_name, entry_name)
 
     # Use injected helper function
@@ -169,7 +171,7 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    unique_name = build_unique_name(state.name, pdo_name, entry_name)
     type = get_entry_type(state, pdo_name, entry_name)
 
     # Use injected helper function
@@ -178,7 +180,7 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    unique_name = build_unique_name(state.name, pdo_name, entry_name)
 
     # Use injected helper function
     result = subscribe_to_master(state.master, :default_domain, unique_name, subscriber)
@@ -186,7 +188,7 @@ defmodule EtherCAT.Drivers.Generic do
   end
 
   def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = build_unique_name(state.position, pdo_name, entry_name)
+    unique_name = build_unique_name(state.name, pdo_name, entry_name)
 
     # Use injected helper function
     result = unsubscribe_from_master(state.master, :default_domain, unique_name, subscriber)
