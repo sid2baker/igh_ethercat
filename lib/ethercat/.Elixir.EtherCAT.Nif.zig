@@ -862,7 +862,13 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     // FIX C2: Initialize with actual monotonic time, not zero
     var cycle_start_time: u64 = @intCast(std.time.nanoTimestamp());
 
+    std.log.info("Cyclic task started: interval={d}µs, yield_interval={d} cycles", .{interval, yield_interval});
+
     while (true) {
+        // Debug: log every 100 cycles
+        if (counter % 100 == 0) {
+            std.log.debug("Cyclic task running: cycle {d}", .{counter});
+        }
         // 1. Set application time (synchronize with master)
         // Use wrapping add to handle overflow gracefully after 584 years
         cycle_start_time +%= (interval * std.time.ns_per_us);
@@ -927,6 +933,8 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                         entry.current_value = domain_value;
                     } else {
                         // Output changed: notify immediately and update domain value
+                        std.log.debug("Output changed: {s}, value={any}", .{entry.name, entry.current_value[0..byte_count]});
+
                         // FIX H1: Handle error return from write_bits_to_domain
                         write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
                             std.log.err("Failed to write bits to domain: {}", .{err});
