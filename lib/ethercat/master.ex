@@ -733,8 +733,8 @@ defmodule EtherCAT.Master do
     end
   end
 
-  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Drivers.Generic
-  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Drivers.Generic
+  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Slave.Driver
+  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Slave.Driver
 
   # Read all EEPROM data for a slave (sync managers, PDOs, entries)
   # This is done by Master to avoid circular dependency with drivers
@@ -1094,11 +1094,11 @@ defmodule EtherCAT.Master do
           Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
                                                                {:ok, acc_slaves} ->
             existing_slave = data.slaves[position]
-            requested_driver = slave_config.driver || EtherCAT.Drivers.Generic
+            requested_driver = slave_config.driver || EtherCAT.Slave.Driver
 
-            # Reuse Generic driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
-            if existing_slave.driver == EtherCAT.Drivers.Generic and
-                 requested_driver == EtherCAT.Drivers.Generic and
+            # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
+            if existing_slave.driver == EtherCAT.Slave.Driver and
+                 requested_driver == EtherCAT.Slave.Driver and
                  existing_slave.name == slave_config.name do
               # Reuse existing driver - same driver type and name
               {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
@@ -1141,7 +1141,7 @@ defmodule EtherCAT.Master do
            ),
          {:ok, eeprom_data} <-
            read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
-         driver_module = slave_config.driver || EtherCAT.Drivers.Generic,
+         driver_module = slave_config.driver || EtherCAT.Slave.Driver,
          {:ok, pid} <-
            driver_module.start_link(
              master: self(),
