@@ -712,14 +712,7 @@ defmodule EtherCAT.Master do
              master: self(),
              position: position,
              name: slave_name,
-             slave_config: slave_config,
-             vendor_id: slave_info.vendor_id,
-             product_code: slave_info.product_code,
-             revision: slave_info.revision_number,
-             serial: slave_info.serial_number,
-             sync_count: slave_info.sync_count,
-             eeprom_data: eeprom_data,
-             config: %{}
+             eeprom_data: eeprom_data
            ) do
       {:ok,
        %{
@@ -1159,14 +1152,7 @@ defmodule EtherCAT.Master do
                  master: self(),
                  position: position,
                  name: slave_config.name,
-                 slave_config: slave_config_ref,
-                 vendor_id: slave_info.vendor_id,
-                 product_code: slave_info.product_code,
-                 revision: slave_info.revision_number,
-                 serial: slave_info.serial_number,
-                 sync_count: slave_info.sync_count,
-                 eeprom_data: eeprom_data,
-                 config: slave_config.config || %{}
+                 eeprom_data: eeprom_data
                ],
                driver_opts
              )

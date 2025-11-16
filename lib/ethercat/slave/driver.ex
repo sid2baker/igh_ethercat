@@ -190,23 +190,11 @@ defmodule EtherCAT.Slave.Driver do
         master: Keyword.fetch!(opts, :master),
         position: position,
         name: name,
-        slave_config: Keyword.fetch!(opts, :slave_config),
-        vendor_id: Keyword.fetch!(opts, :vendor_id),
-        product_code: Keyword.fetch!(opts, :product_code),
-        revision: Keyword.fetch!(opts, :revision),
-        serial: Keyword.fetch!(opts, :serial),
-        sync_count: Keyword.fetch!(opts, :sync_count),
-        config: Keyword.get(opts, :config, %{}),
         pdo_map: pdo_map,
         callback_module: Keyword.get(opts, :callback_module)
       ])
 
-    Logger.info(
-      "Driver started for slave #{state.position} " <>
-        "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
-        "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
-        "with #{map_size(pdo_map)} PDOs"
-    )
+    Logger.info("Driver started for slave #{position} (#{name}) with #{map_size(pdo_map)} PDOs")
 
     {:ok, state}
   end
@@ -234,43 +222,37 @@ defmodule EtherCAT.Slave.Driver do
   end
 
   @doc false
-  def process_eeprom_data(eeprom_data, position) do
-    try do
-      eeprom_data
-      |> Enum.flat_map(fn {_sync_index, sync_data} ->
-        sync_manager = sync_data.sync_manager
-        pdos = sync_data.pdos || %{}
+  def process_eeprom_data(eeprom_data, _position) do
+    eeprom_data
+    |> Enum.flat_map(fn {_sync_index, sync_data} ->
+      sync_manager = sync_data.sync_manager
+      pdos = sync_data.pdos || %{}
 
-        Enum.map(pdos, fn {_pdo_pos, pdo_data} ->
-          pdo = pdo_data.pdo
-          entries = pdo_data.entries || %{}
+      Enum.map(pdos, fn {_pdo_pos, pdo_data} ->
+        pdo = pdo_data.pdo
+        entries = pdo_data.entries || %{}
 
-          pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
-          direction = normalize_direction(sync_manager.dir)
-          watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
+        pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
+        direction = normalize_direction(sync_manager.dir)
+        watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
 
-          entry_map =
-            Enum.map(entries, fn {_entry_pos, entry} ->
-              index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
-              entry_name = "0x#{index_hex}:#{entry.subindex}"
-              {entry_name, {entry.index, entry.subindex, entry.bit_length}}
-            end)
-            |> Map.new()
+        entry_map =
+          Enum.map(entries, fn {_entry_pos, entry} ->
+            index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
+            entry_name = "0x#{index_hex}:#{entry.subindex}"
+            {entry_name, {entry.index, entry.subindex, entry.bit_length}}
+          end)
+          |> Map.new()
 
-          {pdo_name,
-           %{
-             sync_manager: {sync_manager.index, direction, watchdog_mode},
-             pdo_index: pdo.index,
-             entries: entry_map
-           }}
-        end)
+        {pdo_name,
+         %{
+           sync_manager: {sync_manager.index, direction, watchdog_mode},
+           pdo_index: pdo.index,
+           entries: entry_map
+         }}
       end)
-      |> Map.new()
-    rescue
-      error ->
-        Logger.error("Failed to process EEPROM data for slave #{position}: #{inspect(error)}")
-        %{}
-    end
+    end)
+    |> Map.new()
   end
 
   @doc false

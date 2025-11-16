@@ -68,18 +68,11 @@ defmodule EtherCAT.Slave.GenericDriver do
 
   # Default state structure
   defstruct [
-    :master,
-    :position,
-    :name,
-    :slave_config,
-    :vendor_id,
-    :product_code,
-    :revision,
-    :serial,
-    :sync_count,
-    :config,
-    :pdo_map,
-    :callback_module
+    :master,           # Master process PID (for callbacks)
+    :position,         # Slave position on bus
+    :name,             # Slave name (for unique PDO entry naming)
+    :pdo_map,          # Auto-discovered PDO mappings
+    :callback_module   # Optional callback module for strategy pattern
   ]
 
   # ========================================================================
