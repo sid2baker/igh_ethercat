@@ -1,21 +1,16 @@
 defmodule EtherCAT.Slave.Driver do
   @moduledoc """
-  Default EtherCAT slave driver with auto-discovery and behaviour base for custom drivers.
+  Behaviour for EtherCAT slave drivers with default implementation base.
 
-  This module serves three purposes:
-  1. **Default driver** - Used automatically when `driver: nil` in SlaveConfig
-  2. **Behaviour definition** - Defines callbacks for custom drivers
-  3. **Base implementation** - Provides default functionality via `use EtherCAT.Slave.Driver`
+  This module defines the behaviour that all EtherCAT slave drivers must implement
+  and provides a `use` macro that injects a complete default implementation.
 
-  ## As Default Driver (driver: nil)
+  ## Default Driver
 
-  When no driver is specified in a SlaveConfig, this module is used directly:
-  - Auto-discovers PDO mappings from slave EEPROM
-  - Infers types from bit lengths (1=bool, 8=uint8, 16=uint16, etc.)
-  - Provides type-based encoding/decoding
-  - Handles read/write/subscribe operations
+  When `driver: nil` is specified in SlaveConfig, `EtherCAT.Slave.GenericDriver` is used,
+  which implements this behaviour with auto-discovery and type-based encoding.
 
-  ## As Behaviour for Custom Drivers
+  ## Custom Drivers
 
   ### Simple driver (override encoding only):
 
@@ -92,7 +87,6 @@ defmodule EtherCAT.Slave.Driver do
   - `terminate/2` - Cleanup on shutdown
   """
 
-  use GenServer
   require Logger
 
   # ========================================================================
@@ -136,131 +130,6 @@ defmodule EtherCAT.Slave.Driver do
   """
   @callback decode_pdo_value(pdo_name(), entry_name(), binary(), state :: term()) ::
               {:ok, term()} | {:error, term()}
-
-  # ========================================================================
-  # Default State Structure
-  # ========================================================================
-
-  defstruct [
-    :master,
-    :position,
-    :name,
-    :slave_config,
-    :vendor_id,
-    :product_code,
-    :revision,
-    :serial,
-    :sync_count,
-    :config,
-    :pdo_map
-  ]
-
-  # ========================================================================
-  # GenServer Implementation - Driver used as concrete module
-  # ========================================================================
-
-  @doc """
-  Start the driver process.
-  """
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
-  end
-
-  @doc """
-  Get SDO configuration list (default: empty).
-  """
-  def get_sdo_config(_pid), do: []
-
-  @doc """
-  Get PDO configuration (auto-discovered from EEPROM by default).
-  """
-  def get_pdo_config(pid) do
-    GenServer.call(pid, :get_pdo_config)
-  end
-
-  @impl true
-  def init(opts) do
-    build_default_state(__MODULE__, opts)
-  end
-
-  @impl true
-  def handle_call(:get_pdo_config, _from, state) do
-    config = convert_pdo_config(state.pdo_map)
-    {:reply, config, state}
-  end
-
-  def handle_call({:read, pdo_name, entry_name}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      with {:ok, binary} <-
-             EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name),
-           {:ok, value} <- __MODULE__.decode_pdo_value(pdo_name, entry_name, binary, state) do
-        {:ok, value}
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      with {:ok, binary} <- __MODULE__.encode_pdo_value(pdo_name, entry_name, value, state),
-           :ok <-
-             EtherCAT.Master.write_pdo_entry(
-               state.master,
-               :default_domain,
-               unique_name,
-               binary
-             ) do
-        :ok
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      EtherCAT.Master.subscribe(state.master, :default_domain, unique_name, subscriber)
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      EtherCAT.Master.unsubscribe(state.master, :default_domain, unique_name, subscriber)
-
-    {:reply, result, state}
-  end
-
-  @impl true
-  def terminate(reason, state) do
-    Logger.info("Driver terminating for slave #{state.position}: #{inspect(reason)}")
-    :ok
-  end
-
-  # ========================================================================
-  # Behaviour Implementation - Driver implements its own callbacks
-  # ========================================================================
-
-  @doc """
-  Default encode implementation using type-based encoding.
-  """
-  def encode_pdo_value(pdo_name, entry_name, value, state) do
-    default_encode(pdo_name, entry_name, value, state)
-  end
-
-  @doc """
-  Default decode implementation using type-based decoding.
-  """
-  def decode_pdo_value(pdo_name, entry_name, binary, state) do
-    default_decode(pdo_name, entry_name, binary, state)
-  end
 
   # ========================================================================
   # __using__ Macro - Creates custom drivers
@@ -444,12 +313,12 @@ defmodule EtherCAT.Slave.Driver do
   end
 
   # ========================================================================
-  # Public Helper Functions (shared between Driver and custom drivers)
+  # Public Helper Functions (shared between GenericDriver and custom drivers)
   # ========================================================================
 
   @doc """
   Build default state structure for a driver module.
-  Used by both the default Driver and custom drivers via `use`.
+  Used by both GenericDriver and custom drivers via `use`.
   """
   def build_default_state(module, opts) do
     position = Keyword.fetch!(opts, :position)
