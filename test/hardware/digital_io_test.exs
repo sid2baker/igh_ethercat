@@ -21,7 +21,26 @@ defmodule Hardware.DigitalIOTest do
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
 
   Note: The EtherCAT Master is auto-started by the Application supervision tree.
+
+  ## PDO Naming (Generic Driver Autodiscovery)
+
+  The Generic driver discovers PDO names from EEPROM as hex strings:
+  - EL1809 inputs: PDOs "0x1a00".."0x1a0f", entries "0x6000:1".."0x60f0:1"
+  - EL2809 outputs: PDOs "0x1600".."0x160f", entries "0x7000:1".."0x70f0:1"
   """
+
+  # Helper to get PDO/entry names for a channel (1-based)
+  defp input_pdo(ch) when ch >= 1 and ch <= 16 do
+    pdo_hex = Integer.to_string(0x1A00 + (ch - 1), 16) |> String.downcase()
+    entry_hex = Integer.to_string(0x6000 + (ch - 1) * 0x10, 16) |> String.downcase()
+    {"0x#{pdo_hex}", "0x#{entry_hex}:1"}
+  end
+
+  defp output_pdo(ch) when ch >= 1 and ch <= 16 do
+    pdo_hex = Integer.to_string(0x1600 + (ch - 1), 16) |> String.downcase()
+    entry_hex = Integer.to_string(0x7000 + (ch - 1) * 0x10, 16) |> String.downcase()
+    {"0x#{pdo_hex}", "0x#{entry_hex}:1"}
+  end
 
   describe "Single Channel Loopback" do
     setup do
@@ -33,43 +52,52 @@ defmodule Hardware.DigitalIOTest do
 
     @tag :digital_io
     test "writes and reads channel 1", %{slaves: slaves} do
+      {out_pdo, out_entry} = output_pdo(1)
+      {in_pdo, in_entry} = input_pdo(1)
+
       # Write HIGH
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch1, :output, true)
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
       Process.sleep(50)
 
       # Read back
-      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, :ch1, :input)
+      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
 
       # Write LOW
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch1, :output, false)
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
       Process.sleep(50)
 
       # Read back
-      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, :ch1, :input)
+      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
     end
 
     @tag :digital_io
     test "writes and reads channel 8", %{slaves: slaves} do
-      # Test middle channel
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch8, :output, true)
-      Process.sleep(50)
-      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, :ch8, :input)
+      {out_pdo, out_entry} = output_pdo(8)
+      {in_pdo, in_entry} = input_pdo(8)
 
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch8, :output, false)
+      # Test middle channel
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
       Process.sleep(50)
-      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, :ch8, :input)
+      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
+
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
+      Process.sleep(50)
+      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
     end
 
     @tag :digital_io
     test "writes and reads channel 16", %{slaves: slaves} do
-      # Test last channel
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch16, :output, true)
-      Process.sleep(50)
-      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, :ch16, :input)
+      {out_pdo, out_entry} = output_pdo(16)
+      {in_pdo, in_entry} = input_pdo(16)
 
-      :ok = EtherCAT.write(slaves.digital_outputs, :ch16, :output, false)
+      # Test last channel
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
       Process.sleep(50)
-      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, :ch16, :input)
+      assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
+
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
+      Process.sleep(50)
+      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
     end
   end
 
@@ -79,8 +107,8 @@ defmodule Hardware.DigitalIOTest do
 
       # Clear all outputs before each test
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+        {out_pdo, out_entry} = output_pdo(i)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
       end
 
       Process.sleep(100)
@@ -88,8 +116,8 @@ defmodule Hardware.DigitalIOTest do
       on_exit(fn ->
         # Clear all outputs after test
         for i <- 1..16 do
-          ch = String.to_atom("ch#{i}")
-          EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+          {out_pdo, out_entry} = output_pdo(i)
+          EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
         end
       end)
 
@@ -102,19 +130,19 @@ defmodule Hardware.DigitalIOTest do
       for active_ch <- 1..16 do
         # Set only this channel HIGH, all others LOW
         for ch <- 1..16 do
-          ch_atom = String.to_atom("ch#{ch}")
+          {out_pdo, out_entry} = output_pdo(ch)
           value = ch == active_ch
-          :ok = EtherCAT.write(slaves.digital_outputs, ch_atom, :output, value)
+          :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, value)
         end
 
         Process.sleep(50)
 
         # Verify only this channel reads HIGH, all others LOW
         for ch <- 1..16 do
-          ch_atom = String.to_atom("ch#{ch}")
+          {in_pdo, in_entry} = input_pdo(ch)
           expected = ch == active_ch
 
-          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, ch_atom, :input),
+          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry),
                  "Channel #{ch} expected #{expected} when ch#{active_ch} is active"
         end
       end
@@ -124,17 +152,17 @@ defmodule Hardware.DigitalIOTest do
     test "sets all channels HIGH simultaneously", %{slaves: slaves} do
       # Set all channels HIGH
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, true)
+        {out_pdo, out_entry} = output_pdo(i)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
       end
 
       Process.sleep(50)
 
       # Verify all channels read HIGH
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {in_pdo, in_entry} = input_pdo(i)
 
-        assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, ch, :input),
+        assert {:ok, true} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry),
                "Channel #{i} should be HIGH"
       end
     end
@@ -143,25 +171,25 @@ defmodule Hardware.DigitalIOTest do
     test "sets all channels LOW simultaneously", %{slaves: slaves} do
       # First set all HIGH
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, true)
+        {out_pdo, out_entry} = output_pdo(i)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
       end
 
       Process.sleep(50)
 
       # Then set all LOW
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+        {out_pdo, out_entry} = output_pdo(i)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
       end
 
       Process.sleep(50)
 
       # Verify all channels read LOW
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {in_pdo, in_entry} = input_pdo(i)
 
-        assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, ch, :input),
+        assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry),
                "Channel #{i} should be LOW"
       end
     end
@@ -173,14 +201,14 @@ defmodule Hardware.DigitalIOTest do
 
       # Clear all outputs
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+        {out_pdo, out_entry} = output_pdo(i)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
       end
 
       on_exit(fn ->
         for i <- 1..16 do
-          ch = String.to_atom("ch#{i}")
-          EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+          {out_pdo, out_entry} = output_pdo(i)
+          EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
         end
       end)
 
@@ -193,19 +221,19 @@ defmodule Hardware.DigitalIOTest do
       for pattern <- 0..255 do
         # Write pattern to channels 1-8
         for bit <- 0..7 do
-          ch = String.to_atom("ch#{bit + 1}")
+          {out_pdo, out_entry} = output_pdo(bit + 1)
           value = (pattern &&& 1 <<< bit) != 0
-          :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, value)
+          :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, value)
         end
 
         Process.sleep(20)
 
         # Read back and verify
         for bit <- 0..7 do
-          ch = String.to_atom("ch#{bit + 1}")
+          {in_pdo, in_entry} = input_pdo(bit + 1)
           expected = (pattern &&& 1 <<< bit) != 0
 
-          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, ch, :input),
+          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry),
                  "Pattern #{pattern} (0x#{Integer.to_string(pattern, 16)}), bit #{bit} mismatch"
         end
       end
@@ -215,32 +243,32 @@ defmodule Hardware.DigitalIOTest do
     test "tests alternating pattern", %{slaves: slaves} do
       # Pattern: 0x5555 (0101010101010101)
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {out_pdo, out_entry} = output_pdo(i)
         value = rem(i, 2) == 1
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, value)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, value)
       end
 
       Process.sleep(50)
 
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {in_pdo, in_entry} = input_pdo(i)
         expected = rem(i, 2) == 1
-        assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, ch, :input)
+        assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
       end
 
       # Inverted pattern: 0xAAAA (1010101010101010)
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {out_pdo, out_entry} = output_pdo(i)
         value = rem(i, 2) == 0
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, value)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, value)
       end
 
       Process.sleep(50)
 
       for i <- 1..16 do
-        ch = String.to_atom("ch#{i}")
+        {in_pdo, in_entry} = input_pdo(i)
         expected = rem(i, 2) == 0
-        assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, ch, :input)
+        assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
       end
     end
 
@@ -250,18 +278,18 @@ defmodule Hardware.DigitalIOTest do
       for active <- 1..16 do
         # Set only one channel HIGH
         for ch <- 1..16 do
-          ch_atom = String.to_atom("ch#{ch}")
+          {out_pdo, out_entry} = output_pdo(ch)
           value = ch == active
-          :ok = EtherCAT.write(slaves.digital_outputs, ch_atom, :output, value)
+          :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, value)
         end
 
         Process.sleep(30)
 
         # Verify pattern
         for ch <- 1..16 do
-          ch_atom = String.to_atom("ch#{ch}")
+          {in_pdo, in_entry} = input_pdo(ch)
           expected = ch == active
-          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, ch_atom, :input)
+          assert {:ok, ^expected} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
         end
       end
     end
@@ -273,8 +301,8 @@ defmodule Hardware.DigitalIOTest do
 
       on_exit(fn ->
         for i <- 1..16 do
-          ch = String.to_atom("ch#{i}")
-          EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+          {out_pdo, out_entry} = output_pdo(i)
+          EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
         end
       end)
 
@@ -283,17 +311,18 @@ defmodule Hardware.DigitalIOTest do
 
     @tag :digital_io
     test "verifies signal propagation delay is acceptable", %{slaves: slaves} do
-      ch = :ch1
+      {out_pdo, out_entry} = output_pdo(1)
+      {in_pdo, in_entry} = input_pdo(1)
 
       # Write HIGH and measure time until read
-      :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, true)
+      :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
 
       # Poll until we see HIGH (with timeout)
       start_time = System.monotonic_time(:millisecond)
 
       result =
         Enum.reduce_while(1..100, :timeout, fn _, _ ->
-          case EtherCAT.read(slaves.digital_inputs, ch, :input) do
+          case EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry) do
             {:ok, true} ->
               {:halt, :ok}
 
@@ -315,17 +344,18 @@ defmodule Hardware.DigitalIOTest do
 
     @tag :digital_io
     test "rapid toggling test", %{slaves: slaves} do
-      ch = :ch1
+      {out_pdo, out_entry} = output_pdo(1)
+      {in_pdo, in_entry} = input_pdo(1)
 
       # Toggle channel 100 times rapidly
       for _ <- 1..100 do
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, true)
-        :ok = EtherCAT.write(slaves.digital_outputs, ch, :output, false)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
+        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
       end
 
       # Final state should be LOW
       Process.sleep(50)
-      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, ch, :input)
+      assert {:ok, false} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
     end
   end
 end
