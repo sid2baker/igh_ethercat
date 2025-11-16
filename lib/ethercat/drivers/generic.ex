@@ -99,6 +99,7 @@ defmodule EtherCAT.Drivers.Generic do
   @impl true
   def init(opts) do
     position = Keyword.fetch!(opts, :position)
+    name = Keyword.fetch!(opts, :name)
     slave_config = Keyword.fetch!(opts, :slave_config)
 
     # Register in Registry for discovery (include slave_config for Master lookup)
@@ -111,7 +112,7 @@ defmodule EtherCAT.Drivers.Generic do
     state = %__MODULE__{
       master: Keyword.fetch!(opts, :master),
       position: position,
-      name: slave_config.name,
+      name: name,
       slave_config: slave_config,
       vendor_id: Keyword.fetch!(opts, :vendor_id),
       product_code: Keyword.fetch!(opts, :product_code),

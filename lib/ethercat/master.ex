@@ -694,6 +694,8 @@ defmodule EtherCAT.Master do
   # ============================================================================
 
   defp start_slave_driver(data, position) do
+    slave_name = :"slave_#{position}"
+
     with {:ok, slave_info} <- Nif.master_get_slave(data.master_ref, position),
          {:ok, slave_config} <-
            Nif.master_slave_config(
@@ -708,6 +710,7 @@ defmodule EtherCAT.Master do
            driver_module.start_link(
              master: self(),
              position: position,
+             name: slave_name,
              slave_config: slave_config,
              vendor_id: slave_info.vendor_id,
              product_code: slave_info.product_code,
@@ -719,7 +722,7 @@ defmodule EtherCAT.Master do
       {:ok,
        %{
          pid: pid,
-         name: :"slave_#{position}",
+         name: slave_name,
          vendor: slave_info.vendor_id,
          product: slave_info.product_code,
          driver: driver_module
@@ -1061,6 +1064,7 @@ defmodule EtherCAT.Master do
            driver_module.start_link(
              master: self(),
              position: position,
+             name: slave_config.name,
              slave_config: slave_config_ref,
              vendor_id: slave_info.vendor_id,
              product_code: slave_info.product_code,
