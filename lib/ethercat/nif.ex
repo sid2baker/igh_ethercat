@@ -971,6 +971,20 @@ defmodule EtherCAT.Nif do
           try accessor.initDomainData();
       }
 
+      // Pre-calculate domain intervals in cycle counts
+      // accessor.interval is in microseconds, interval is cycle period in microseconds
+      // If domain interval < cycle interval, queue every cycle (interval_in_cycles = 1)
+      // If domain interval >= cycle interval, queue every N cycles
+      var domain_intervals = try beam.allocator.alloc(u32, domain_accessors.len);
+      defer beam.allocator.free(domain_intervals);
+
+      for (domain_accessors, 0..) |domain_accessor_resource, idx| {
+          const accessor = domain_accessor_resource.unpack();
+          // Calculate how many cycles between domain queue operations
+          // max(1, ...) ensures we queue at least every cycle
+          domain_intervals[idx] = @max(1, @as(u32, @intCast(@divTrunc(accessor.interval, interval))));
+      }
+
       var counter: u32 = 0;
 
       // Main cyclic loop with deterministic timing
@@ -1071,9 +1085,10 @@ defmodule EtherCAT.Nif do
           prev_master_state = master_state;
 
           // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
-          for (domain_accessors) |domain_accessor_resource| {
+          for (domain_accessors, 0..) |domain_accessor_resource, idx| {
               const accessor = domain_accessor_resource.unpack();
-              if (counter % accessor.interval == 0) {
+              // Use pre-calculated interval in cycles (not microseconds)
+              if (counter % domain_intervals[idx] == 0) {
                   _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
               }
           }
