@@ -14,18 +14,20 @@ defmodule Hardware.SlaveDetectionTest do
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware
 
-  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  Note: The EtherCAT Master is started by test_helper.exs for hardware tests.
   """
 
   describe "System Initialization" do
     test "successfully configures EtherCAT hardware" do
-      assert {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      assert {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       assert is_map(slaves)
       assert map_size(slaves) > 0
     end
 
     test "hardware enters operational state" do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
 
       # Give the system time to reach operational state
       Process.sleep(1000)
@@ -39,7 +41,8 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Detection" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -76,7 +79,8 @@ defmodule Hardware.SlaveDetectionTest do
 
   describe "Slave Communication" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 

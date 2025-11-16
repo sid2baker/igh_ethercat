@@ -34,7 +34,8 @@ defmodule Hardware.SimpleDigitalIOTest do
     setup do
       # Wait for hardware to stabilize after Master connects
       Process.sleep(2100)
-      {:ok, slaves} = EtherCAT.configure_hardware(0, SimpleHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, SimpleHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 

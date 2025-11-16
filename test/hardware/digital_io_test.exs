@@ -20,7 +20,7 @@ defmodule Hardware.DigitalIOTest do
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
 
-  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  Note: The EtherCAT Master is started by test_helper.exs for hardware tests.
 
   ## PDO Naming (Generic Driver Autodiscovery)
 
@@ -46,7 +46,8 @@ defmodule Hardware.DigitalIOTest do
     setup do
       # Wait for hardware to stabilize after Master connects
       Process.sleep(2100)
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -103,7 +104,8 @@ defmodule Hardware.DigitalIOTest do
 
   describe "All Channels Loopback" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
 
       # Clear all outputs before each test
       for i <- 1..16 do
@@ -197,7 +199,8 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Pattern Testing" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
 
       # Clear all outputs
       for i <- 1..16 do
@@ -297,7 +300,8 @@ defmodule Hardware.DigitalIOTest do
 
   describe "Timing Tests" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
 
       on_exit(fn ->
         for i <- 1..16 do

@@ -56,7 +56,7 @@ defmodule EtherCAT do
         domain :fast_loop, interval: 1
 
         slave position: 0, name: :temp_sensor do
-          driver EtherCAT.Drivers.EL3202
+          # driver uses auto-discovery by default (driver: nil)
           expect vendor: 0x00000002, product: 0x0C5A3052
 
           config do

@@ -20,7 +20,7 @@ defmodule Hardware.RTDInputTest do
 
   Run with: ETHERCAT_HARDWARE=true mix test --only hardware:rtd
 
-  Note: The EtherCAT Master is auto-started by the Application supervision tree.
+  Note: The EtherCAT Master is started by test_helper.exs for hardware tests.
   """
 
   # Expected resistance values
@@ -32,7 +32,8 @@ defmodule Hardware.RTDInputTest do
 
   describe "Basic Resistance Reading" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -81,7 +82,8 @@ defmodule Hardware.RTDInputTest do
 
   describe "Measurement Stability" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -150,7 +152,8 @@ defmodule Hardware.RTDInputTest do
 
   describe "Rapid Reading" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -197,7 +200,8 @@ defmodule Hardware.RTDInputTest do
 
   describe "Range Validation" do
     setup do
-      {:ok, slaves} = EtherCAT.configure_hardware(0, TestHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 

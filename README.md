@@ -43,7 +43,7 @@ defmodule MyMachine do
 
   # Configure each slave
   slave position: 0, name: :temp_sensor do
-    driver EtherCAT.Drivers.EL3202
+    # Auto-discovery enabled by default (driver: nil)
     expect vendor: 0x00000002, product: 0x0C5A3052
 
     config do
@@ -58,7 +58,8 @@ defmodule MyMachine do
   end
 
   slave position: 1, name: :valve_outputs do
-    driver EtherCAT.Drivers.EL2008
+    # Custom driver example (optional - uses auto-discovery if omitted)
+    driver MyApp.CustomValveDriver
 
     entry :ch1, :value, domain: :fast_loop
     entry :ch2, :value, domain: :fast_loop
@@ -281,7 +282,7 @@ The system can verify connected hardware matches your configuration:
 
 ```elixir
 slave position: 0, name: :temp_sensor do
-  driver EtherCAT.Drivers.EL3202
+  # Auto-discovery enabled by default
   expect vendor: 0x00000002, product: 0x0C5A3052  # ← Verified at runtime
   # ...
 end
