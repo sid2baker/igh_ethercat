@@ -1016,14 +1016,14 @@ defmodule EtherCAT.Master do
             existing_slave = data.slaves[position]
             requested_driver = slave_config.driver || EtherCAT.Drivers.Generic
 
-            # If both use Generic driver, reuse existing process to avoid PDO re-discovery deadlock
+            # Reuse Generic driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
             if existing_slave.driver == EtherCAT.Drivers.Generic and
-                 requested_driver == EtherCAT.Drivers.Generic do
-              # Reuse existing driver, just update the name
-              updated_slave = %{existing_slave | name: slave_config.name}
-              {:cont, {:ok, Map.put(acc_slaves, position, updated_slave)}}
+                 requested_driver == EtherCAT.Drivers.Generic and
+                 existing_slave.name == slave_config.name do
+              # Reuse existing driver - same driver type and name
+              {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
             else
-              # Need to replace driver - stop old one and start new one
+              # Need to replace driver - either different driver type or name changed
               if Process.alive?(existing_slave.pid) do
                 GenServer.stop(existing_slave.pid, :normal)
               end
