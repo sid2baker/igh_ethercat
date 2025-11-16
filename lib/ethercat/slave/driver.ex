@@ -70,7 +70,23 @@ defmodule EtherCAT.Slave.Driver do
   - `handle_call/3` - Full GenServer control
   """
 
+  use GenServer
   require Logger
+
+  # Default state structure for Driver when used directly
+  defstruct [
+    :master,
+    :position,
+    :name,
+    :slave_config,
+    :vendor_id,
+    :product_code,
+    :revision,
+    :serial,
+    :sync_count,
+    :config,
+    :pdo_map
+  ]
 
   @typedoc "PDO name (typically an atom like :ch1 or :inputs)"
   @type pdo_name :: atom() | String.t()
@@ -109,6 +125,122 @@ defmodule EtherCAT.Slave.Driver do
   """
   @callback decode_pdo_value(pdo_name(), entry_name(), binary(), state :: term()) ::
               {:ok, term()} | {:error, term()}
+
+  # ========================================================================
+  # GenServer Implementation - Driver module can be used directly
+  # ========================================================================
+
+  @doc """
+  Start the driver process.
+  """
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  @impl true
+  def init(opts) do
+    position = Keyword.fetch!(opts, :position)
+    name = Keyword.fetch!(opts, :name)
+    eeprom_data = Keyword.fetch!(opts, :eeprom_data)
+
+    # Auto-discover PDO mappings from EEPROM
+    pdo_map = process_eeprom_data(eeprom_data, position)
+
+    state = %__MODULE__{
+      master: Keyword.fetch!(opts, :master),
+      position: position,
+      name: name,
+      slave_config: Keyword.fetch!(opts, :slave_config),
+      vendor_id: Keyword.fetch!(opts, :vendor_id),
+      product_code: Keyword.fetch!(opts, :product_code),
+      revision: Keyword.fetch!(opts, :revision),
+      serial: Keyword.fetch!(opts, :serial),
+      sync_count: Keyword.fetch!(opts, :sync_count),
+      config: Keyword.get(opts, :config, %{}),
+      pdo_map: pdo_map
+    }
+
+    Logger.info(
+      "Driver started for slave #{state.position} " <>
+        "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
+        "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
+        "with #{map_size(pdo_map)} PDOs"
+    )
+
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:get_pdo_config, _from, state) do
+    config = convert_pdo_config(state.pdo_map)
+    {:reply, config, state}
+  end
+
+  def handle_call({:read, pdo_name, entry_name}, _from, state) do
+    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+
+    result =
+      with {:ok, binary} <-
+             EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name),
+           {:ok, value} <- driver_decode(pdo_name, entry_name, binary, state) do
+        {:ok, value}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
+    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+
+    result =
+      with {:ok, binary} <- driver_encode(pdo_name, entry_name, value, state),
+           :ok <-
+             EtherCAT.Master.write_pdo_entry(
+               state.master,
+               :default_domain,
+               unique_name,
+               binary
+             ) do
+        :ok
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
+    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+
+    result =
+      EtherCAT.Master.subscribe(state.master, :default_domain, unique_name, subscriber)
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
+    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+
+    result =
+      EtherCAT.Master.unsubscribe(state.master, :default_domain, unique_name, subscriber)
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def terminate(reason, state) do
+    Logger.info("Driver terminating for slave #{state.position}: #{inspect(reason)}")
+    :ok
+  end
+
+  # Type-based encoding/decoding for direct Driver use
+  defp driver_encode(pdo_name, entry_name, value, state) do
+    type = get_entry_type(state.pdo_map, pdo_name, entry_name)
+    encode_by_type(type, value)
+  end
+
+  defp driver_decode(pdo_name, entry_name, binary, state) do
+    type = get_entry_type(state.pdo_map, pdo_name, entry_name)
+    decode_by_type(type, binary)
+  end
 
   # ========================================================================
   # __using__ macro - Complete driver implementation
