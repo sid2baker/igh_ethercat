@@ -756,15 +756,23 @@ defmodule EtherCAT.Nif do
 
       std.log.debug("set_value: '{s}' at bit_offset={} = {any} (writing to domain buffer)", .{name, entry.bit_offset, binary});
 
-      // Write directly to domain buffer
-      write_bits_to_domain(accessor.data, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
-          std.log.err("set_value: Failed to write bits to domain: {}", .{err});
-          return err;
-      };
+      // Get actual domain data (may not be initialized yet if cyclic task hasn't started)
+      const data_slice = accessor.data;
 
-      std.log.debug("set_value: successfully wrote to domain buffer", .{});
+      if (data_slice.len > 0) {
+          // Domain initialized - write directly to domain buffer
+          write_bits_to_domain(data_slice, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
+              std.log.err("set_value: Failed to write bits to domain: {}", .{err});
+              return err;
+          };
+          std.log.debug("set_value: successfully wrote to domain buffer", .{});
+      } else {
+          // Domain not yet initialized by cyclic task - just update current_value
+          // The cyclic task will write it when it starts
+          std.log.debug("set_value: domain not initialized yet, storing value for cyclic task", .{});
+      }
 
-      // Also update the expected value in the entry (thread-safe)
+      // Update the expected value in the entry (thread-safe)
       accessor.mutex.lock();
       defer accessor.mutex.unlock();
       accessor.layout.updateEntryValue(entry.bit_offset, value_data);
@@ -1010,10 +1018,7 @@ defmodule EtherCAT.Nif do
                           entry.current_value = domain_value;
                       } else {
                           // Output changed: write current_value to domain and notify
-                          write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
-                              std.log.err("Failed to write bits to domain: {}", .{err});
-                              continue;
-                          };
+                          try write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
 
                           const required_bytes = (entry.bit_length + 7) / 8;
                           _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});

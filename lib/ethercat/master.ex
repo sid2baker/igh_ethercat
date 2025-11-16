@@ -179,7 +179,8 @@ defmodule EtherCAT.Master do
   - `{:ok, config}` - Generated HardwareConfig struct
   - `{:error, reason}` - Not yet synced or generation error
   """
-  @spec generate_config(pid() | atom()) :: {:ok, EtherCAT.Config.HardwareConfig.t()} | {:error, term()}
+  @spec generate_config(pid() | atom()) ::
+          {:ok, EtherCAT.Config.HardwareConfig.t()} | {:error, term()}
   def generate_config(master \\ __MODULE__) do
     :gen_statem.call(master, :generate_config)
   end
@@ -705,7 +706,8 @@ defmodule EtherCAT.Master do
              slave_info.vendor_id,
              slave_info.product_code
            ),
-         {:ok, eeprom_data} <- read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
+         {:ok, eeprom_data} <-
+           read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
          driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code),
          {:ok, pid} <-
            driver_module.start_link(
@@ -745,7 +747,9 @@ defmodule EtherCAT.Master do
           for sync_index <- 0..(sync_count - 1) do
             case Nif.master_get_sync_manager(master_ref, position, sync_index) do
               sync_manager when is_map(sync_manager) ->
-                pdos = read_sync_manager_pdos(master_ref, position, sync_index, sync_manager.n_pdos)
+                pdos =
+                  read_sync_manager_pdos(master_ref, position, sync_index, sync_manager.n_pdos)
+
                 {sync_index, %{sync_manager: sync_manager, pdos: pdos}}
 
               error ->
@@ -1137,7 +1141,8 @@ defmodule EtherCAT.Master do
              slave_info.vendor_id,
              slave_info.product_code
            ),
-         {:ok, eeprom_data} <- read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
+         {:ok, eeprom_data} <-
+           read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
          driver_module = slave_config.driver || EtherCAT.Drivers.Generic,
          {:ok, pid} <-
            driver_module.start_link(

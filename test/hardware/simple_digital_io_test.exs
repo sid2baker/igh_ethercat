@@ -115,7 +115,8 @@ defmodule Hardware.SimpleDigitalIOTest do
         Process.sleep(50)
       end
 
-      assert failed_channels == [], "Channels #{inspect(Enum.reverse(failed_channels))} failed loopback test"
+      assert failed_channels == [],
+             "Channels #{inspect(Enum.reverse(failed_channels))} failed loopback test"
     end
 
     @tag :digital_io
@@ -128,7 +129,7 @@ defmodule Hardware.SimpleDigitalIOTest do
       # Write pattern
       for ch <- 1..8 do
         {out_pdo, out_entry} = output_pdo(ch)
-        bit_value = (pattern &&& (1 <<< (ch - 1))) != 0
+        bit_value = (pattern &&& 1 <<< (ch - 1)) != 0
         :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, bit_value)
       end
 
@@ -142,14 +143,15 @@ defmodule Hardware.SimpleDigitalIOTest do
         {:ok, value} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
 
         if value do
-          read_pattern = read_pattern ||| (1 <<< (ch - 1))
+          read_pattern = read_pattern ||| 1 <<< (ch - 1)
         end
       end
 
       IO.puts("Expected pattern: 0x#{Integer.to_string(pattern, 16)}")
       IO.puts("Read pattern:     0x#{Integer.to_string(read_pattern, 16)}")
 
-      assert read_pattern == pattern, "Pattern mismatch: expected 0x#{Integer.to_string(pattern, 16)}, got 0x#{Integer.to_string(read_pattern, 16)}"
+      assert read_pattern == pattern,
+             "Pattern mismatch: expected 0x#{Integer.to_string(pattern, 16)}, got 0x#{Integer.to_string(read_pattern, 16)}"
     end
   end
 end
