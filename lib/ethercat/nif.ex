@@ -694,16 +694,22 @@ defmodule EtherCAT.Nif do
   /// When called via Domain.get_pdo_value, the Slave will decode using the driver
   pub fn get_value(domain_accessor: DomainAccessorResource, name: []const u8) !beam.term {
       const accessor = domain_accessor.unpack();
-      const entry = accessor.layout.findEntry(name) orelse
+      std.log.debug("get_value: looking up '{s}' in domain (data_len={}, entries={})", .{name, accessor.data.len, accessor.layout.entries.items.len});
+      const entry = accessor.layout.findEntry(name) orelse {
+          std.log.err("get_value: entry '{s}' not found", .{name});
           return DomainError.InvalidOffset;
+      };
 
       // Use the cached data pointer from accessor instead of getting a fresh one
       // This ensures we read from the same memory that the cyclic task updates
       const data_slice = accessor.data;
 
       if (data_slice.len == 0) {
-          // Domain not initialized yet - this shouldn't happen in operational mode
-          return DomainError.InvalidOffset;
+          // Domain not yet initialized by cyclic task - return zeros
+          // This can happen during startup before cyclic_task calls initDomainData()
+          const bin = try beam.allocator.alloc(u8, (entry.bit_length + 7) / 8);
+          @memset(bin, 0);
+          return beam.make(bin, .{});
       }
 
       // Calculate required bytes for the entry
@@ -712,6 +718,8 @@ defmodule EtherCAT.Nif do
       // Extract bits from domain data into temporary buffer
       var buffer: [8]u8 = [_]u8{0} ** 8;
       extractBitsToBuffer(buffer[0..required_bytes], data_slice, entry.bit_offset, entry.bit_length);
+
+      std.log.debug("get_value: '{s}' at bit_offset={} = {any}", .{name, entry.bit_offset, buffer[0..required_bytes]});
 
       // Return as Elixir binary for driver to decode (only the required bytes)
       const bin = try beam.allocator.alloc(u8, required_bytes);
@@ -746,7 +754,17 @@ defmodule EtherCAT.Nif do
       var value_data: [8]u8 = [_]u8{0} ** 8;
       @memcpy(value_data[0..binary.len], binary);
 
-      // Update the expected value in the entry (thread-safe)
+      std.log.debug("set_value: '{s}' at bit_offset={} = {any} (writing to domain buffer)", .{name, entry.bit_offset, binary});
+
+      // Write directly to domain buffer
+      write_bits_to_domain(accessor.data, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
+          std.log.err("set_value: Failed to write bits to domain: {}", .{err});
+          return err;
+      };
+
+      std.log.debug("set_value: successfully wrote to domain buffer", .{});
+
+      // Also update the expected value in the entry (thread-safe)
       accessor.mutex.lock();
       defer accessor.mutex.unlock();
       accessor.layout.updateEntryValue(entry.bit_offset, value_data);
@@ -894,6 +912,8 @@ defmodule EtherCAT.Nif do
   /// - `interval` - Cyclic task interval in microseconds
   /// - `nif_yield_interval` - Yielding interval in microseconds (default: 100_000 = 100ms)
   pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain_accessors: []DomainAccessorResource, interval: u64, nif_yield_interval: u64) !void {
+      std.log.info("Cyclic task started: interval={}µs, yield_interval={}µs, domains={}", .{interval, nif_yield_interval, domain_accessors.len});
+
       const master = master_resource.unpack();
       var master_state: master_state_t = undefined;
       var prev_master_state: master_state_t = undefined;
@@ -903,6 +923,7 @@ defmodule EtherCAT.Nif do
       for (domain_accessors) |domain_accessor_resource| {
           const accessor = domain_accessor_resource.unpack();
           try accessor.initDomainData();
+          std.log.info("Domain initialized: data_len={}", .{accessor.data.len});
       }
 
       var counter: u32 = 0;
@@ -913,7 +934,13 @@ defmodule EtherCAT.Nif do
       // FIX C2: Initialize with actual monotonic time, not zero
       var cycle_start_time: u64 = @intCast(std.time.nanoTimestamp());
 
+      std.log.info("Entering main cyclic loop", .{});
+
       while (true) {
+          // Debug: log first few cycles then every 100
+          if (counter < 5 or counter % 100 == 0) {
+              std.log.debug("Cyclic task running: cycle={}", .{counter});
+          }
           // 1. Set application time (synchronize with master)
           // Use wrapping add to handle overflow gracefully after 584 years
           cycle_start_time +%= (interval * std.time.ns_per_us);
@@ -930,6 +957,11 @@ defmodule EtherCAT.Nif do
               // Process domain data (updates buffer from received frame)
               // Use Unchecked variant: domain is guaranteed valid in cyclic_task
               _ = ecrt.ecrt_domain_process(accessor.getDomainUnchecked());
+
+              // Debug: log domain buffer contents first few cycles then every 100
+              if ((counter < 5 or counter % 100 == 0) and accessor.data.len > 0) {
+                  std.log.debug("Cycle {}: domain buffer (first 4 bytes) = {any}", .{counter, accessor.data[0..@min(4, accessor.data.len)]});
+              }
 
               _ = ecrt.ecrt_domain_state(accessor.getDomainUnchecked(), &new_state);
 
@@ -977,11 +1009,10 @@ defmodule EtherCAT.Nif do
                           // Update stored value
                           entry.current_value = domain_value;
                       } else {
-                          // OUTPUTS: Always write current_value to domain buffer every cycle
-                          // This ensures outputs maintain their state even if domain_process overwrites buffer
+                          // Output changed: write current_value to domain and notify
                           write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
                               std.log.err("Failed to write bits to domain: {}", .{err});
-                              continue;  // Skip this entry and continue with others
+                              continue;
                           };
 
                           const required_bytes = (entry.bit_length + 7) / 8;
@@ -1003,11 +1034,13 @@ defmodule EtherCAT.Nif do
 
           prev_master_state = master_state;
 
-          // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
+          // Step 5: Queue domain outputs every cycle
+          // (accessor.interval is in microseconds but not used for queueing frequency)
           for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
-              if (counter % accessor.interval == 0) {
-                  _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+              _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+              if (counter % 100 == 0) {
+                  std.log.debug("Cycle {}: queued domain", .{counter});
               }
           }
 
