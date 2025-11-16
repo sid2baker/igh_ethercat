@@ -1,60 +1,5 @@
 defmodule EtherCAT.Nif do
-  @moduledoc """
-  Native Interface Functions (NIFs) for EtherCAT master communication.
-
-  ## ARCHITECTURAL BOUNDARY
-
-  ⚠️ **ONLY `EtherCAT.Master` should call functions in this module.**
-
-  All Slave drivers must communicate through Master's public API:
-  - `Master.read_pdo_entry/3` - Read PDO values
-  - `Master.write_pdo_entry/4` - Write PDO values
-  - `Master.subscribe/4` - Subscribe to value changes
-  - `Master.unsubscribe/4` - Unsubscribe from changes
-
-  ### Why This Boundary Exists
-
-  1. **Thread Safety**: All NIF calls are serialized through the Master gen_statem,
-     preventing race conditions between the cyclic task thread and BEAM processes.
-
-  2. **State Safety**: NIFs are only called when the Master is in valid states
-     (e.g., `:operational` for PDO reads/writes, `:ready` for configuration).
-
-  3. **Resource Ownership**: Master owns all NIF resources (MasterResource,
-     DomainAccessorResource, SlaveConfigResource). When Master crashes, all
-     resources are cleaned up together.
-
-  4. **Concurrency Control**: The Zig NIF layer uses mutexes to protect shared
-     domain data accessed by both the cyclic task (OS thread) and BEAM processes.
-     Master coordinates all accesses through this single entry point.
-
-  ## Concurrency Model
-
-  ```
-  BEAM Process (Slave)
-         ↓
-  Master.write_pdo_entry (gen_statem call)
-         ↓
-  Nif.set_value (mutex protected)
-         ↓
-  domain_accessor.mutex.lock()
-  entry.current_value = new_value
-  domain_accessor.mutex.unlock()
-
-  Meanwhile, in parallel:
-
-  Cyclic Task (OS Thread)
-         ↓
-  cyclic_task loop
-         ↓
-  domain_accessor.mutex.lock()
-  write entry.current_value to domain buffer
-  domain_accessor.mutex.unlock()
-  ```
-
-  The mutex ensures the cyclic task and BEAM processes never access
-  `current_value` simultaneously, preventing torn reads/writes.
-  """
+  @moduledoc false
 
   @nerves_sysroot System.get_env("NERVES_SDK_SYSROOT")
 
@@ -213,8 +158,7 @@ defmodule EtherCAT.Nif do
       bit_offset: usize,
       bit_length: usize,
       direction: PdoDirection,
-      current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Desired value (for outputs) or last read value (for inputs)
-      last_written_value: [MAX_PDO_ENTRY_BYTES]u8,  // Last value written to domain (outputs only)
+      current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Raw bytes storing the current value
   };
 
   /// Domain layout - collection of PDO entry descriptors
@@ -266,7 +210,6 @@ defmodule EtherCAT.Nif do
               .bit_length = bit_length,
               .direction = direction,
               .current_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
-              .last_written_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
           });
       }
 
@@ -685,6 +628,8 @@ defmodule EtherCAT.Nif do
       return ecrt.ecrt_domain_size(domain);
   }
 
+
+
   // ============================================================================
   // TYPED ACCESSOR FUNCTIONS (Name-based access using layout)
   // ============================================================================
@@ -960,20 +905,6 @@ defmodule EtherCAT.Nif do
           try accessor.initDomainData();
       }
 
-      // Pre-calculate domain intervals in cycle counts
-      // accessor.interval is in microseconds, interval is cycle period in microseconds
-      // If domain interval < cycle interval, queue every cycle (interval_in_cycles = 1)
-      // If domain interval >= cycle interval, queue every N cycles
-      var domain_intervals = try beam.allocator.alloc(u32, domain_accessors.len);
-      defer beam.allocator.free(domain_intervals);
-
-      for (domain_accessors, 0..) |domain_accessor_resource, idx| {
-          const accessor = domain_accessor_resource.unpack();
-          // Calculate how many cycles between domain queue operations
-          // max(1, ...) ensures we queue at least every cycle
-          domain_intervals[idx] = @max(1, @as(u32, @intCast(@divTrunc(accessor.interval, interval))));
-      }
-
       var counter: u32 = 0;
 
       // Main cyclic loop with deterministic timing
@@ -1018,24 +949,23 @@ defmodule EtherCAT.Nif do
               defer accessor.mutex.unlock();
 
               for (accessor.layout.entries.items) |*entry| {
-                  if (entry.direction == .input) {
-                      // INPUTS: Only update and notify on change
-                      // Extract current value from domain data into temp buffer
-                      var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
-                      extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
+                  // Extract current value from domain data into temp buffer
+                  var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
+                  extractBitsToBuffer(&domain_value, accessor.data, entry.bit_offset, entry.bit_length);
 
-                      // Compare with stored current_value
-                      const byte_count = (entry.bit_length + 7) / 8;
-                      var changed = false;
-                      var i: usize = 0;
-                      while (i < byte_count and i < MAX_PDO_ENTRY_BYTES) : (i += 1) {
-                          if (domain_value[i] != entry.current_value[i]) {
-                              changed = true;
-                              break;
-                          }
+                  // Compare with stored current_value
+                  const byte_count = (entry.bit_length + 7) / 8;
+                  var changed = false;
+                  var i: usize = 0;
+                  while (i < byte_count and i < MAX_PDO_ENTRY_BYTES) : (i += 1) {
+                      if (domain_value[i] != entry.current_value[i]) {
+                          changed = true;
+                          break;
                       }
+                  }
 
-                      if (changed) {
+                  if (changed) {
+                      if (entry.direction == .input) {
                           // Input changed: extract raw binary and notify
                           const required_bytes = (entry.bit_length + 7) / 8;
                           var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
@@ -1046,14 +976,17 @@ defmodule EtherCAT.Nif do
 
                           // Update stored value
                           entry.current_value = domain_value;
+                      } else {
+                          // OUTPUTS: Always write current_value to domain buffer every cycle
+                          // This ensures outputs maintain their state even if domain_process overwrites buffer
+                          write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
+                              std.log.err("Failed to write bits to domain: {}", .{err});
+                              continue;  // Skip this entry and continue with others
+                          };
+
+                          const required_bytes = (entry.bit_length + 7) / 8;
+                          _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
                       }
-                  } else {
-                      // OUTPUTS: Always write current_value to domain buffer every cycle
-                      // This ensures outputs maintain their state even if domain_process overwrites buffer
-                      write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length)) catch |err| {
-                          std.log.err("Failed to write bits to domain: {}", .{err});
-                          continue;  // Skip this entry and continue with others
-                      };
                   }
               }
 
@@ -1071,10 +1004,9 @@ defmodule EtherCAT.Nif do
           prev_master_state = master_state;
 
           // Step 5: Queue domain outputs at configured intervals (prepare outputs to send)
-          for (domain_accessors, 0..) |domain_accessor_resource, idx| {
+          for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
-              // Use pre-calculated interval in cycles (not microseconds)
-              if (counter % domain_intervals[idx] == 0) {
+              if (counter % accessor.interval == 0) {
                   _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
               }
           }
