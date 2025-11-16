@@ -87,7 +87,7 @@ defmodule EtherCAT.Slave.Driver do
           # Can use standard write logic with custom encoding
           with {:ok, binary} <- encode_pdo_value(pdo, entry, value, state),
                :ok <- EtherCAT.Master.write_pdo_entry(state.master, :default_domain,
-                                                      "#{state.name}:#{pdo}:#{entry}", binary) do
+                                                      "\#{state.name}:\#{pdo}:\#{entry}", binary) do
             {:reply, :ok, state}
           else
             error -> {:reply, error, state}
