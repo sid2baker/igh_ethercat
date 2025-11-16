@@ -15,6 +15,18 @@ def deps do
 end
 ```
 
+Add EtherCAT to your application's supervision tree:
+
+```elixir
+def start(_type, _args) do
+  children = [
+    {EtherCAT, master_index: 0}
+  ]
+
+  Supervisor.start_link(children, strategy: :one_for_one)
+end
+```
+
 **Requirements:** IgH EtherCAT Master (libethercat + kernel module), Zig 0.15.2, Elixir 1.19+, Linux
 
 ## Quick Start
@@ -31,7 +43,7 @@ defmodule MyMachine do
 
   # Configure each slave
   slave position: 0, name: :temp_sensor do
-    driver EtherCAT.Drivers.EL3202
+    # Auto-discovery enabled by default (driver: nil)
     expect vendor: 0x00000002, product: 0x0C5A3052
 
     config do
@@ -46,7 +58,8 @@ defmodule MyMachine do
   end
 
   slave position: 1, name: :valve_outputs do
-    driver EtherCAT.Drivers.EL2008
+    # Custom driver example (optional - uses auto-discovery if omitted)
+    driver MyApp.CustomValveDriver
 
     entry :ch1, :value, domain: :fast_loop
     entry :ch2, :value, domain: :fast_loop
@@ -58,8 +71,11 @@ end
 ### 2. Use Your Configuration
 
 ```elixir
+# Get the master PID (it was started by your supervisor)
+master_pid = Process.whereis(EtherCAT.Master)
+
 # Configure hardware and get slave PIDs
-{:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+{:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
 
 # Read using slave PIDs and semantic names
 {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
@@ -82,8 +98,11 @@ end
 Don't know your hardware configuration yet? Use discovery mode:
 
 ```elixir
+# Get the master PID
+master_pid = Process.whereis(EtherCAT.Master)
+
 # Generate configuration from discovered hardware
-{:ok, config} = EtherCAT.generate_config(0)
+{:ok, config} = EtherCAT.generate_config(master_pid)
 IO.inspect(config, pretty: true)
 
 # Use the output to create your Spark DSL module
@@ -102,7 +121,8 @@ EtherCAT.start_cyclic(master)
 
 ### After (Declarative)
 ```elixir
-{:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+master_pid = Process.whereis(EtherCAT.Master)
+{:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
 {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)  # Clear!
 ```
 
@@ -262,7 +282,7 @@ The system can verify connected hardware matches your configuration:
 
 ```elixir
 slave position: 0, name: :temp_sensor do
-  driver EtherCAT.Drivers.EL3202
+  # Auto-discovery enabled by default
   expect vendor: 0x00000002, product: 0x0C5A3052  # ← Verified at runtime
   # ...
 end

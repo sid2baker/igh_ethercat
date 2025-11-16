@@ -34,7 +34,8 @@ defmodule Hardware.SimpleDigitalIOTest do
     setup do
       # Wait for hardware to stabilize after Master connects
       Process.sleep(2100)
-      {:ok, slaves} = EtherCAT.configure_hardware(0, SimpleHardwareConfig.hardware_config())
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, SimpleHardwareConfig.hardware_config())
       {:ok, slaves: slaves}
     end
 
@@ -90,30 +91,29 @@ defmodule Hardware.SimpleDigitalIOTest do
       Process.sleep(100)
 
       # Test each channel individually
-      failed_channels = []
+      failed_channels =
+        Enum.reduce(1..16, [], fn ch, acc ->
+          {out_pdo, out_entry} = output_pdo(ch)
+          {in_pdo, in_entry} = input_pdo(ch)
 
-      for ch <- 1..16 do
-        {out_pdo, out_entry} = output_pdo(ch)
-        {in_pdo, in_entry} = input_pdo(ch)
+          # Write HIGH to this channel
+          :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
+          Process.sleep(50)
 
-        # Write HIGH to this channel
-        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, true)
-        Process.sleep(50)
+          # Read back
+          {:ok, value} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
 
-        # Read back
-        {:ok, value} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
-
-        if value != true do
-          IO.puts("Channel #{ch}: FAILED (expected true, got #{inspect(value)})")
-          failed_channels = [ch | failed_channels]
-        else
-          IO.puts("Channel #{ch}: OK")
-        end
-
-        # Write LOW again
-        :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
-        Process.sleep(50)
-      end
+          if value != true do
+            IO.puts("Channel #{ch}: FAILED (expected true, got #{inspect(value)})")
+            [ch | acc]
+          else
+            IO.puts("Channel #{ch}: OK")
+            # Write LOW again
+            :ok = EtherCAT.write(slaves.digital_outputs, out_pdo, out_entry, false)
+            Process.sleep(50)
+            acc
+          end
+        end)
 
       assert failed_channels == [],
              "Channels #{inspect(Enum.reverse(failed_channels))} failed loopback test"
@@ -136,16 +136,17 @@ defmodule Hardware.SimpleDigitalIOTest do
       Process.sleep(100)
 
       # Read back and verify
-      read_pattern = 0
+      read_pattern =
+        Enum.reduce(1..8, 0, fn ch, acc ->
+          {in_pdo, in_entry} = input_pdo(ch)
+          {:ok, value} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
 
-      for ch <- 1..8 do
-        {in_pdo, in_entry} = input_pdo(ch)
-        {:ok, value} = EtherCAT.read(slaves.digital_inputs, in_pdo, in_entry)
-
-        if value do
-          read_pattern = read_pattern ||| 1 <<< (ch - 1)
-        end
-      end
+          if value do
+            acc ||| 1 <<< (ch - 1)
+          else
+            acc
+          end
+        end)
 
       IO.puts("Expected pattern: 0x#{Integer.to_string(pattern, 16)}")
       IO.puts("Read pattern:     0x#{Integer.to_string(read_pattern, 16)}")
