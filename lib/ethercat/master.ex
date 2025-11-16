@@ -309,10 +309,10 @@ defmodule EtherCAT.Master do
 
   def scanning(:enter, _old_state, _data) do
     Logger.info("Entered :scanning state - discovering slaves")
-    {:keep_state_and_data, [{:next_event, :internal, :discover_slaves}]}
+    {:keep_state_and_data, [{:state_timeout, 0, :discover_slaves}]}
   end
 
-  def scanning(:internal, :discover_slaves, data) do
+  def scanning(:state_timeout, :discover_slaves, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
         slave_count = master_state.slaves_responding
@@ -497,7 +497,7 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.hardware_diff}}]}
   end
 
-  def ready({:call, from}, :generate_config, data) do
+  def ready({:call, from}, :generate_config, _data) do
     # TODO: Implement hardware config generation from discovered slaves
     # For now, return a placeholder error
     {:keep_state_and_data, [{:reply, from, {:error, :not_implemented}}]}
