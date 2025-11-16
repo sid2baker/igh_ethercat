@@ -1,5 +1,60 @@
 defmodule EtherCAT.Nif do
-  @moduledoc false
+  @moduledoc """
+  Native Interface Functions (NIFs) for EtherCAT master communication.
+
+  ## ARCHITECTURAL BOUNDARY
+
+  ⚠️ **ONLY `EtherCAT.Master` should call functions in this module.**
+
+  All Slave drivers must communicate through Master's public API:
+  - `Master.read_pdo_entry/3` - Read PDO values
+  - `Master.write_pdo_entry/4` - Write PDO values
+  - `Master.subscribe/4` - Subscribe to value changes
+  - `Master.unsubscribe/4` - Unsubscribe from changes
+
+  ### Why This Boundary Exists
+
+  1. **Thread Safety**: All NIF calls are serialized through the Master gen_statem,
+     preventing race conditions between the cyclic task thread and BEAM processes.
+
+  2. **State Safety**: NIFs are only called when the Master is in valid states
+     (e.g., `:operational` for PDO reads/writes, `:ready` for configuration).
+
+  3. **Resource Ownership**: Master owns all NIF resources (MasterResource,
+     DomainAccessorResource, SlaveConfigResource). When Master crashes, all
+     resources are cleaned up together.
+
+  4. **Concurrency Control**: The Zig NIF layer uses mutexes to protect shared
+     domain data accessed by both the cyclic task (OS thread) and BEAM processes.
+     Master coordinates all accesses through this single entry point.
+
+  ## Concurrency Model
+
+  ```
+  BEAM Process (Slave)
+         ↓
+  Master.write_pdo_entry (gen_statem call)
+         ↓
+  Nif.set_value (mutex protected)
+         ↓
+  domain_accessor.mutex.lock()
+  entry.current_value = new_value
+  domain_accessor.mutex.unlock()
+
+  Meanwhile, in parallel:
+
+  Cyclic Task (OS Thread)
+         ↓
+  cyclic_task loop
+         ↓
+  domain_accessor.mutex.lock()
+  write entry.current_value to domain buffer
+  domain_accessor.mutex.unlock()
+  ```
+
+  The mutex ensures the cyclic task and BEAM processes never access
+  `current_value` simultaneously, preventing torn reads/writes.
+  """
 
   @nerves_sysroot System.get_env("NERVES_SDK_SYSROOT")
 

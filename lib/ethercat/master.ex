@@ -72,7 +72,8 @@ defmodule EtherCAT.Master do
   @type t :: %__MODULE__{
           master_ref: reference() | nil,
           master_index: non_neg_integer(),
-          # Map of position => %{pid, name, vendor, product}
+          # Map of position => %{pid, name, vendor, product, driver, slave_config}
+          # slave_config: NIF SlaveConfigResource owned by Master
           slaves: %{non_neg_integer() => map()},
           # Map of domain_name => %{ref, interval}
           domains: %{atom() => %{ref: reference(), interval: pos_integer()}},
@@ -727,7 +728,8 @@ defmodule EtherCAT.Master do
          name: slave_name,
          vendor: slave_info.vendor_id,
          product: slave_info.product_code,
-         driver: driver_module
+         driver: driver_module,
+         slave_config: slave_config
        }}
     end
   end
@@ -1023,14 +1025,8 @@ defmodule EtherCAT.Master do
         {:error, :slave_not_found}
 
       slave_info ->
-        # Get slave_config from Registry
-        case Registry.lookup(EtherCAT.Registry, {:slave, slave_info.pid}) do
-          [{_pid, %{slave_config: slave_config}}] ->
-            {:ok, slave_config}
-
-          [] ->
-            {:error, :slave_config_not_found}
-        end
+        # Master owns slave_config - direct map access (no Registry indirection)
+        {:ok, slave_info.slave_config}
     end
   end
 
@@ -1162,7 +1158,8 @@ defmodule EtherCAT.Master do
          name: slave_config.name,
          vendor: slave_info.vendor_id,
          product: slave_info.product_code,
-         driver: driver_module
+         driver: driver_module,
+         slave_config: slave_config_ref
        }}
     end
   end

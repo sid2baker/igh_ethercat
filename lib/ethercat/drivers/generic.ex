@@ -101,11 +101,11 @@ defmodule EtherCAT.Drivers.Generic do
     slave_config = Keyword.fetch!(opts, :slave_config)
     eeprom_data = Keyword.fetch!(opts, :eeprom_data)
 
-    # Register in Registry for discovery (include slave_config for Master lookup)
+    # Register in Registry for discovery
+    # NOTE: Master owns slave_config - stored in Master.slaves map, not here
     Registry.register(EtherCAT.Registry, {:slave, self()}, %{
       driver: __MODULE__,
-      position: position,
-      slave_config: slave_config
+      position: position
     })
 
     # Process EEPROM data synchronously (no Master calls needed)
