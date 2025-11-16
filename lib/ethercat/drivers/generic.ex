@@ -7,18 +7,15 @@ defmodule EtherCAT.Drivers.Generic do
 
   ## Architecture
 
-  1. Driver is a GenServer process (not a module)
-  2. Master starts driver via start_link/1
-  3. Driver provides SDO/PDO config via callbacks
-  4. Driver handles read/write/subscribe by calling Master functions
-  5. Driver manages its own state
+  1. Automatically discovers PDO mappings from slave EEPROM
+  2. Uses type inference based on bit length for encoding/decoding
+  3. Provides read/write/subscribe operations via the Driver behavior
   """
 
-  use GenServer
   use EtherCAT.Slave.Driver
   require Logger
 
-  alias EtherCAT.{Master, Slave.Driver}
+  alias EtherCAT.Slave.Driver
 
   defstruct [
     :master,
@@ -36,7 +33,7 @@ defmodule EtherCAT.Drivers.Generic do
   ]
 
   # ============================================================================
-  # Client API (Driver Behaviour)
+  # Client API
   # ============================================================================
 
   @doc """
@@ -60,34 +57,6 @@ defmodule EtherCAT.Drivers.Generic do
   """
   def get_pdo_config(pid) do
     GenServer.call(pid, :get_pdo_config)
-  end
-
-  @doc """
-  Read a PDO entry value.
-  """
-  def read(pid, pdo_name, entry_name) do
-    GenServer.call(pid, {:read, pdo_name, entry_name})
-  end
-
-  @doc """
-  Write a PDO entry value.
-  """
-  def write(pid, pdo_name, entry_name, value) do
-    GenServer.call(pid, {:write, pdo_name, entry_name, value})
-  end
-
-  @doc """
-  Subscribe to value changes.
-  """
-  def subscribe(pid, pdo_name, entry_name, subscriber) do
-    GenServer.call(pid, {:subscribe, pdo_name, entry_name, subscriber})
-  end
-
-  @doc """
-  Unsubscribe from value changes.
-  """
-  def unsubscribe(pid, pdo_name, entry_name, subscriber) do
-    GenServer.call(pid, {:unsubscribe, pdo_name, entry_name, subscriber})
   end
 
   # ============================================================================
@@ -134,12 +103,20 @@ defmodule EtherCAT.Drivers.Generic do
     {:reply, convert_pdo_config(state), state}
   end
 
+  # Override default handle_call to add type lookup for Generic driver
   def handle_call({:read, pdo_name, entry_name}, _from, state) do
     unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
     type = get_entry_type(state, pdo_name, entry_name)
 
-    # Use injected helper function
-    result = read_from_master(state.master, :default_domain, unique_name, type)
+    result =
+      case EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name) do
+        {:ok, binary} ->
+          decode_by_type(type, binary)
+
+        error ->
+          error
+      end
+
     {:reply, result, state}
   end
 
@@ -147,24 +124,27 @@ defmodule EtherCAT.Drivers.Generic do
     unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
     type = get_entry_type(state, pdo_name, entry_name)
 
-    # Use injected helper function
-    result = write_to_master(state.master, :default_domain, unique_name, type, value)
+    result =
+      case encode_by_type(type, value) do
+        {:ok, binary} ->
+          EtherCAT.Master.write_pdo_entry(state.master, :default_domain, unique_name, binary)
+
+        error ->
+          error
+      end
+
     {:reply, result, state}
   end
 
   def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
     unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    # Use injected helper function
-    result = subscribe_to_master(state.master, :default_domain, unique_name, subscriber)
+    result = EtherCAT.Master.subscribe(state.master, :default_domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
   def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
     unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    # Use injected helper function
-    result = unsubscribe_from_master(state.master, :default_domain, unique_name, subscriber)
+    result = EtherCAT.Master.unsubscribe(state.master, :default_domain, unique_name, subscriber)
     {:reply, result, state}
   end
 
@@ -172,6 +152,77 @@ defmodule EtherCAT.Drivers.Generic do
   def terminate(reason, state) do
     Logger.info("Generic driver terminating for slave #{state.position}: #{inspect(reason)}")
     :ok
+  end
+
+  # ============================================================================
+  # Type-based Encoding/Decoding
+  # ============================================================================
+
+  # Encode value based on inferred type
+  defp encode_by_type(:bool, value) when is_boolean(value) do
+    {:ok, <<if(value, do: 1, else: 0)>>}
+  end
+
+  defp encode_by_type(:uint8, value) when is_integer(value) and value >= 0 and value <= 255 do
+    {:ok, <<value::little-unsigned-8>>}
+  end
+
+  defp encode_by_type(:int8, value) when is_integer(value) and value >= -128 and value <= 127 do
+    {:ok, <<value::little-signed-8>>}
+  end
+
+  defp encode_by_type(:uint16, value) when is_integer(value) and value >= 0 and value <= 65535 do
+    {:ok, <<value::little-unsigned-16>>}
+  end
+
+  defp encode_by_type(:int16, value)
+       when is_integer(value) and value >= -32768 and value <= 32767 do
+    {:ok, <<value::little-signed-16>>}
+  end
+
+  defp encode_by_type(:uint32, value) when is_integer(value) and value >= 0 do
+    {:ok, <<value::little-unsigned-32>>}
+  end
+
+  defp encode_by_type(:int32, value) when is_integer(value) do
+    {:ok, <<value::little-signed-32>>}
+  end
+
+  defp encode_by_type(type, value) do
+    {:error, {:invalid_value_for_type, value, type}}
+  end
+
+  # Decode value based on inferred type
+  defp decode_by_type(:bool, <<value>>) do
+    {:ok, value != 0}
+  end
+
+  defp decode_by_type(:uint8, <<value::little-unsigned-8>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(:int8, <<value::little-signed-8>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(:uint16, <<value::little-unsigned-16>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(:int16, <<value::little-signed-16>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(:uint32, <<value::little-unsigned-32>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(:int32, <<value::little-signed-32>>) do
+    {:ok, value}
+  end
+
+  defp decode_by_type(type, data) do
+    {:error, {:invalid_data_for_type, byte_size(data), type}}
   end
 
   # ============================================================================

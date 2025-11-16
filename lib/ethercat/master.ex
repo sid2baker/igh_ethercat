@@ -115,21 +115,6 @@ defmodule EtherCAT.Master do
   end
 
   @doc """
-  Get the driver module for a given slave PID.
-
-  ## Parameters
-  - `master` - Master process PID or registered name
-  - `slave_pid` - Slave process PID
-
-  ## Returns
-  - `{:ok, driver_module}` - The driver module for the slave
-  - `{:error, :slave_not_found}` - Slave not found in master's slaves map
-  """
-  def get_slave_driver(master \\ __MODULE__, slave_pid) do
-    :gen_statem.call(master, {:get_slave_driver, slave_pid})
-  end
-
-  @doc """
   Create a new domain with the specified update interval.
 
   ## Parameters
@@ -423,19 +408,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, slave_pids}}]}
   end
 
-  def ready({:call, from}, {:get_slave_driver, slave_pid}, data) do
-    result =
-      data.slaves
-      |> Enum.find_value(fn {_pos, slave_info} ->
-        if slave_info.pid == slave_pid, do: {:ok, slave_info.driver}
-      end)
-
-    case result do
-      {:ok, _} = success -> {:keep_state_and_data, [{:reply, from, success}]}
-      nil -> {:keep_state_and_data, [{:reply, from, {:error, :slave_not_found}}]}
-    end
-  end
-
   def ready({:call, from}, {:create_domain, name, interval}, data) do
     case Map.has_key?(data.domains, name) do
       true ->
@@ -649,19 +621,6 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :get_slaves, data) do
     slave_pids = data.slaves |> Map.values() |> Enum.map(& &1.pid)
     {:keep_state_and_data, [{:reply, from, {:ok, slave_pids}}]}
-  end
-
-  def operational({:call, from}, {:get_slave_driver, slave_pid}, data) do
-    result =
-      data.slaves
-      |> Enum.find_value(fn {_pos, slave_info} ->
-        if slave_info.pid == slave_pid, do: {:ok, slave_info.driver}
-      end)
-
-    case result do
-      {:ok, _} = success -> {:keep_state_and_data, [{:reply, from, success}]}
-      nil -> {:keep_state_and_data, [{:reply, from, {:error, :slave_not_found}}]}
-    end
   end
 
   def operational({:call, from}, :get_hardware_diff, data) do

@@ -159,8 +159,7 @@ defmodule EtherCAT do
   """
   @spec read(pid(), atom(), atom()) :: {:ok, term()} | {:error, term()}
   def read(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
-    # Delegate to driver's read/3 callback
-    apply_driver_callback(slave_pid, :read, [slave_pid, pdo_name, entry_name])
+    GenServer.call(slave_pid, {:read, pdo_name, entry_name})
   end
 
   @doc """
@@ -183,8 +182,7 @@ defmodule EtherCAT do
   """
   @spec write(pid(), atom(), atom(), term()) :: :ok | {:error, term()}
   def write(slave_pid, pdo_name, entry_name, value) when is_pid(slave_pid) do
-    # Delegate to driver's write/4 callback
-    apply_driver_callback(slave_pid, :write, [slave_pid, pdo_name, entry_name, value])
+    GenServer.call(slave_pid, {:write, pdo_name, entry_name, value})
   end
 
   @doc """
@@ -214,8 +212,7 @@ defmodule EtherCAT do
   """
   @spec watch(pid(), atom(), atom()) :: :ok | {:error, term()}
   def watch(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
-    # Delegate to driver's subscribe/4 callback
-    apply_driver_callback(slave_pid, :subscribe, [slave_pid, pdo_name, entry_name, self()])
+    GenServer.call(slave_pid, {:subscribe, pdo_name, entry_name, self()})
   end
 
   @doc """
@@ -236,8 +233,7 @@ defmodule EtherCAT do
   """
   @spec unwatch(pid(), atom(), atom()) :: :ok | {:error, term()}
   def unwatch(slave_pid, pdo_name, entry_name) when is_pid(slave_pid) do
-    # Delegate to driver's unsubscribe/4 callback
-    apply_driver_callback(slave_pid, :unsubscribe, [slave_pid, pdo_name, entry_name, self()])
+    GenServer.call(slave_pid, {:unsubscribe, pdo_name, entry_name, self()})
   end
 
   @doc """
@@ -327,28 +323,4 @@ defmodule EtherCAT do
 
   defp get_config(%HardwareConfig{} = config), do: {:ok, config}
   defp get_config(other), do: {:error, {:invalid_config, other}}
-
-  # Look up the driver module via the slave's Master and call its function
-  defp apply_driver_callback(slave_pid, function, args) do
-    # Get the master PID from the slave process
-    case :sys.get_state(slave_pid) do
-      %{master: master_pid} ->
-        # Get driver module from Master
-        case Master.get_slave_driver(master_pid, slave_pid) do
-          {:ok, driver_module} ->
-            # Check if function is exported
-            if function_exported?(driver_module, function, length(args)) do
-              apply(driver_module, function, args)
-            else
-              {:error, {:callback_not_implemented, driver_module, function, length(args)}}
-            end
-
-          {:error, _} = error ->
-            error
-        end
-
-      _ ->
-        {:error, {:invalid_slave_process, slave_pid}}
-    end
-  end
 end

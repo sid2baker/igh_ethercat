@@ -2,86 +2,66 @@ defmodule EtherCAT.Slave.Driver do
   @moduledoc """
   Behaviour for EtherCAT slave driver processes.
 
-  Drivers are GenServer processes (or any OTP-compliant process) that:
-  1. Provide SDO and PDO configuration to the Master
-  2. Handle encoding/decoding of PDO values
-  3. Manage device-specific state and logic
-  4. Expose read/write/subscribe APIs for application use
+  Drivers implement encoding/decoding logic for PDO values. The behaviour
+  provides all GenServer boilerplate, so implementing drivers just need to:
 
-  ## Architecture
-
-  When a slave is discovered on the EtherCAT network:
-  1. Master determines which driver to use (based on vendor/product ID)
-  2. Master starts the driver process via `start_link/1`
-  3. Master fetches SDO configuration from driver
-  4. Master configures SDOs via NIF
-  5. Master fetches PDO configuration from driver
-  6. Master configures and registers PDOs via NIF
-  7. Application code reads/writes through driver process
+  1. Define encode_pdo_value/3 and decode_pdo_value/3 callbacks
+  2. Optionally override default implementations for custom logic
+  3. Implement init/1 to set up driver state
 
   ## Example Implementation
 
       defmodule MyDevice.Driver do
         use EtherCAT.Slave.Driver
-        use GenServer  # or gen_statem, or any process
 
-        # Client API (required by behaviour)
-        def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
-        def get_sdo_config(pid), do: GenServer.call(pid, :get_sdo_config)
-        def get_pdo_config(pid), do: GenServer.call(pid, :get_pdo_config)
-        def read(pid, pdo, entry), do: GenServer.call(pid, {:read, pdo, entry})
-        def write(pid, pdo, entry, val), do: GenServer.call(pid, {:write, pdo, entry, val})
-        def subscribe(pid, pdo, entry, sub), do: GenServer.call(pid, {:subscribe, pdo, entry, sub})
-        def unsubscribe(pid, pdo, entry, sub), do: GenServer.call(pid, {:unsubscribe, pdo, entry, sub})
+        defstruct [:master, :position, :name, :config]
 
-        # GenServer callbacks
+        def start_link(opts) do
+          GenServer.start_link(__MODULE__, opts)
+        end
+
+        @impl true
         def init(opts) do
-          state = %{
+          state = %__MODULE__{
             master: Keyword.fetch!(opts, :master),
             position: Keyword.fetch!(opts, :position),
+            name: Keyword.fetch!(opts, :name),
             config: Keyword.get(opts, :config, %{})
           }
           {:ok, state}
         end
 
-        def handle_call(:get_sdo_config, _from, state) do
-          sdos = [
-            # {index, subindex, data}
-            {0x8000, 0x01, <<1::8>>}  # example
-          ]
-          {:reply, sdos, state}
+        # Override encode/decode for custom behavior
+        @impl true
+        def encode_pdo_value(:temp, :value, celsius) do
+          # Custom encoding: convert Celsius to raw ADC value
+          raw = round(celsius * 10)
+          <<raw::little-signed-16>>
         end
 
-        def handle_call(:get_pdo_config, _from, state) do
-          pdos = [
-            %{
-              name: :inputs,
-              sync_manager: {3, :input, :default},
-              pdo_index: 0x1A00,
-              entries: %{
-                value: {:int16, 0x6000, 0x11, 16}
-              }
-            }
-          ]
-          {:reply, pdos, state}
+        def encode_pdo_value(pdo, entry, value) do
+          # Fall back to default for other PDOs
+          default_encode_pdo_value(pdo, entry, value)
         end
 
-        def handle_call({:read, pdo_name, entry_name}, _from, state) do
-          # Get raw binary from Master
-          case Master.read_slave_pdo(state.master, state.position, pdo_name, entry_name) do
-            {:ok, binary} ->
-              # Decode using driver-specific logic
-              value = decode(pdo_name, entry_name, binary, state)
-              {:reply, {:ok, value}, state}
-            error ->
-              {:reply, error, state}
-          end
+        @impl true
+        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>) do
+          # Custom decoding: convert raw ADC to Celsius
+          raw / 10.0
+        end
+
+        def decode_pdo_value(pdo, entry, binary) do
+          # Fall back to default for other PDOs
+          default_decode_pdo_value(pdo, entry, binary)
         end
       end
-  """
 
-  @typedoc "Driver-specific state (implementer-defined)"
-  @type state :: term()
+  ## Usage
+
+      {:ok, pid} = MyDevice.Driver.start_link(master: master_pid, position: 0, name: :temp_sensor)
+      {:ok, temp} = MyDevice.Driver.read(pid, :temp, :value)  # => 25.6
+      :ok = MyDevice.Driver.write(pid, :temp, :setpoint, 30.0)
+  """
 
   @typedoc "PDO name (typically an atom like :ch1 or :inputs)"
   @type pdo_name :: atom() | String.t()
@@ -89,424 +69,230 @@ defmodule EtherCAT.Slave.Driver do
   @typedoc "Entry name within a PDO (typically an atom like :value or :error)"
   @type entry_name :: atom() | String.t()
 
-  @typedoc """
-  SDO configuration tuple: {index, subindex, data}
-
-  The driver returns a list of these to configure the device before activation.
-  """
-  @type sdo_config :: {
-          index :: 0x0000..0xFFFF,
-          subindex :: 0x00..0xFF,
-          data :: binary()
-        }
-
-  @typedoc """
-  PDO entry configuration: {type, entry_index, entry_subindex, bit_length}
-
-  - type: Data type (:bool, :uint8, :int16, etc.) for default encoding/decoding
-  - entry_index: Object dictionary index (e.g., 0x6000)
-  - entry_subindex: Object dictionary subindex (e.g., 0x01)
-  - bit_length: Size in bits (1, 8, 16, 32, etc.)
-  """
-  @type pdo_entry_config :: {
-          type :: atom(),
-          entry_index :: non_neg_integer(),
-          entry_subindex :: non_neg_integer(),
-          bit_length :: pos_integer()
-        }
-
-  @typedoc """
-  Sync manager configuration: {sync_index, direction, watchdog_mode}
-  """
-  @type sync_manager_config :: {
-          sync_index :: non_neg_integer(),
-          direction :: :invalid | :output | :input | :count,
-          watchdog_mode :: :default | :enabled | :disabled
-        }
-
-  @typedoc """
-  Complete PDO configuration.
-
-  Each PDO groups related entries together (e.g., all channel 1 data).
-  """
-  @type pdo_config :: %{
-          name: pdo_name(),
-          sync_manager: sync_manager_config(),
-          pdo_index: non_neg_integer(),
-          entries: %{entry_name() => pdo_entry_config()},
-          # Optional: Domain name for this PDO (default :default_domain)
-          domain: atom(),
-          # Optional: Whether this device supports dynamic PDO mapping (default true)
-          supports_pdo_config?: boolean()
-        }
-
   @doc """
-  Start the driver process.
-
-  ## Options
-  - `:master` - Master process PID
-  - `:position` - Slave position on bus (0-based)
-  - `:slave_config` - NIF slave configuration reference
-  - `:vendor_id` - Vendor identification
-  - `:product_code` - Product code
-  - `:revision` - Revision number
-  - `:serial` - Serial number
-  - `:sync_count` - Number of sync managers
-  - `:config` - User configuration map (optional)
-
-  ## Returns
-  Standard GenServer.on_start() result
-  """
-  @callback start_link(opts :: keyword()) :: GenServer.on_start()
-
-  @doc """
-  Get SDO configuration list.
-
-  Returns a list of SDO values to write during slave configuration,
-  before the master is activated.
-
-  ## Returns
-  List of `{index, subindex, data}` tuples
-  """
-  @callback get_sdo_config(pid()) :: [sdo_config()]
-
-  @doc """
-  Get PDO configuration list.
-
-  Returns the complete PDO configuration for this device, including
-  sync managers, PDO assignments, and entry mappings.
-
-  ## Returns
-  List of PDO configuration maps
-  """
-  @callback get_pdo_config(pid()) :: [pdo_config()]
-
-  @doc """
-  Read a PDO entry value.
-
-  The driver fetches raw binary data from the Master/NIF and decodes it
-  using device-specific logic.
+  Encode a PDO value to binary.
 
   ## Parameters
-  - `pid` - Driver process PID
   - `pdo_name` - PDO identifier (e.g., `:ch1`)
   - `entry_name` - Entry identifier (e.g., `:value`)
+  - `value` - Value to encode
 
   ## Returns
-  - `{:ok, decoded_value}` on success
-  - `{:error, reason}` on failure
+  Binary data ready to write to hardware
   """
-  @callback read(pid(), pdo_name(), entry_name()) :: {:ok, term()} | {:error, term()}
+  @callback encode_pdo_value(pdo_name(), entry_name(), value :: term()) :: binary()
 
   @doc """
-  Write a PDO entry value.
-
-  The driver encodes the value to binary using device-specific logic,
-  then sends it to the Master/NIF for writing to the hardware.
+  Decode a PDO value from binary.
 
   ## Parameters
-  - `pid` - Driver process PID
   - `pdo_name` - PDO identifier (e.g., `:ch1`)
   - `entry_name` - Entry identifier (e.g., `:value`)
-  - `value` - Value to write (will be encoded by driver)
+  - `binary` - Raw binary data from hardware
 
   ## Returns
-  - `:ok` on success
-  - `{:error, reason}` on failure
+  Decoded value
   """
-  @callback write(pid(), pdo_name(), entry_name(), value :: term()) :: :ok | {:error, term()}
-
-  @doc """
-  Subscribe to value change notifications for a PDO entry.
-
-  The subscriber will receive `{:pdo_value_changed, pdo_name, entry_name, value}`
-  messages when the entry value changes during cyclic operation.
-
-  ## Parameters
-  - `pid` - Driver process PID
-  - `pdo_name` - PDO identifier (e.g., `:ch1`)
-  - `entry_name` - Entry identifier (e.g., `:value`)
-  - `subscriber` - PID to receive notifications
-
-  ## Returns
-  - `:ok` on success
-  - `{:error, reason}` on failure
-  """
-  @callback subscribe(pid(), pdo_name(), entry_name(), subscriber :: pid()) ::
-              :ok | {:error, term()}
-
-  @doc """
-  Unsubscribe from value change notifications.
-
-  ## Parameters
-  - `pid` - Driver process PID
-  - `pdo_name` - PDO identifier (e.g., `:ch1`)
-  - `entry_name` - Entry identifier (e.g., `:value`)
-  - `subscriber` - PID to unsubscribe
-
-  ## Returns
-  - `:ok` on success
-  - `{:error, reason}` on failure
-  """
-  @callback unsubscribe(pid(), pdo_name(), entry_name(), subscriber :: pid()) ::
-              :ok | {:error, term()}
+  @callback decode_pdo_value(pdo_name(), entry_name(), binary()) :: term()
 
   # ========================================================================
-  # __using__ macro - Inject helper functions
+  # __using__ macro - Inject GenServer implementation
   # ========================================================================
 
   @doc false
   defmacro __using__(_opts) do
     quote do
-      import EtherCAT.Slave.Driver, only: [encode_pdo_value: 2, decode_pdo_value: 2]
+      use GenServer
+      @behaviour EtherCAT.Slave.Driver
+
+      # ======================================================================
+      # Client API - Call the driver process
+      # ======================================================================
 
       @doc """
-      Helper to read a PDO entry from the Master.
-
-      Call this from your driver's read/3 implementation.
+      Read a PDO entry value.
 
       ## Parameters
-      - `master` - Master PID
-      - `domain` - Domain name (atom)
-      - `unique_name` - Unique entry name string
-      - `type` - PDO entry type (for decoding)
+      - `pid` - Driver process PID
+      - `pdo_name` - PDO identifier (e.g., `:ch1`)
+      - `entry_name` - Entry identifier (e.g., `:value`)
 
       ## Returns
       - `{:ok, decoded_value}` on success
       - `{:error, reason}` on failure
-
-      ## Example
-
-          def handle_call({:read, pdo_name, entry_name}, _from, state) do
-            unique_name = build_unique_name(state.position, pdo_name, entry_name)
-            type = get_entry_type(pdo_name, entry_name)
-
-            result = read_from_master(state.master, :default_domain, unique_name, type)
-            {:reply, result, state}
-          end
       """
-      def read_from_master(master, domain, unique_name, type) do
-        with {:ok, binary} <- EtherCAT.Master.read_pdo_entry(master, domain, unique_name),
-             {:ok, value} <- EtherCAT.Slave.Driver.decode_pdo_value(type, binary) do
-          {:ok, value}
-        end
+      def read(pid, pdo_name, entry_name) when is_pid(pid) do
+        GenServer.call(pid, {:read, pdo_name, entry_name})
       end
 
       @doc """
-      Helper to write a PDO entry to the Master.
-
-      Call this from your driver's write/4 implementation.
+      Write a PDO entry value.
 
       ## Parameters
-      - `master` - Master PID
-      - `domain` - Domain name (atom)
-      - `unique_name` - Unique entry name string
-      - `type` - PDO entry type (for encoding)
-      - `value` - Value to write
+      - `pid` - Driver process PID
+      - `pdo_name` - PDO identifier (e.g., `:ch1`)
+      - `entry_name` - Entry identifier (e.g., `:value`)
+      - `value` - Value to write (will be encoded by driver)
 
       ## Returns
       - `:ok` on success
       - `{:error, reason}` on failure
-
-      ## Example
-
-          def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-            unique_name = build_unique_name(state.position, pdo_name, entry_name)
-            type = get_entry_type(pdo_name, entry_name)
-
-            result = write_to_master(state.master, :default_domain, unique_name, type, value)
-            {:reply, result, state}
-          end
       """
-      def write_to_master(master, domain, unique_name, type, value) do
-        with {:ok, binary} <- EtherCAT.Slave.Driver.encode_pdo_value(type, value) do
-          EtherCAT.Master.write_pdo_entry(master, domain, unique_name, binary)
-        end
+      def write(pid, pdo_name, entry_name, value) when is_pid(pid) do
+        GenServer.call(pid, {:write, pdo_name, entry_name, value})
       end
 
       @doc """
-      Helper to subscribe to PDO entry changes via the Master.
+      Subscribe to value change notifications for a PDO entry.
 
-      Call this from your driver's subscribe/4 implementation.
+      The subscriber will receive `{:pdo_value_changed, unique_name, value}`
+      messages when the entry value changes.
 
       ## Parameters
-      - `master` - Master PID
-      - `domain` - Domain name (atom)
-      - `unique_name` - Unique entry name string
+      - `pid` - Driver process PID
+      - `pdo_name` - PDO identifier (e.g., `:ch1`)
+      - `entry_name` - Entry identifier (e.g., `:value`)
       - `subscriber` - PID to receive notifications
 
       ## Returns
       - `:ok` on success
       - `{:error, reason}` on failure
       """
-      def subscribe_to_master(master, domain, unique_name, subscriber) do
-        EtherCAT.Master.subscribe(master, domain, unique_name, subscriber)
+      def subscribe(pid, pdo_name, entry_name, subscriber) when is_pid(pid) do
+        GenServer.call(pid, {:subscribe, pdo_name, entry_name, subscriber})
       end
 
       @doc """
-      Helper to unsubscribe from PDO entry changes via the Master.
-
-      Call this from your driver's unsubscribe/4 implementation.
+      Unsubscribe from value change notifications.
 
       ## Parameters
-      - `master` - Master PID
-      - `domain` - Domain name (atom)
-      - `unique_name` - Unique entry name string
+      - `pid` - Driver process PID
+      - `pdo_name` - PDO identifier (e.g., `:ch1`)
+      - `entry_name` - Entry identifier (e.g., `:value`)
       - `subscriber` - PID to unsubscribe
 
       ## Returns
       - `:ok` on success
       - `{:error, reason}` on failure
       """
-      def unsubscribe_from_master(master, domain, unique_name, subscriber) do
-        EtherCAT.Master.unsubscribe(master, domain, unique_name, subscriber)
+      def unsubscribe(pid, pdo_name, entry_name, subscriber) when is_pid(pid) do
+        GenServer.call(pid, {:unsubscribe, pdo_name, entry_name, subscriber})
+      end
+
+      # ======================================================================
+      # GenServer Callbacks - Handle read/write/subscribe operations
+      # ======================================================================
+
+      @doc false
+      def handle_call({:read, pdo_name, entry_name}, _from, state) do
+        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+
+        result =
+          case EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name) do
+            {:ok, binary_data} ->
+              value = decode_pdo_value(pdo_name, entry_name, binary_data)
+              {:ok, value}
+
+            error ->
+              error
+          end
+
+        {:reply, result, state}
+      end
+
+      def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
+        binary_data = encode_pdo_value(pdo_name, entry_name, value)
+        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+        result = EtherCAT.Master.write_pdo_entry(state.master, :default_domain, unique_name, binary_data)
+        {:reply, result, state}
+      end
+
+      def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
+        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+        result = EtherCAT.Master.subscribe(state.master, :default_domain, unique_name, subscriber)
+        {:reply, result, state}
+      end
+
+      def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
+        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
+        result = EtherCAT.Master.unsubscribe(state.master, :default_domain, unique_name, subscriber)
+        {:reply, result, state}
+      end
+
+      # ======================================================================
+      # Default Encode/Decode Implementations
+      # ======================================================================
+
+      @doc """
+      Default PDO value encoding.
+
+      Handles common types:
+      - Booleans: `true` → `<<1>>`, `false` → `<<0>>`
+      - Signed 16-bit integers: `value` → `<<value::little-signed-16>>`
+      - Unsigned 16-bit integers: `value` → `<<value::little-unsigned-16>>`
+      - Binary passthrough
+
+      Override `encode_pdo_value/3` for custom encoding logic.
+      """
+      def default_encode_pdo_value(_pdo, _entry, value) when is_binary(value), do: value
+      def default_encode_pdo_value(_pdo, _entry, true), do: <<1>>
+      def default_encode_pdo_value(_pdo, _entry, false), do: <<0>>
+
+      def default_encode_pdo_value(_pdo, _entry, value)
+          when is_integer(value) and value >= -32768 and value <= 32767 do
+        <<value::little-signed-16>>
+      end
+
+      def default_encode_pdo_value(_pdo, _entry, value)
+          when is_integer(value) and value >= 0 and value <= 65535 do
+        <<value::little-unsigned-16>>
       end
 
       @doc """
-      Helper to build a unique entry name for Master lookups.
+      Default PDO value decoding.
 
-      ## Parameters
-      - `position` - Slave position (integer)
-      - `pdo_name` - PDO name (atom or string)
-      - `entry_name` - Entry name (atom or string)
+      Handles common types:
+      - 16-bit signed integers
+      - 16-bit unsigned integers
+      - Booleans: `<<1>>` → `true`, `<<0>>` → `false`
+      - Binary passthrough
 
-      ## Returns
-      - Unique name string like "slave_0:ch1:value"
-
-      ## Example
-
-          unique_name = build_unique_name(0, :ch1, :value)
-          # => "slave_0:ch1:value"
+      Override `decode_pdo_value/3` for custom decoding logic.
       """
-      def build_unique_name(position, pdo_name, entry_name) do
-        "slave_#{position}:#{pdo_name}:#{entry_name}"
+      def default_decode_pdo_value(_pdo, _entry, <<value::little-signed-16>>), do: value
+      def default_decode_pdo_value(_pdo, _entry, <<value::little-unsigned-16>>), do: value
+      def default_decode_pdo_value(_pdo, _entry, <<1>>), do: true
+      def default_decode_pdo_value(_pdo, _entry, <<0>>), do: false
+      def default_decode_pdo_value(_pdo, _entry, binary), do: binary
+
+      # ======================================================================
+      # Default Callback Implementations
+      # ======================================================================
+
+      @doc """
+      Default encode_pdo_value implementation.
+
+      Delegates to default_encode_pdo_value/3. Override this function
+      to provide custom encoding logic, and call default_encode_pdo_value/3
+      for fallback behavior.
+      """
+      def encode_pdo_value(pdo, entry, value) do
+        default_encode_pdo_value(pdo, entry, value)
       end
 
       @doc """
-      Default encode - delegates to Driver.encode_pdo_value/2.
+      Default decode_pdo_value implementation.
 
-      Use this in your driver when you don't need custom encoding.
+      Delegates to default_decode_pdo_value/3. Override this function
+      to provide custom decoding logic, and call default_decode_pdo_value/3
+      for fallback behavior.
       """
-      def default_encode(type, value) do
-        EtherCAT.Slave.Driver.encode_pdo_value(type, value)
+      def decode_pdo_value(pdo, entry, binary) do
+        default_decode_pdo_value(pdo, entry, binary)
       end
 
-      @doc """
-      Default decode - delegates to Driver.decode_pdo_value/2.
-
-      Use this in your driver when you don't need custom decoding.
-      """
-      def default_decode(type, binary) do
-        EtherCAT.Slave.Driver.decode_pdo_value(type, binary)
-      end
+      # Allow drivers to override these
+      defoverridable encode_pdo_value: 3, decode_pdo_value: 3, handle_call: 3
     end
   end
-
-  # ========================================================================
-  # Default Encoding/Decoding Helpers
-  # ========================================================================
-
-  @doc """
-  Default encoding for standard PDO entry types.
-
-  Used by drivers when they don't need custom encoding logic.
-  """
-  @spec encode_pdo_value(atom(), term()) :: {:ok, binary()} | {:error, term()}
-  def encode_pdo_value(:bool, value) when is_boolean(value) do
-    {:ok, <<if(value, do: 1, else: 0)>>}
-  end
-
-  def encode_pdo_value(:uint8, value) when is_integer(value) and value >= 0 and value <= 255 do
-    {:ok, <<value::little-unsigned-8>>}
-  end
-
-  def encode_pdo_value(:int8, value) when is_integer(value) and value >= -128 and value <= 127 do
-    {:ok, <<value::little-signed-8>>}
-  end
-
-  def encode_pdo_value(:uint16, value) when is_integer(value) and value >= 0 and value <= 65535 do
-    {:ok, <<value::little-unsigned-16>>}
-  end
-
-  def encode_pdo_value(:int16, value)
-      when is_integer(value) and value >= -32768 and value <= 32767 do
-    {:ok, <<value::little-signed-16>>}
-  end
-
-  def encode_pdo_value(:uint32, value) when is_integer(value) and value >= 0 do
-    {:ok, <<value::little-unsigned-32>>}
-  end
-
-  def encode_pdo_value(:int32, value) when is_integer(value) do
-    {:ok, <<value::little-signed-32>>}
-  end
-
-  def encode_pdo_value(:uint64, value) when is_integer(value) and value >= 0 do
-    {:ok, <<value::little-unsigned-64>>}
-  end
-
-  def encode_pdo_value(:int64, value) when is_integer(value) do
-    {:ok, <<value::little-signed-64>>}
-  end
-
-  def encode_pdo_value(type, value) do
-    {:error, {:invalid_value_for_type, value, type}}
-  end
-
-  @doc """
-  Default decoding for standard PDO entry types.
-
-  Used by drivers when they don't need custom decoding logic.
-  """
-  @spec decode_pdo_value(atom(), binary()) :: {:ok, term()} | {:error, term()}
-  def decode_pdo_value(:bool, <<value>>) do
-    {:ok, value != 0}
-  end
-
-  def decode_pdo_value(:uint8, <<value::little-unsigned-8>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:int8, <<value::little-signed-8>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:uint16, <<value::little-unsigned-16>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:int16, <<value::little-signed-16>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:uint32, <<value::little-unsigned-32>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:int32, <<value::little-signed-32>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:uint64, <<value::little-unsigned-64>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(:int64, <<value::little-signed-64>>) do
-    {:ok, value}
-  end
-
-  def decode_pdo_value(type, data) do
-    {:error, {:invalid_data_for_type, byte_size(data), type}}
-  end
-
-  @doc """
-  Infer type from bit length for entries without explicit type annotation.
-  """
-  @spec infer_type_from_bit_length(pos_integer()) :: atom()
-  def infer_type_from_bit_length(1), do: :bool
-  def infer_type_from_bit_length(size) when size >= 2 and size < 8, do: :uint8
-  def infer_type_from_bit_length(8), do: :uint8
-  def infer_type_from_bit_length(16), do: :uint16
-  def infer_type_from_bit_length(32), do: :uint32
-  def infer_type_from_bit_length(64), do: :uint64
 end
