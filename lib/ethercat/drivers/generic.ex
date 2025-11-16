@@ -239,7 +239,10 @@ defmodule EtherCAT.Drivers.Generic do
             {safe_to_atom(entry_name), {type, index, subindex, bit_length}}
           end),
         domain: :default_domain,
-        supports_pdo_config?: true
+        # Generic driver uses fixed EEPROM PDO mappings - do not allow dynamic reconfiguration
+        # This prevents Master from calling slave_config_pdo_mapping_clear/add which would
+        # corrupt the fixed mappings of Beckhoff terminals (EL1809, EL2809, etc.)
+        supports_pdo_config?: false
       }
     end)
   end
