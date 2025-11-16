@@ -213,7 +213,8 @@ defmodule EtherCAT.Nif do
       bit_offset: usize,
       bit_length: usize,
       direction: PdoDirection,
-      current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Raw bytes storing the current value
+      current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Desired value (for outputs) or last read value (for inputs)
+      last_written_value: [MAX_PDO_ENTRY_BYTES]u8,  // Last value written to domain (outputs only)
   };
 
   /// Domain layout - collection of PDO entry descriptors
@@ -265,6 +266,7 @@ defmodule EtherCAT.Nif do
               .bit_length = bit_length,
               .direction = direction,
               .current_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
+              .last_written_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
           });
       }
 

@@ -114,6 +114,15 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :get_slaves)
   end
 
+  @doc """
+  Create a new domain with the specified update interval.
+
+  ## Parameters
+  - `name` - Unique domain identifier (atom)
+  - `interval_us` - Update interval in **microseconds**
+
+  Note: If using DomainConfig, intervals are in milliseconds and automatically converted.
+  """
   def create_domain(master \\ __MODULE__, name, interval_us) do
     :gen_statem.call(master, {:create_domain, name, interval_us})
   end
@@ -1047,9 +1056,12 @@ defmodule EtherCAT.Master do
   defp create_domains_from_config(data, config) do
     result =
       Enum.reduce_while(config.domains, {:ok, data}, fn domain_config, {:ok, acc_data} ->
-        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, domain_config.interval) do
+        # Convert milliseconds to microseconds (DomainConfig uses ms, NIF expects µs)
+        interval_us = domain_config.interval * 1000
+
+        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, interval_us) do
           {:ok, domain_ref} ->
-            domain_info = %{ref: domain_ref, interval: domain_config.interval}
+            domain_info = %{ref: domain_ref, interval: interval_us}
             new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)
             {:cont, {:ok, %{acc_data | domains: new_domains}}}
 
