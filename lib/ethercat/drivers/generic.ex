@@ -281,7 +281,7 @@ defmodule EtherCAT.Drivers.Generic do
         case get_pdo(state, sync_index, pdo_pos) do
           {:ok, pdo} ->
             entries = discover_pdo_entries(state, sync_index, pdo_pos, pdo.n_entries)
-            pdo_name = "0x#{Integer.to_string(pdo.index, 16)}"
+            pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
 
             direction = normalize_direction(sync_manager.dir)
             watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
@@ -312,8 +312,8 @@ defmodule EtherCAT.Drivers.Generic do
       for entry_pos <- 0..(n_entries - 1) do
         case get_pdo_entry(state, sync_index, pdo_pos, entry_pos) do
           {:ok, entry} ->
-            entry_name =
-              "0x#{Integer.to_string(entry.index, 16)}:#{Integer.to_string(entry.subindex, 16)}"
+            index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
+            entry_name = "0x#{index_hex}:#{entry.subindex}"
 
             {entry_name, {entry.index, entry.subindex, entry.bit_length}}
 
