@@ -1003,24 +1003,32 @@ defmodule EtherCAT.Master do
 
     case configured_positions -- detected_positions do
       [] ->
-        # Stop old generic slave drivers from scanning phase
-        Enum.each(data.slaves, fn {_position, slave_info} ->
-          if Process.alive?(slave_info.pid) do
-            GenServer.stop(slave_info.pid, :normal)
-          end
-        end)
-
-        # Start drivers with config-specified names and modules
+        # Reuse or replace slave drivers
         result =
           Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
                                                                {:ok, acc_slaves} ->
-            case start_configured_slave_driver(data, position, slave_config) do
-              {:ok, slave_info} ->
-                new_slaves = Map.put(acc_slaves, position, slave_info)
-                {:cont, {:ok, new_slaves}}
+            existing_slave = data.slaves[position]
+            requested_driver = slave_config.driver || EtherCAT.Drivers.Generic
 
-              {:error, reason} ->
-                {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+            # If both use Generic driver, reuse existing process to avoid PDO re-discovery deadlock
+            if existing_slave.driver == EtherCAT.Drivers.Generic and
+                 requested_driver == EtherCAT.Drivers.Generic do
+              # Reuse existing driver, just update the name
+              updated_slave = %{existing_slave | name: slave_config.name}
+              {:cont, {:ok, Map.put(acc_slaves, position, updated_slave)}}
+            else
+              # Need to replace driver - stop old one and start new one
+              if Process.alive?(existing_slave.pid) do
+                GenServer.stop(existing_slave.pid, :normal)
+              end
+
+              case start_configured_slave_driver(data, position, slave_config) do
+                {:ok, slave_info} ->
+                  {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
+
+                {:error, reason} ->
+                  {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+              end
             end
           end)
 
