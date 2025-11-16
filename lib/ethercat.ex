@@ -1,20 +1,31 @@
 defmodule EtherCAT do
   @moduledoc """
-  EtherCAT application and main API.
+  EtherCAT library and main API.
+
+  ## Installation
+
+  Add EtherCAT to your application's supervision tree:
+
+      children = [
+        {EtherCAT, master_index: 0}
+      ]
+
+  Or use Master directly:
+
+      children = [
+        {EtherCAT.Master, master_index: 0, name: MyMaster}
+      ]
 
   ## Two-Phase Initialization
 
   ### Phase 1: Start Infrastructure
 
-  The EtherCAT application automatically starts the Master in your supervision tree.
-  Alternatively, start manually:
-
-      {:ok, _pid} = EtherCAT.start_link(master_index: 0)
+  Add to your supervision tree as shown above.
 
   ### Phase 2: Configure Hardware
 
       # Configure and get slave PIDs
-      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      {:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
       # slaves = %{temp_sensor: #PID<0.123.0>, valve1: #PID<0.124.0>, ...}
 
   ## Usage
@@ -60,7 +71,7 @@ defmodule EtherCAT do
 
   Then configure and use the system:
 
-      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      {:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
       {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
       :ok = EtherCAT.write(slaves.valve1, :ch1, :value, true)
 
@@ -73,35 +84,29 @@ defmodule EtherCAT do
   - **Two-phase init**: Infrastructure managed separately from configuration
   """
 
-  use Supervisor
-
   alias EtherCAT.Master
   alias EtherCAT.Config.HardwareConfig
 
   ## Supervision API
 
   @doc """
-  Starts the EtherCAT application supervisor.
+  Child spec that delegates to EtherCAT.Master.
 
-  This is typically called automatically by the application supervision tree,
-  but can be started manually for testing or embedded use.
+  This allows you to add `{EtherCAT, opts}` to your supervision tree,
+  which will start a Master process.
 
   ## Options
   - `:master_index` - EtherCAT master index (default: 0)
   - `:scan_interval` - Hardware change detection interval in µs (default: 100_000)
+
+  ## Example
+
+      children = [
+        {EtherCAT, master_index: 0}
+      ]
   """
-  def start_link(opts \\ []) do
-    Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @impl true
-  def init(opts) do
-    children = [
-      {Registry, keys: :unique, name: EtherCAT.Registry},
-      {Master, opts}
-    ]
-
-    Supervisor.init(children, strategy: :one_for_one)
+  def child_spec(opts) do
+    Master.child_spec(opts)
   end
 
   ## Configuration API
@@ -112,7 +117,7 @@ defmodule EtherCAT do
   Automatically stops any existing slaves and starts cyclic communication.
 
   ## Parameters
-  - `master_index` - Master index (integer)
+  - `master` - Master process PID or registered name
   - `config_or_module` - Configuration module or HardwareConfig struct
 
   ## Returns
@@ -121,38 +126,15 @@ defmodule EtherCAT do
 
   ## Examples
 
-      {:ok, slaves} = EtherCAT.configure_hardware(0, MyMachine)
+      {:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
       {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
   """
-  @spec configure_hardware(non_neg_integer(), module() | HardwareConfig.t()) ::
+  @spec configure_hardware(GenServer.server(), module() | HardwareConfig.t()) ::
           {:ok, %{atom() => pid()}} | {:error, term()}
-  def configure_hardware(master_index, config_or_module) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index),
-         {:ok, config} <- get_config(config_or_module),
+  def configure_hardware(master, config_or_module) do
+    with {:ok, config} <- get_config(config_or_module),
          {:ok, slave_pids} <- Master.configure_and_start_slaves(master, config) do
       {:ok, slave_pids}
-    end
-  end
-
-  @doc """
-  Find a Master process by index.
-
-  ## Parameters
-  - `master_index` - Master index (default: 0)
-
-  ## Returns
-  - `{:ok, pid}` - Master process PID
-  - `{:error, reason}` - Master not found
-
-  ## Example
-
-      {:ok, master} = EtherCAT.find_master(0)
-  """
-  @spec find_master(non_neg_integer()) :: {:ok, pid()} | {:error, term()}
-  def find_master(master_index \\ 0) do
-    case Registry.lookup(EtherCAT.Registry, {:master, master_index}) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> {:error, {:master_not_found, master_index}}
     end
   end
 
@@ -264,7 +246,7 @@ defmodule EtherCAT do
   Use this for hardware discovery mode when you don't know the slave configuration.
 
   ## Parameters
-  - `master_index` - Master index (integer)
+  - `master` - Master process PID or registered name
 
   ## Returns
   - `{:ok, config}` - Generated HardwareConfig
@@ -272,21 +254,19 @@ defmodule EtherCAT do
 
   ## Example
 
-      {:ok, config} = EtherCAT.generate_config(0)
+      {:ok, config} = EtherCAT.generate_config(master_pid)
       IO.inspect(config, pretty: true)
   """
-  @spec generate_config(non_neg_integer()) :: {:ok, HardwareConfig.t()} | {:error, term()}
-  def generate_config(master_index) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index) do
-      Master.generate_config(master)
-    end
+  @spec generate_config(GenServer.server()) :: {:ok, HardwareConfig.t()} | {:error, term()}
+  def generate_config(master) do
+    Master.generate_config(master)
   end
 
   @doc """
   Get list of detected slave PIDs from Master.
 
   ## Parameters
-  - `master_index` - Master index (integer)
+  - `master` - Master process PID or registered name
 
   ## Returns
   - `{:ok, [pid]}` - List of slave PIDs
@@ -294,13 +274,11 @@ defmodule EtherCAT do
 
   ## Example
 
-      {:ok, slaves} = EtherCAT.get_slaves(0)
+      {:ok, slaves} = EtherCAT.get_slaves(master_pid)
   """
-  @spec get_slaves(non_neg_integer()) :: {:ok, [pid()]} | {:error, term()}
-  def get_slaves(master_index) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index) do
-      Master.get_slaves(master)
-    end
+  @spec get_slaves(GenServer.server()) :: {:ok, [pid()]} | {:error, term()}
+  def get_slaves(master) do
+    Master.get_slaves(master)
   end
 
   @doc """
@@ -312,7 +290,7 @@ defmodule EtherCAT do
   3. Clears the slave map
 
   ## Parameters
-  - `master_index` - Master index (integer)
+  - `master` - Master process PID or registered name
 
   ## Returns
   - `:ok` - Cleanup successful
@@ -320,12 +298,11 @@ defmodule EtherCAT do
 
   ## Example
 
-      :ok = EtherCAT.stop_slaves(0)
+      :ok = EtherCAT.stop_slaves(master_pid)
   """
-  @spec stop_slaves(non_neg_integer()) :: :ok | {:error, term()}
-  def stop_slaves(master_index) when is_integer(master_index) do
-    with {:ok, master} <- find_master(master_index),
-         :ok <- Master.stop_cyclic(master),
+  @spec stop_slaves(GenServer.server()) :: :ok | {:error, term()}
+  def stop_slaves(master) do
+    with :ok <- Master.stop_cyclic(master),
          {:ok, slave_pids} <- Master.get_slaves(master) do
       # Stop all slave drivers
       Enum.each(slave_pids, fn pid ->
@@ -351,19 +328,27 @@ defmodule EtherCAT do
   defp get_config(%HardwareConfig{} = config), do: {:ok, config}
   defp get_config(other), do: {:error, {:invalid_config, other}}
 
-  # Look up the driver module and call its function
+  # Look up the driver module via the slave's Master and call its function
   defp apply_driver_callback(slave_pid, function, args) do
-    case Registry.lookup(EtherCAT.Registry, {:slave, slave_pid}) do
-      [{^slave_pid, %{driver: driver_module}}] ->
-        # Check if function is exported
-        if function_exported?(driver_module, function, length(args)) do
-          apply(driver_module, function, args)
-        else
-          {:error, {:callback_not_implemented, driver_module, function, length(args)}}
+    # Get the master PID from the slave process
+    case :sys.get_state(slave_pid) do
+      %{master: master_pid} ->
+        # Get driver module from Master
+        case Master.get_slave_driver(master_pid, slave_pid) do
+          {:ok, driver_module} ->
+            # Check if function is exported
+            if function_exported?(driver_module, function, length(args)) do
+              apply(driver_module, function, args)
+            else
+              {:error, {:callback_not_implemented, driver_module, function, length(args)}}
+            end
+
+          {:error, _} = error ->
+            error
         end
 
-      [] ->
-        {:error, {:slave_not_found, slave_pid}}
+      _ ->
+        {:error, {:invalid_slave_process, slave_pid}}
     end
   end
 end
