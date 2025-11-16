@@ -1,63 +1,83 @@
 defmodule EtherCAT.Slave.Driver do
   @moduledoc """
-  Smart EtherCAT slave driver with auto-discovery.
+  Default EtherCAT slave driver with auto-discovery and behaviour base for custom drivers.
 
-  By default, this driver:
+  This module serves three purposes:
+  1. **Default driver** - Used automatically when `driver: nil` in SlaveConfig
+  2. **Behaviour definition** - Defines callbacks for custom drivers
+  3. **Base implementation** - Provides default functionality via `use EtherCAT.Slave.Driver`
+
+  ## As Default Driver (driver: nil)
+
+  When no driver is specified in a SlaveConfig, this module is used directly:
   - Auto-discovers PDO mappings from slave EEPROM
   - Infers types from bit lengths (1=bool, 8=uint8, 16=uint16, etc.)
   - Provides type-based encoding/decoding
   - Handles read/write/subscribe operations
 
-  ## Usage
+  ## As Behaviour for Custom Drivers
 
-  ### Simple driver (auto-discovery, no custom code):
-
-      defmodule MyDevice do
-        use EtherCAT.Slave.Driver
-      end
-
-  ### Custom encoding/decoding:
+  ### Simple driver (override encoding only):
 
       defmodule MyTempSensor do
         use EtherCAT.Slave.Driver
 
         # Override for custom encoding
-        def encode_pdo_value(:temp, :value, celsius, _state) do
+        def encode_pdo_value(:temp, :value, celsius, state) do
           {:ok, <<round(celsius * 10)::little-signed-16>>}
         end
 
-        # Fallback to default for other PDOs
-        def encode_pdo_value(pdo, entry, value, state) do
-          super(pdo, entry, value, state)
-        end
-
         # Override for custom decoding
-        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>, _state) do
+        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>, state) do
           {:ok, raw / 10.0}
         end
 
-        def decode_pdo_value(pdo, entry, binary, state) do
-          super(pdo, entry, binary, state)
-        end
+        # All other PDOs use default type-based encoding (via super/fallback)
       end
 
-  ### Fixed PDO config (no auto-discovery):
+  ### Complex driver (full GenServer control):
 
-      defmodule MyFixedDevice do
+      defmodule MyCIA402Driver do
         use EtherCAT.Slave.Driver
 
-        # Provide fixed PDO configuration
-        def handle_call(:get_pdo_config, _from, state) do
-          config = [
-            %{
-              name: :inputs,
-              sync_manager: {3, :input, :default},
-              pdo_index: 0x1A00,
-              entries: %{value: {:int16, 0x6000, 0x01, 16}},
-              domain: :default_domain
-            }
-          ]
-          {:reply, config, state}
+        # Custom state with additional fields
+        defstruct [
+          :master, :position, :name, :pdo_map,  # Keep base fields for default encoding
+          :state_machine, :target_position      # Add custom fields
+        ]
+
+        def init(opts) do
+          # Custom initialization
+          {:ok, base_state} = super(opts)
+
+          state = %__MODULE__{
+            master: base_state.master,
+            position: base_state.position,
+            name: base_state.name,
+            pdo_map: base_state.pdo_map,
+            state_machine: :not_ready_to_switch_on,
+            target_position: 0
+          }
+
+          {:ok, state}
+        end
+
+        def handle_call({:move_to, position}, _from, state) do
+          # Custom commands for motion control
+          new_state = %{state | target_position: position}
+          {:reply, :ok, new_state}
+        end
+
+        # Can still use default encoding for most PDOs
+        def encode_pdo_value(:control_word, :value, value, state) do
+          # Custom CIA 402 control word encoding based on state machine
+          control_word = calculate_control_word(state.state_machine, value)
+          {:ok, <<control_word::little-unsigned-16>>}
+        end
+
+        def encode_pdo_value(pdo, entry, value, state) do
+          # Fallback to default for other PDOs
+          super(pdo, entry, value, state)
         end
       end
 
@@ -65,28 +85,19 @@ defmodule EtherCAT.Slave.Driver do
 
   - `init/1` - Initialize driver state
   - `get_sdo_config/1` - Return SDO configuration list
+  - `get_pdo_config/1` - Return PDO configuration (default: auto-discovered from EEPROM)
   - `encode_pdo_value/4` - Custom encoding logic
   - `decode_pdo_value/4` - Custom decoding logic
-  - `handle_call/3` - Full GenServer control
+  - `handle_call/3` - Full GenServer control for custom commands
+  - `terminate/2` - Cleanup on shutdown
   """
 
   use GenServer
   require Logger
 
-  # Default state structure for Driver when used directly
-  defstruct [
-    :master,
-    :position,
-    :name,
-    :slave_config,
-    :vendor_id,
-    :product_code,
-    :revision,
-    :serial,
-    :sync_count,
-    :config,
-    :pdo_map
-  ]
+  # ========================================================================
+  # Behaviour Definition
+  # ========================================================================
 
   @typedoc "PDO name (typically an atom like :ch1 or :inputs)"
   @type pdo_name :: atom() | String.t()
@@ -127,7 +138,25 @@ defmodule EtherCAT.Slave.Driver do
               {:ok, term()} | {:error, term()}
 
   # ========================================================================
-  # GenServer Implementation - Driver module can be used directly
+  # Default State Structure
+  # ========================================================================
+
+  defstruct [
+    :master,
+    :position,
+    :name,
+    :slave_config,
+    :vendor_id,
+    :product_code,
+    :revision,
+    :serial,
+    :sync_count,
+    :config,
+    :pdo_map
+  ]
+
+  # ========================================================================
+  # GenServer Implementation - Driver used as concrete module
   # ========================================================================
 
   @doc """
@@ -151,35 +180,7 @@ defmodule EtherCAT.Slave.Driver do
 
   @impl true
   def init(opts) do
-    position = Keyword.fetch!(opts, :position)
-    name = Keyword.fetch!(opts, :name)
-    eeprom_data = Keyword.fetch!(opts, :eeprom_data)
-
-    # Auto-discover PDO mappings from EEPROM
-    pdo_map = process_eeprom_data(eeprom_data, position)
-
-    state = %__MODULE__{
-      master: Keyword.fetch!(opts, :master),
-      position: position,
-      name: name,
-      slave_config: Keyword.fetch!(opts, :slave_config),
-      vendor_id: Keyword.fetch!(opts, :vendor_id),
-      product_code: Keyword.fetch!(opts, :product_code),
-      revision: Keyword.fetch!(opts, :revision),
-      serial: Keyword.fetch!(opts, :serial),
-      sync_count: Keyword.fetch!(opts, :sync_count),
-      config: Keyword.get(opts, :config, %{}),
-      pdo_map: pdo_map
-    }
-
-    Logger.info(
-      "Driver started for slave #{state.position} " <>
-        "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
-        "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
-        "with #{map_size(pdo_map)} PDOs"
-    )
-
-    {:ok, state}
+    build_default_state(__MODULE__, opts)
   end
 
   @impl true
@@ -194,7 +195,7 @@ defmodule EtherCAT.Slave.Driver do
     result =
       with {:ok, binary} <-
              EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name),
-           {:ok, value} <- driver_decode(pdo_name, entry_name, binary, state) do
+           {:ok, value} <- __MODULE__.decode_pdo_value(pdo_name, entry_name, binary, state) do
         {:ok, value}
       end
 
@@ -205,7 +206,7 @@ defmodule EtherCAT.Slave.Driver do
     unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
 
     result =
-      with {:ok, binary} <- driver_encode(pdo_name, entry_name, value, state),
+      with {:ok, binary} <- __MODULE__.encode_pdo_value(pdo_name, entry_name, value, state),
            :ok <-
              EtherCAT.Master.write_pdo_entry(
                state.master,
@@ -243,19 +244,26 @@ defmodule EtherCAT.Slave.Driver do
     :ok
   end
 
-  # Type-based encoding/decoding for direct Driver use
-  defp driver_encode(pdo_name, entry_name, value, state) do
-    type = get_entry_type(state.pdo_map, pdo_name, entry_name)
-    encode_by_type(type, value)
+  # ========================================================================
+  # Behaviour Implementation - Driver implements its own callbacks
+  # ========================================================================
+
+  @doc """
+  Default encode implementation using type-based encoding.
+  """
+  def encode_pdo_value(pdo_name, entry_name, value, state) do
+    default_encode(pdo_name, entry_name, value, state)
   end
 
-  defp driver_decode(pdo_name, entry_name, binary, state) do
-    type = get_entry_type(state.pdo_map, pdo_name, entry_name)
-    decode_by_type(type, binary)
+  @doc """
+  Default decode implementation using type-based decoding.
+  """
+  def decode_pdo_value(pdo_name, entry_name, binary, state) do
+    default_decode(pdo_name, entry_name, binary, state)
   end
 
   # ========================================================================
-  # __using__ macro - Complete driver implementation
+  # __using__ Macro - Creates custom drivers
   # ========================================================================
 
   @doc false
@@ -265,7 +273,8 @@ defmodule EtherCAT.Slave.Driver do
       @behaviour EtherCAT.Slave.Driver
       require Logger
 
-      # Default state structure (can be extended by drivers)
+      # Default state structure (can be redefined to add custom fields)
+      # IMPORTANT: Keep :pdo_map if you want to use default encoding fallback
       defstruct [
         :master,
         :position,
@@ -337,35 +346,7 @@ defmodule EtherCAT.Slave.Driver do
 
       @impl true
       def init(opts) do
-        position = Keyword.fetch!(opts, :position)
-        name = Keyword.fetch!(opts, :name)
-        eeprom_data = Keyword.fetch!(opts, :eeprom_data)
-
-        # Auto-discover PDO mappings from EEPROM
-        pdo_map = EtherCAT.Slave.Driver.process_eeprom_data(eeprom_data, position)
-
-        state = %__MODULE__{
-          master: Keyword.fetch!(opts, :master),
-          position: position,
-          name: name,
-          slave_config: Keyword.fetch!(opts, :slave_config),
-          vendor_id: Keyword.fetch!(opts, :vendor_id),
-          product_code: Keyword.fetch!(opts, :product_code),
-          revision: Keyword.fetch!(opts, :revision),
-          serial: Keyword.fetch!(opts, :serial),
-          sync_count: Keyword.fetch!(opts, :sync_count),
-          config: Keyword.get(opts, :config, %{}),
-          pdo_map: pdo_map
-        }
-
-        Logger.info(
-          "Driver started for slave #{state.position} " <>
-            "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
-            "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
-            "with #{map_size(pdo_map)} PDOs"
-        )
-
-        {:ok, state}
+        EtherCAT.Slave.Driver.build_default_state(__MODULE__, opts)
       end
 
       @impl true
@@ -380,7 +361,7 @@ defmodule EtherCAT.Slave.Driver do
         result =
           with {:ok, binary} <-
                  EtherCAT.Master.read_pdo_entry(state.master, :default_domain, unique_name),
-               {:ok, value} <- decode_pdo_value(pdo_name, entry_name, binary, state) do
+               {:ok, value} <- __MODULE__.decode_pdo_value(pdo_name, entry_name, binary, state) do
             {:ok, value}
           end
 
@@ -391,7 +372,7 @@ defmodule EtherCAT.Slave.Driver do
         unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
 
         result =
-          with {:ok, binary} <- encode_pdo_value(pdo_name, entry_name, value, state),
+          with {:ok, binary} <- __MODULE__.encode_pdo_value(pdo_name, entry_name, value, state),
                :ok <-
                  EtherCAT.Master.write_pdo_entry(
                    state.master,
@@ -430,23 +411,25 @@ defmodule EtherCAT.Slave.Driver do
       end
 
       # ======================================================================
-      # Type-Based Encoding/Decoding (Default Implementation)
+      # Behaviour Callbacks - Default implementation
       # ======================================================================
 
       @doc """
       Default encode implementation with type lookup from pdo_map.
+      Custom drivers can override for specific PDOs and call super for others.
       """
+      @impl true
       def encode_pdo_value(pdo_name, entry_name, value, state) do
-        type = EtherCAT.Slave.Driver.get_entry_type(state.pdo_map, pdo_name, entry_name)
-        EtherCAT.Slave.Driver.encode_by_type(type, value)
+        EtherCAT.Slave.Driver.default_encode(pdo_name, entry_name, value, state)
       end
 
       @doc """
       Default decode implementation with type lookup from pdo_map.
+      Custom drivers can override for specific PDOs and call super for others.
       """
+      @impl true
       def decode_pdo_value(pdo_name, entry_name, binary, state) do
-        type = EtherCAT.Slave.Driver.get_entry_type(state.pdo_map, pdo_name, entry_name)
-        EtherCAT.Slave.Driver.decode_by_type(type, binary)
+        EtherCAT.Slave.Driver.default_decode(pdo_name, entry_name, binary, state)
       end
 
       # Make functions overridable for custom drivers
@@ -461,8 +444,63 @@ defmodule EtherCAT.Slave.Driver do
   end
 
   # ========================================================================
-  # Public Helper Functions (called from injected code)
+  # Public Helper Functions (shared between Driver and custom drivers)
   # ========================================================================
+
+  @doc """
+  Build default state structure for a driver module.
+  Used by both the default Driver and custom drivers via `use`.
+  """
+  def build_default_state(module, opts) do
+    position = Keyword.fetch!(opts, :position)
+    name = Keyword.fetch!(opts, :name)
+    eeprom_data = Keyword.fetch!(opts, :eeprom_data)
+
+    # Auto-discover PDO mappings from EEPROM
+    pdo_map = process_eeprom_data(eeprom_data, position)
+
+    state =
+      struct!(module, [
+        master: Keyword.fetch!(opts, :master),
+        position: position,
+        name: name,
+        slave_config: Keyword.fetch!(opts, :slave_config),
+        vendor_id: Keyword.fetch!(opts, :vendor_id),
+        product_code: Keyword.fetch!(opts, :product_code),
+        revision: Keyword.fetch!(opts, :revision),
+        serial: Keyword.fetch!(opts, :serial),
+        sync_count: Keyword.fetch!(opts, :sync_count),
+        config: Keyword.get(opts, :config, %{}),
+        pdo_map: pdo_map
+      ])
+
+    Logger.info(
+      "Driver started for slave #{state.position} " <>
+        "(vendor: 0x#{Integer.to_string(state.vendor_id, 16)}, " <>
+        "product: 0x#{Integer.to_string(state.product_code, 16)}) " <>
+        "with #{map_size(pdo_map)} PDOs"
+    )
+
+    {:ok, state}
+  end
+
+  @doc """
+  Default encode implementation using type-based encoding.
+  Custom drivers can call this from their encode_pdo_value/4 for fallback behavior.
+  """
+  def default_encode(pdo_name, entry_name, value, %{pdo_map: pdo_map}) do
+    type = get_entry_type(pdo_map, pdo_name, entry_name)
+    encode_by_type(type, value)
+  end
+
+  @doc """
+  Default decode implementation using type-based decoding.
+  Custom drivers can call this from their decode_pdo_value/4 for fallback behavior.
+  """
+  def default_decode(pdo_name, entry_name, binary, %{pdo_map: pdo_map}) do
+    type = get_entry_type(pdo_map, pdo_name, entry_name)
+    decode_by_type(type, binary)
+  end
 
   @doc false
   def process_eeprom_data(eeprom_data, position) do
