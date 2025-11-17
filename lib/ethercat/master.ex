@@ -507,7 +507,15 @@ defmodule EtherCAT.Master do
 
       {:error, reason} ->
         Logger.error("Failed to check hardware: #{inspect(reason)}")
-        {:next_state, :offline, data}
+
+        # Cancel stability timer if running
+        if data.stability_timer_ref do
+          cancel_stability_timer(data.stability_timer_ref)
+        end
+
+        # Reset monitoring state and transition to :offline
+        new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
+        {:next_state, :offline, new_data}
     end
   end
 
@@ -625,8 +633,25 @@ defmodule EtherCAT.Master do
         end
 
       {:error, reason} ->
-        Logger.error("Failed to monitor hardware: #{inspect(reason)}")
-        {:next_state, :offline, data}
+        Logger.error("Failed to monitor hardware: #{inspect(reason)}, cleaning up and transitioning to :offline")
+
+        # Stop all slave drivers
+        stop_all_slave_drivers(data)
+
+        # Clear subscribers
+        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure")
+
+        # Reset state and transition to :offline
+        new_data = %{
+          data
+          | slaves: %{},
+            domains: %{},
+            subscribers: %{},
+            last_slave_count: nil,
+            stability_timer_ref: nil
+        }
+
+        {:next_state, :offline, new_data}
     end
   end
 
@@ -860,8 +885,31 @@ defmodule EtherCAT.Master do
         end
 
       {:error, reason} ->
-        Logger.error("Failed to monitor hardware in :operational: #{inspect(reason)}")
-        {:next_state, :offline, data}
+        Logger.error("Failed to monitor hardware in :operational: #{inspect(reason)}, cleaning up and transitioning to :offline")
+
+        # Kill cyclic task if running
+        if data.task_pid do
+          Process.exit(data.task_pid, :kill)
+        end
+
+        # Stop all slave drivers
+        stop_all_slave_drivers(data)
+
+        # Clear subscribers
+        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure")
+
+        # Reset state and transition to :offline
+        new_data = %{
+          data
+          | task_pid: nil,
+            slaves: %{},
+            domains: %{},
+            subscribers: %{},
+            last_slave_count: nil,
+            stability_timer_ref: nil
+        }
+
+        {:next_state, :offline, new_data}
     end
   end
 
