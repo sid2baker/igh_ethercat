@@ -5,10 +5,18 @@ defmodule EtherCAT.Master do
   ## State Machine
 
   ```
-  :offline ──connect──> :scanning ──discover──> :ready ──activate──> :operational
-                                                    ↑                      │
-                                                    └──────stop_cyclic─────┘
+  :offline ──connect──> :stale ──stable──> :synced ──activate──> :operational
+                           ↑                  ↓                        │
+                           └──hardware_change─┘                        │
+                           ↑                                            │
+                           └────────────stop_cyclic────────────────────┘
   ```
+
+  States:
+  - `:offline` - No EtherCAT link, waiting for connection
+  - `:stale` - Link up, monitoring hardware topology for stability
+  - `:synced` - Hardware stable and verified, slave drivers running
+  - `:operational` - Cyclic task active, real-time operation
 
   ## Simplified Architecture
 
@@ -65,8 +73,11 @@ defmodule EtherCAT.Master do
     :subscribers,
     :task_pid,
     :scan_interval,
+    :stability_timeout,
     :hardware_config,
-    :hardware_diff
+    :hardware_diff,
+    :last_slave_count,
+    :stability_timer_ref
   ]
 
   @type t :: %__MODULE__{
@@ -80,11 +91,18 @@ defmodule EtherCAT.Master do
           # Map of {domain_name, unique_name} => [subscriber_pids]
           subscribers: %{{atom(), String.t()} => [pid()]},
           task_pid: pid() | nil,
+          # Hardware check interval in milliseconds (for state_timeout)
           scan_interval: pos_integer(),
-          # Expected hardware configuration
+          # How long hardware must be stable before :stale -> :synced (milliseconds)
+          stability_timeout: pos_integer(),
+          # Expected hardware configuration (required for :stale -> :synced)
           hardware_config: map() | nil,
           # Diff between expected and actual
-          hardware_diff: map() | nil
+          hardware_diff: map() | nil,
+          # Last observed slave count (for change detection)
+          last_slave_count: non_neg_integer() | nil,
+          # Timer reference for stability monitoring
+          stability_timer_ref: reference() | nil
         }
 
   # ============================================================================
@@ -112,19 +130,6 @@ defmodule EtherCAT.Master do
 
   def get_slaves(master \\ __MODULE__) do
     :gen_statem.call(master, :get_slaves)
-  end
-
-  @doc """
-  Create a new domain with the specified update interval.
-
-  ## Parameters
-  - `name` - Unique domain identifier (atom)
-  - `interval_us` - Update interval in **microseconds**
-
-  Note: If using DomainConfig, intervals are in milliseconds and automatically converted.
-  """
-  def create_domain(master \\ __MODULE__, name, interval_us) do
-    :gen_statem.call(master, {:create_domain, name, interval_us})
   end
 
   def start_cyclic(master \\ __MODULE__, cycle_interval, nif_yield_interval) do
@@ -186,27 +191,142 @@ defmodule EtherCAT.Master do
   end
 
   @doc """
-  Configure hardware using HardwareConfig and start all slave drivers.
+  Set the hardware configuration and transition to :stale for verification.
 
-  This function:
-  1. Creates domains from the config
-  2. Starts slave driver processes with config-specified names and modules
-  3. Configures all slaves (SDOs, PDOs, domain registration)
-  4. Starts cyclic mode
-  5. Returns a map of slave names to PIDs
+  This function stores the hardware config and triggers the state machine to:
+  1. Transition to :stale state
+  2. Monitor hardware topology for stability
+  3. Verify hardware matches the config
+  4. Transition to :synced and start slave drivers
+  5. Domains and PDOs will be configured when transitioning to :operational
 
   ## Parameters
   - `master` - Master process (PID or module name)
   - `config` - HardwareConfig struct with master, domains, and slaves
 
   ## Returns
-  - `{:ok, %{slave_name => pid}}` - Map of slave names to driver PIDs
+  - `:ok` - Config stored, state machine will verify hardware
   - `{:error, reason}` - Configuration error
   """
-  @spec configure_and_start_slaves(pid() | atom(), EtherCAT.Config.HardwareConfig.t()) ::
+  @spec set_hardware_config(pid() | atom(), EtherCAT.Config.HardwareConfig.t()) ::
+          :ok | {:error, term()}
+  def set_hardware_config(master \\ __MODULE__, config) do
+    :gen_statem.call(master, {:set_hardware_config, config}, 30_000)
+  end
+
+  @doc """
+  Get the current state of the master state machine.
+
+  ## Returns
+  - `:offline` | `:stale` | `:synced` | `:operational`
+  """
+  def get_state(master \\ __MODULE__) do
+    :sys.get_state(master) |> elem(0)
+  end
+
+  @doc """
+  Configure hardware and start cyclic communication (high-level API).
+
+  This is a convenience function that:
+  1. Sets the hardware config
+  2. Waits for hardware to stabilize and sync (up to 10 seconds)
+  3. Configures slaves and starts cyclic mode
+  4. Returns slave PIDs
+
+  ## Timeout Expectations
+
+  - **Hardware stability**: Configurable via `stability_timeout` option (default: 1000ms = 1 second)
+  - **State transition**: Max 10 seconds to reach :synced state
+  - **Total timeout**: ~10 seconds + stability_timeout + activation time
+  - For large systems (>10 slaves), consider using the low-level API for custom timeouts
+
+  ## Configuration Options
+
+  Master accepts these init options (in microseconds, converted internally):
+  - `scan_interval`: Hardware polling interval (default: 100_000µs = 100ms)
+  - `stability_timeout`: Required stable duration (default: 1_000_000µs = 1000ms)
+
+  ## Parameters
+  - `master` - Master process (PID or module name)
+  - `config` - HardwareConfig struct
+
+  ## Returns
+  - `{:ok, %{slave_name => pid}}` - Map of slave names to driver PIDs
+  - `{:error, {:timeout_waiting_for_state, :synced}}` - Hardware didn't stabilize in time
+  - `{:error, reason}` - Configuration or verification error
+
+  ## Examples
+
+      # Quick setup (may timeout on slow hardware)
+      {:ok, slaves} = Master.configure_and_activate(master, config)
+
+      # Manual control for better timeout handling
+      :ok = Master.set_hardware_config(master, config)
+      # Monitor state with custom timeout...
+      :ok = Master.start_cyclic(master, 10_000, 100_000)
+      {:ok, slaves} = Master.get_slave_name_map(master)
+
+  For more control, use `set_hardware_config/2`, monitor state transitions,
+  and call `start_cyclic/3` manually.
+  """
+  @spec configure_and_activate(pid() | atom(), EtherCAT.Config.HardwareConfig.t()) ::
           {:ok, %{atom() => pid()}} | {:error, term()}
-  def configure_and_start_slaves(master \\ __MODULE__, config) do
-    :gen_statem.call(master, {:configure_and_start_slaves, config}, 30_000)
+  def configure_and_activate(master \\ __MODULE__, config) do
+    alias EtherCAT.Config.HardwareConfig
+
+    with :ok <- HardwareConfig.validate(config),
+         :ok <- set_hardware_config(master, config),
+         :ok <- wait_for_state(master, :synced, 10_000),
+         {:ok, _} <- configure_all_and_activate(master, config),
+         {:ok, slave_map} <- get_slave_name_map(master) do
+      {:ok, slave_map}
+    end
+  end
+
+  @doc """
+  Get a map of slave names to PIDs from the master's internal state.
+
+  ## Returns
+  - `{:ok, %{slave_name => pid}}` - Map of slave names to driver PIDs
+  - `{:error, reason}` - Error retrieving slave map
+  """
+  def get_slave_name_map(master \\ __MODULE__) do
+    :gen_statem.call(master, :get_slave_name_map)
+  end
+
+  defp wait_for_state(master, target_state, timeout) do
+    end_time = System.monotonic_time(:millisecond) + timeout
+
+    wait_loop = fn wait_fn ->
+      case get_state(master) do
+        ^target_state ->
+          :ok
+
+        _other_state ->
+          remaining = end_time - System.monotonic_time(:millisecond)
+
+          if remaining > 0 do
+            Process.sleep(min(100, remaining))
+            wait_fn.(wait_fn)
+          else
+            {:error, {:timeout_waiting_for_state, target_state}}
+          end
+      end
+    end
+
+    wait_loop.(wait_loop)
+  end
+
+  defp configure_all_and_activate(master, config) do
+    # This transitions from :synced to :operational
+    cycle_interval = config.master.cycle_interval || 10_000
+    nif_yield_interval = config.master.nif_yield_interval || 100_000
+
+    # start_cyclic will configure slaves and activate
+    case start_cyclic(master, cycle_interval, nif_yield_interval) do
+      :ok -> {:ok, :activated}
+      error -> error
+    end
   end
 
   # ============================================================================
@@ -221,7 +341,11 @@ defmodule EtherCAT.Master do
     Process.flag(:trap_exit, true)
 
     master_index = Keyword.get(opts, :master_index, 0)
-    scan_interval = Keyword.get(opts, :scan_interval, 100_000)
+    # Convert microseconds to milliseconds for timer functions
+    scan_interval_us = Keyword.get(opts, :scan_interval, 100_000)
+    stability_timeout_us = Keyword.get(opts, :stability_timeout, 1_000_000)
+    scan_interval = div(scan_interval_us, 1000)
+    stability_timeout = div(stability_timeout_us, 1000)
 
     case Nif.request_master(master_index) do
       {:ok, ref} ->
@@ -233,8 +357,11 @@ defmodule EtherCAT.Master do
           subscribers: %{},
           task_pid: nil,
           scan_interval: scan_interval,
+          stability_timeout: stability_timeout,
           hardware_config: nil,
-          hardware_diff: nil
+          hardware_diff: nil,
+          last_slave_count: nil,
+          stability_timer_ref: nil
         }
 
         Logger.info("Master #{master_index} initialized")
@@ -287,8 +414,8 @@ defmodule EtherCAT.Master do
   def offline(:internal, :connect, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} when master_state.link_up == 1 ->
-        Logger.info("Master connected, transitioning to :scanning")
-        {:next_state, :scanning, data}
+        Logger.info("Master connected, transitioning to :stale")
+        {:next_state, :stale, data}
 
       {:ok, _} ->
         Logger.warning("Master link down, retrying...")
@@ -313,145 +440,249 @@ defmodule EtherCAT.Master do
   end
 
   # ============================================================================
-  # State: :scanning
+  # State: :stale
   # ============================================================================
 
-  def scanning(:enter, _old_state, _data) do
-    Logger.info("Entered :scanning state - discovering slaves")
-    {:keep_state_and_data, [{:state_timeout, 0, :discover_slaves}]}
+  def stale(:enter, _old_state, _data) do
+    Logger.info("Entered :stale state - monitoring hardware topology")
+    {:keep_state_and_data, [{:state_timeout, 0, :check_hardware}]}
   end
 
-  def scanning(:state_timeout, :discover_slaves, data) do
+  def stale(:state_timeout, :check_hardware, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
-        slave_count = master_state.slaves_responding
-        Logger.info("Discovered #{slave_count} slaves")
+        current_slave_count = master_state.slaves_responding
 
-        # Start driver processes for each slave with error handling
-        result =
-          Enum.reduce_while(0..(slave_count - 1), {:ok, %{}}, fn position, {:ok, acc_slaves} ->
-            case start_slave_driver(data, position) do
-              {:ok, slave_info} ->
-                {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
+        cond do
+          # Hardware changed - reset stability timer
+          data.last_slave_count != nil and data.last_slave_count != current_slave_count ->
+            Logger.info(
+              "Hardware changed: #{data.last_slave_count} -> #{current_slave_count} slaves"
+            )
 
-              {:error, reason} ->
-                Logger.error("Failed to start driver for slave #{position}: #{inspect(reason)}")
-                {:halt, {:error, {:slave_driver_start_failed, position, reason}}}
+            # Cancel existing timer if any and flush message
+            if data.stability_timer_ref do
+              cancel_stability_timer(data.stability_timer_ref)
             end
-          end)
 
-        case result do
-          {:ok, slaves} ->
-            # Generate hardware diff if we have expected config
-            hardware_diff =
-              if data.hardware_config do
-                generate_hardware_diff(data.hardware_config, slaves)
-              else
-                nil
-              end
+            new_data = %{data | last_slave_count: current_slave_count, stability_timer_ref: nil}
 
-            new_data = %{data | slaves: slaves, hardware_diff: hardware_diff}
-            {:next_state, :ready, new_data}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
 
-          {:error, reason} ->
-            Logger.error("Failed to start all slave drivers: #{inspect(reason)}")
-            {:next_state, :offline, data}
+          # First check - start stability monitoring
+          data.last_slave_count == nil ->
+            Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
+
+            new_data = %{data | last_slave_count: current_slave_count}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+
+          # Hardware stable but no timer yet - start stability countdown
+          data.stability_timer_ref == nil ->
+            Logger.debug("Hardware stable, starting stability timer")
+            timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
+            new_data = %{data | stability_timer_ref: timer_ref}
+
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+
+          # Hardware still stable, timer running - keep monitoring
+          true ->
+            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
         end
 
       {:error, reason} ->
-        Logger.error("Failed to discover slaves: #{inspect(reason)}")
-        {:next_state, :offline, data}
+        Logger.error("Failed to check hardware: #{inspect(reason)}")
+
+        # Cancel stability timer if running
+        if data.stability_timer_ref do
+          cancel_stability_timer(data.stability_timer_ref)
+        end
+
+        # Reset monitoring state and transition to :offline
+        new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
+        {:next_state, :offline, new_data}
     end
   end
 
-  def scanning({:call, from}, _event, _data) do
-    {:keep_state_and_data, [{:reply, from, {:error, :scanning}}]}
+  def stale(:info, :stability_timeout, data) do
+    Logger.info("Hardware stable for #{data.stability_timeout}ms, attempting sync")
+
+    # Check if we have hardware_config
+    if data.hardware_config == nil do
+      Logger.warning("Cannot transition to :synced - no hardware_config set")
+      # Stay in :stale and keep monitoring
+      {:keep_state_and_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+    else
+      # Re-check hardware hasn't changed since timer started
+      case Nif.get_master_state(data.master_ref) do
+        {:ok, master_state} ->
+          current_slave_count = master_state.slaves_responding
+
+          if current_slave_count == data.last_slave_count do
+            # Hardware still stable, proceed with sync
+            case verify_and_sync_hardware(data) do
+              {:ok, new_data} ->
+                {:next_state, :synced, new_data}
+
+              {:error, reason} ->
+                Logger.error("Hardware verification failed: #{inspect(reason)}")
+                # Reset and keep monitoring
+                new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
+                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            end
+          else
+            # Hardware changed during timer - reset monitoring
+            Logger.warning(
+              "Hardware changed during stability wait: #{data.last_slave_count} -> #{current_slave_count}, restarting monitoring"
+            )
+
+            new_data = %{data | last_slave_count: current_slave_count, stability_timer_ref: nil}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+          end
+
+        {:error, reason} ->
+          Logger.error("Failed to re-check hardware: #{inspect(reason)}")
+          {:next_state, :offline, data}
+      end
+    end
   end
 
-  def scanning(_event_type, _event, _data) do
+  def stale({:call, from}, {:set_hardware_config, config}, data) do
+    Logger.info("Hardware config set, resetting stability monitoring")
+
+    # Cancel existing timer and flush message
+    if data.stability_timer_ref do
+      cancel_stability_timer(data.stability_timer_ref)
+    end
+
+    # Reset monitoring state with new config
+    new_data = %{
+      data
+      | hardware_config: config,
+        last_slave_count: nil,
+        stability_timer_ref: nil
+    }
+
+    {:keep_state, new_data,
+     [{:reply, from, :ok}, {:state_timeout, 0, :check_hardware}]}
+  end
+
+  def stale({:call, from}, _event, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
+  end
+
+  def stale(_event_type, _event, _data) do
     :keep_state_and_data
   end
 
   # ============================================================================
-  # State: :ready
+  # State: :synced
   # ============================================================================
 
-  def ready(:enter, _old_state, data) do
-    Logger.info("Entered :ready state - ready for configuration and activation")
+  def synced(:enter, _old_state, data) do
+    Logger.info("Entered :synced state - hardware verified, slave drivers running")
+    # Start monitoring for hardware changes
+    {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
+  end
 
-    # Auto-create default_domain if it doesn't exist
-    case Map.has_key?(data.domains, :default_domain) do
-      true ->
-        :keep_state_and_data
+  def synced(:state_timeout, :monitor_hardware, data) do
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        current_slave_count = master_state.slaves_responding
 
-      false ->
-        Logger.info("Auto-creating :default_domain with 1000µs interval")
+        if current_slave_count != data.last_slave_count do
+          Logger.warning(
+            "Hardware change detected in :synced state: #{data.last_slave_count} -> #{current_slave_count} slaves, transitioning to :stale"
+          )
 
-        case Nif.master_create_domain(data.master_ref, :default_domain, 1000) do
-          {:ok, domain_ref} ->
-            domain_info = %{ref: domain_ref, interval: 1000}
-            new_domains = Map.put(data.domains, :default_domain, domain_info)
-            {:keep_state, %{data | domains: new_domains}}
+          # Stop all slave drivers before transitioning
+          stop_all_slave_drivers(data)
 
-          {:error, reason} ->
-            Logger.warning(
-              "Failed to create default_domain: #{inspect(reason)}, continuing anyway"
-            )
+          # Clear subscribers as PDO entries will be re-registered
+          Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to hardware change")
 
-            :keep_state_and_data
+          # Reset state and transition to :stale
+          new_data = %{
+            data
+            | slaves: %{},
+              domains: %{},
+              subscribers: %{},
+              last_slave_count: nil,
+              stability_timer_ref: nil
+          }
+
+          {:next_state, :stale, new_data}
+        else
+          # Hardware still stable
+          {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
         end
+
+      {:error, reason} ->
+        Logger.error("Failed to monitor hardware: #{inspect(reason)}, cleaning up and transitioning to :offline")
+
+        # Stop all slave drivers
+        stop_all_slave_drivers(data)
+
+        # Clear subscribers
+        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure")
+
+        # Reset state and transition to :offline
+        new_data = %{
+          data
+          | slaves: %{},
+            domains: %{},
+            subscribers: %{},
+            last_slave_count: nil,
+            stability_timer_ref: nil
+        }
+
+        {:next_state, :offline, new_data}
     end
   end
 
-  def ready({:call, from}, :get_slaves, data) do
+  def synced({:call, from}, :get_slaves, data) do
     slave_pids = data.slaves |> Map.values() |> Enum.map(& &1.pid)
     {:keep_state_and_data, [{:reply, from, {:ok, slave_pids}}]}
   end
 
-  def ready({:call, from}, {:create_domain, name, interval}, data) do
-    case Map.has_key?(data.domains, name) do
-      true ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_already_exists}}]}
+  def synced({:call, from}, :get_slave_name_map, data) do
+    slave_map =
+      data.slaves
+      |> Map.values()
+      |> Enum.map(fn slave_info -> {slave_info.name, slave_info.pid} end)
+      |> Map.new()
 
-      false ->
-        case Nif.master_create_domain(data.master_ref, name, interval) do
-          {:ok, domain_ref} ->
-            domain_info = %{ref: domain_ref, interval: interval}
-            new_domains = Map.put(data.domains, name, domain_info)
-
-            {:keep_state, %{data | domains: new_domains}, [{:reply, from, {:ok, domain_ref}}]}
-
-          {:error, _} = error ->
-            {:keep_state_and_data, [{:reply, from, error}]}
-        end
-    end
+    {:keep_state_and_data, [{:reply, from, {:ok, slave_map}}]}
   end
 
-  def ready({:call, from}, {:configure_and_start_slaves, config}, data) do
-    Logger.info("Configuring hardware from HardwareConfig")
+  def synced({:call, from}, {:set_hardware_config, config}, data) do
+    Logger.info("New hardware config received, stopping drivers and transitioning to :stale")
 
-    alias EtherCAT.Config.HardwareConfig
+    # Stop all slave drivers
+    stop_all_slave_drivers(data)
 
-    with :ok <- HardwareConfig.validate(config),
-         {:ok, data_with_domains} <- create_domains_from_config(data, config),
-         {:ok, data_with_slaves} <- start_slaves_from_config(data_with_domains, config),
-         :ok <- configure_all_slaves(data_with_slaves),
-         {:ok, operational_data} <- activate_and_start_cyclic(data_with_slaves, config) do
-      # Build map of slave names to PIDs
-      slave_map =
-        operational_data.slaves
-        |> Enum.map(fn {_position, slave_info} -> {slave_info.name, slave_info.pid} end)
-        |> Map.new()
-
-      {:next_state, :operational, operational_data, [{:reply, from, {:ok, slave_map}}]}
-    else
-      {:error, _} = error ->
-        Logger.error("Failed to configure hardware: #{inspect(error)}")
-        {:keep_state_and_data, [{:reply, from, error}]}
+    # Cancel monitoring timer if any and flush message
+    if data.stability_timer_ref do
+      cancel_stability_timer(data.stability_timer_ref)
     end
+
+    # Clear subscribers as PDO entries will be re-registered with new config
+    Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to config change")
+
+    # Reset state with new config and transition to :stale
+    new_data = %{
+      data
+      | hardware_config: config,
+        slaves: %{},
+        domains: %{},
+        subscribers: %{},
+        last_slave_count: nil,
+        stability_timer_ref: nil
+    }
+
+    {:next_state, :stale, new_data, [{:reply, from, :ok}]}
   end
 
-  def ready({:call, from}, {:start_cyclic, cycle_interval, nif_yield_interval}, data) do
+  def synced({:call, from}, {:start_cyclic, cycle_interval, nif_yield_interval}, data) do
     Logger.info("Starting cyclic mode")
 
     # Configure and register all PDOs
@@ -484,32 +715,32 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def ready({:call, from}, {:get_sync_manager, position, sync_index}, data) do
+  def synced({:call, from}, {:get_sync_manager, position, sync_index}, data) do
     result = Nif.master_get_sync_manager(data.master_ref, position, sync_index)
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def ready({:call, from}, {:get_pdo, position, sync_index, pdo_pos}, data) do
+  def synced({:call, from}, {:get_pdo, position, sync_index, pdo_pos}, data) do
     result = Nif.master_get_pdo(data.master_ref, position, sync_index, pdo_pos)
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def ready({:call, from}, {:get_pdo_entry, position, sync_index, pdo_pos, entry_pos}, data) do
+  def synced({:call, from}, {:get_pdo_entry, position, sync_index, pdo_pos, entry_pos}, data) do
     result = Nif.master_get_pdo_entry(data.master_ref, position, sync_index, pdo_pos, entry_pos)
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def ready({:call, from}, :get_hardware_diff, data) do
+  def synced({:call, from}, :get_hardware_diff, data) do
     {:keep_state_and_data, [{:reply, from, {:ok, data.hardware_diff}}]}
   end
 
-  def ready({:call, from}, :generate_config, _data) do
+  def synced({:call, from}, :generate_config, _data) do
     # TODO: Implement hardware config generation from discovered slaves
     # For now, return a placeholder error
     {:keep_state_and_data, [{:reply, from, {:error, :not_implemented}}]}
   end
 
-  def ready({:call, from}, {:subscribe, domain_name, unique_name, subscriber_pid}, data) do
+  def synced({:call, from}, {:subscribe, domain_name, unique_name, subscriber_pid}, data) do
     Process.monitor(subscriber_pid)
 
     key = {domain_name, unique_name}
@@ -518,7 +749,7 @@ defmodule EtherCAT.Master do
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
   end
 
-  def ready({:call, from}, {:unsubscribe, domain_name, unique_name, subscriber_pid}, data) do
+  def synced({:call, from}, {:unsubscribe, domain_name, unique_name, subscriber_pid}, data) do
     key = {domain_name, unique_name}
 
     new_subscribers =
@@ -537,7 +768,7 @@ defmodule EtherCAT.Master do
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
   end
 
-  def ready(:info, {:DOWN, _ref, :process, pid, _reason}, data) do
+  def synced(:info, {:DOWN, _ref, :process, pid, _reason}, data) do
     # Remove dead subscriber from all subscriptions
     new_subscribers =
       Map.new(data.subscribers, fn {key, pids} ->
@@ -550,11 +781,11 @@ defmodule EtherCAT.Master do
     {:keep_state, %{data | subscribers: new_subscribers}}
   end
 
-  def ready(:info, {:EXIT, pid, reason}, data) do
+  def synced(:info, {:EXIT, pid, reason}, data) do
     handle_exit(pid, reason, data)
   end
 
-  def ready(_event_type, _event, _data) do
+  def synced(_event_type, _event, _data) do
     :keep_state_and_data
   end
 
@@ -568,7 +799,7 @@ defmodule EtherCAT.Master do
   end
 
   def operational({:call, from}, :stop_cyclic, data) do
-    Logger.info("Stopping cyclic mode")
+    Logger.info("Stopping cyclic mode, transitioning to :stale")
 
     if data.task_pid do
       Process.exit(data.task_pid, :kill)
@@ -587,8 +818,24 @@ defmodule EtherCAT.Master do
       end
     end
 
-    new_data = %{data | task_pid: nil}
-    {:next_state, :ready, new_data, [{:reply, from, :ok}]}
+    # Stop all slave drivers
+    stop_all_slave_drivers(data)
+
+    # Clear subscribers as PDO entries will be re-registered
+    Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to stop_cyclic")
+
+    # Reset state and transition to :stale
+    new_data = %{
+      data
+      | task_pid: nil,
+        slaves: %{},
+        domains: %{},
+        subscribers: %{},
+        last_slave_count: nil,
+        stability_timer_ref: nil
+    }
+
+    {:next_state, :stale, new_data, [{:reply, from, :ok}]}
   end
 
   def operational({:call, from}, {:read_pdo_entry, domain_name, unique_name}, data) do
@@ -621,6 +868,16 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :get_slaves, data) do
     slave_pids = data.slaves |> Map.values() |> Enum.map(& &1.pid)
     {:keep_state_and_data, [{:reply, from, {:ok, slave_pids}}]}
+  end
+
+  def operational({:call, from}, :get_slave_name_map, data) do
+    slave_map =
+      data.slaves
+      |> Map.values()
+      |> Enum.map(fn slave_info -> {slave_info.name, slave_info.pid} end)
+      |> Map.new()
+
+    {:keep_state_and_data, [{:reply, from, {:ok, slave_map}}]}
   end
 
   def operational({:call, from}, :get_hardware_diff, data) do
@@ -692,42 +949,61 @@ defmodule EtherCAT.Master do
   # Private Helpers
   # ============================================================================
 
-  defp start_slave_driver(data, position) do
-    slave_name = :"slave_#{position}"
+  defp verify_and_sync_hardware(data) do
+    alias EtherCAT.Config.HardwareConfig
 
-    with {:ok, slave_info} <- Nif.master_get_slave(data.master_ref, position),
-         {:ok, slave_config} <-
-           Nif.master_slave_config(
-             data.master_ref,
-             0,
-             position,
-             slave_info.vendor_id,
-             slave_info.product_code
-           ),
-         {:ok, eeprom_data} <-
-           read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
-         driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code),
-         {:ok, pid} <-
-           driver_module.start_link(
-             master: self(),
-             position: position,
-             name: slave_name,
-             eeprom_data: eeprom_data
-           ) do
-      {:ok,
-       %{
-         pid: pid,
-         name: slave_name,
-         vendor: slave_info.vendor_id,
-         product: slave_info.product_code,
-         driver: driver_module,
-         slave_config: slave_config
-       }}
+    config = data.hardware_config
+
+    # Validate config
+    with :ok <- HardwareConfig.validate(config),
+         {:ok, data_with_domains} <- create_domains_from_config(data, config),
+         {:ok, data_with_slaves} <- start_slaves_from_config(data_with_domains, config),
+         :ok <- validate_hardware_count(config, data_with_slaves) do
+      # Generate hardware diff
+      hardware_diff = generate_hardware_diff(config, data_with_slaves.slaves)
+
+      Logger.info(
+        "Hardware verification successful: #{map_size(data_with_slaves.slaves)} slaves synced"
+      )
+
+      {:ok, %{data_with_slaves | hardware_diff: hardware_diff}}
     end
   end
 
-  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Slave.GenericDriver
-  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Slave.GenericDriver
+  defp validate_hardware_count(config, data) do
+    expected_count = length(config.slaves)
+    actual_count = map_size(data.slaves)
+
+    if expected_count == actual_count do
+      :ok
+    else
+      {:error,
+       {:slave_count_mismatch, "Expected #{expected_count} slaves, found #{actual_count}"}}
+    end
+  end
+
+  defp cancel_stability_timer(timer_ref) do
+    # Cancel the timer and flush any pending :stability_timeout messages
+    Process.cancel_timer(timer_ref)
+
+    receive do
+      :stability_timeout -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp stop_all_slave_drivers(data) do
+    Enum.each(data.slaves, fn {_position, slave_info} ->
+      if Process.alive?(slave_info.pid) do
+        try do
+          GenServer.stop(slave_info.pid, :normal, 5000)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end)
+  end
 
   # Parse driver configuration
   # Returns {driver_module, driver_opts}
@@ -1037,16 +1313,56 @@ defmodule EtherCAT.Master do
   defp handle_exit(pid, reason, data) do
     cond do
       pid == data.task_pid ->
-        Logger.warning("Cyclic task exited: #{inspect(reason)}")
-        {:next_state, :ready, %{data | task_pid: nil}}
+        Logger.error("Cyclic task crashed: #{inspect(reason)}, transitioning to :stale for recovery")
+
+        # Stop all slave drivers
+        stop_all_slave_drivers(data)
+
+        # Clear subscribers as system needs recovery
+        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to task crash")
+
+        # Reset state and transition to :stale
+        new_data = %{
+          data
+          | task_pid: nil,
+            slaves: %{},
+            domains: %{},
+            subscribers: %{},
+            last_slave_count: nil,
+            stability_timer_ref: nil
+        }
+
+        {:next_state, :stale, new_data}
 
       true ->
         # Check if it's a slave
         case Enum.find(data.slaves, fn {_pos, info} -> info.pid == pid end) do
           {position, _info} ->
-            Logger.warning("Slave #{position} exited: #{inspect(reason)}")
-            new_slaves = Map.delete(data.slaves, position)
-            {:keep_state, %{data | slaves: new_slaves}}
+            Logger.warning("Slave #{position} exited: #{inspect(reason)}, transitioning to :stale")
+
+            # Stop remaining slave drivers
+            stop_all_slave_drivers(data)
+
+            # If cyclic task is running, kill it
+            if data.task_pid do
+              Process.exit(data.task_pid, :kill)
+            end
+
+            # Clear subscribers as slave drivers are being restarted
+            Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to slave crash")
+
+            # Reset state and transition to :stale
+            new_data = %{
+              data
+              | task_pid: nil,
+                slaves: %{},
+                domains: %{},
+                subscribers: %{},
+                last_slave_count: nil,
+                stability_timer_ref: nil
+            }
+
+            {:next_state, :stale, new_data}
 
           nil ->
             :keep_state_and_data
@@ -1086,48 +1402,51 @@ defmodule EtherCAT.Master do
     slaves_by_position =
       Map.new(config.slaves, fn slave_config -> {slave_config.position, slave_config} end)
 
-    # Check if all expected slaves exist
-    detected_positions = Map.keys(data.slaves)
-    configured_positions = Map.keys(slaves_by_position)
+    # Start or replace slave drivers for each configured position
+    result =
+      Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
+                                                           {:ok, acc_slaves} ->
+        existing_slave = data.slaves[position]
 
-    case configured_positions -- detected_positions do
-      [] ->
-        # Reuse or replace slave drivers
-        result =
-          Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
-                                                               {:ok, acc_slaves} ->
-            existing_slave = data.slaves[position]
-            {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
+        # If no existing slave, start a new one
+        if existing_slave == nil do
+          case start_configured_slave_driver(data, position, slave_config) do
+            {:ok, slave_info} ->
+              {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
 
-            # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
-            if existing_slave.driver == EtherCAT.Slave.GenericDriver and
-                 requested_driver == EtherCAT.Slave.GenericDriver and
-                 existing_slave.name == slave_config.name do
-              # Reuse existing driver - same driver type and name
-              {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
-            else
-              # Need to replace driver - either different driver type or name changed
-              if Process.alive?(existing_slave.pid) do
-                GenServer.stop(existing_slave.pid, :normal)
-              end
+            {:error, reason} ->
+              {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+          end
+        else
+          # Existing slave - check if we can reuse it
+          {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
 
-              case start_configured_slave_driver(data, position, slave_config) do
-                {:ok, slave_info} ->
-                  {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
-
-                {:error, reason} ->
-                  {:halt, {:error, {:failed_to_start_slave, position, reason}}}
-              end
+          # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
+          if existing_slave.driver == EtherCAT.Slave.GenericDriver and
+               requested_driver == EtherCAT.Slave.GenericDriver and
+               existing_slave.name == slave_config.name do
+            # Reuse existing driver - same driver type and name
+            {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
+          else
+            # Need to replace driver - either different driver type or name changed
+            if Process.alive?(existing_slave.pid) do
+              GenServer.stop(existing_slave.pid, :normal)
             end
-          end)
 
-        case result do
-          {:ok, new_slaves} -> {:ok, %{data | slaves: new_slaves}}
-          error -> error
+            case start_configured_slave_driver(data, position, slave_config) do
+              {:ok, slave_info} ->
+                {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
+
+              {:error, reason} ->
+                {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+            end
+          end
         end
+      end)
 
-      missing ->
-        {:error, {:missing_slaves, missing}}
+    case result do
+      {:ok, new_slaves} -> {:ok, %{data | slaves: new_slaves}}
+      error -> error
     end
   end
 
@@ -1166,32 +1485,6 @@ defmodule EtherCAT.Master do
          driver: driver_module,
          slave_config: slave_config_ref
        }}
-    end
-  end
-
-  defp activate_and_start_cyclic(data, config) do
-    cycle_interval = config.master.cycle_interval || 10_000
-    nif_yield_interval = config.master.nif_yield_interval || 100_000
-
-    case Nif.master_activate(data.master_ref) do
-      :ok ->
-        domain_refs = data.domains |> Map.values() |> Enum.map(& &1.ref)
-
-        task_pid =
-          spawn_link(fn ->
-            Nif.cyclic_task(
-              self(),
-              data.master_ref,
-              domain_refs,
-              cycle_interval,
-              nif_yield_interval
-            )
-          end)
-
-        {:ok, %{data | task_pid: task_pid, hardware_config: config}}
-
-      {:error, _} = error ->
-        error
     end
   end
 
