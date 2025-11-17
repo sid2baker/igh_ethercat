@@ -133,7 +133,7 @@ defmodule EtherCAT do
           {:ok, %{atom() => pid()}} | {:error, term()}
   def configure_hardware(master, config_or_module) do
     with {:ok, config} <- get_config(config_or_module),
-         {:ok, slave_pids} <- Master.configure_and_start_slaves(master, config) do
+         {:ok, slave_pids} <- Master.configure_and_activate(master, config) do
       {:ok, slave_pids}
     end
   end
