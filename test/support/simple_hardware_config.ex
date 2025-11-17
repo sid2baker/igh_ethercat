@@ -22,7 +22,7 @@ defmodule SimpleHardwareConfig do
         nif_yield_interval: 100_000
       },
       domains: [
-        %DomainConfig{name: :io_domain, interval: 1}
+        %DomainConfig{name: :default_domain, interval: 1}
       ],
       slaves: [
         # EK1100 - EtherCAT Coupler at position 0
