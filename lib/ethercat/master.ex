@@ -336,7 +336,10 @@ defmodule EtherCAT.Master do
     nif_yield_interval = config.master.nif_yield_interval || 100_000
 
     # start_cyclic will configure slaves and activate
-    start_cyclic(master, cycle_interval, nif_yield_interval)
+    case start_cyclic(master, cycle_interval, nif_yield_interval) do
+      :ok -> {:ok, :activated}
+      error -> error
+    end
   end
 
   # ============================================================================
