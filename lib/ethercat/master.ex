@@ -335,14 +335,8 @@ defmodule EtherCAT.Master do
     cycle_interval = config.master.cycle_interval || 10_000
     nif_yield_interval = config.master.nif_yield_interval || 100_000
 
-    # First configure slaves
-    case :gen_statem.call(master, :configure_all_slaves, 30_000) do
-      :ok ->
-        start_cyclic(master, cycle_interval, nif_yield_interval)
-
-      error ->
-        error
-    end
+    # start_cyclic will configure slaves and activate
+    start_cyclic(master, cycle_interval, nif_yield_interval)
   end
 
   # ============================================================================
@@ -715,18 +709,6 @@ defmodule EtherCAT.Master do
     }
 
     {:next_state, :stale, new_data, [{:reply, from, :ok}]}
-  end
-
-  def synced({:call, from}, :configure_all_slaves, data) do
-    Logger.debug("Configuring all slaves (SDOs and PDOs)")
-
-    case configure_all_slaves(data) do
-      :ok ->
-        {:keep_state_and_data, [{:reply, from, :ok}]}
-
-      {:error, _} = error ->
-        {:keep_state_and_data, [{:reply, from, error}]}
-    end
   end
 
   def synced({:call, from}, {:start_cyclic, cycle_interval, nif_yield_interval}, data) do
