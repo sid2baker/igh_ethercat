@@ -1506,48 +1506,51 @@ defmodule EtherCAT.Master do
     slaves_by_position =
       Map.new(config.slaves, fn slave_config -> {slave_config.position, slave_config} end)
 
-    # Check if all expected slaves exist
-    detected_positions = Map.keys(data.slaves)
-    configured_positions = Map.keys(slaves_by_position)
+    # Start or replace slave drivers for each configured position
+    result =
+      Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
+                                                           {:ok, acc_slaves} ->
+        existing_slave = data.slaves[position]
 
-    case configured_positions -- detected_positions do
-      [] ->
-        # Reuse or replace slave drivers
-        result =
-          Enum.reduce_while(slaves_by_position, {:ok, %{}}, fn {position, slave_config},
-                                                               {:ok, acc_slaves} ->
-            existing_slave = data.slaves[position]
-            {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
+        # If no existing slave, start a new one
+        if existing_slave == nil do
+          case start_configured_slave_driver(data, position, slave_config) do
+            {:ok, slave_info} ->
+              {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
 
-            # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
-            if existing_slave.driver == EtherCAT.Slave.GenericDriver and
-                 requested_driver == EtherCAT.Slave.GenericDriver and
-                 existing_slave.name == slave_config.name do
-              # Reuse existing driver - same driver type and name
-              {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
-            else
-              # Need to replace driver - either different driver type or name changed
-              if Process.alive?(existing_slave.pid) do
-                GenServer.stop(existing_slave.pid, :normal)
-              end
+            {:error, reason} ->
+              {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+          end
+        else
+          # Existing slave - check if we can reuse it
+          {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
 
-              case start_configured_slave_driver(data, position, slave_config) do
-                {:ok, slave_info} ->
-                  {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
-
-                {:error, reason} ->
-                  {:halt, {:error, {:failed_to_start_slave, position, reason}}}
-              end
+          # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
+          if existing_slave.driver == EtherCAT.Slave.GenericDriver and
+               requested_driver == EtherCAT.Slave.GenericDriver and
+               existing_slave.name == slave_config.name do
+            # Reuse existing driver - same driver type and name
+            {:cont, {:ok, Map.put(acc_slaves, position, existing_slave)}}
+          else
+            # Need to replace driver - either different driver type or name changed
+            if Process.alive?(existing_slave.pid) do
+              GenServer.stop(existing_slave.pid, :normal)
             end
-          end)
 
-        case result do
-          {:ok, new_slaves} -> {:ok, %{data | slaves: new_slaves}}
-          error -> error
+            case start_configured_slave_driver(data, position, slave_config) do
+              {:ok, slave_info} ->
+                {:cont, {:ok, Map.put(acc_slaves, position, slave_info)}}
+
+              {:error, reason} ->
+                {:halt, {:error, {:failed_to_start_slave, position, reason}}}
+            end
+          end
         end
+      end)
 
-      missing ->
-        {:error, {:missing_slaves, missing}}
+    case result do
+      {:ok, new_slaves} -> {:ok, %{data | slaves: new_slaves}}
+      error -> error
     end
   end
 
