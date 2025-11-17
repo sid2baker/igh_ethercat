@@ -132,19 +132,6 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :get_slaves)
   end
 
-  @doc """
-  Create a new domain with the specified update interval.
-
-  ## Parameters
-  - `name` - Unique domain identifier (atom)
-  - `interval_us` - Update interval in **microseconds**
-
-  Note: If using DomainConfig, intervals are in milliseconds and automatically converted.
-  """
-  def create_domain(master \\ __MODULE__, name, interval_us) do
-    :gen_statem.call(master, {:create_domain, name, interval_us})
-  end
-
   def start_cyclic(master \\ __MODULE__, cycle_interval, nif_yield_interval) do
     :gen_statem.call(master, {:start_cyclic, cycle_interval, nif_yield_interval}, 30_000)
   end
@@ -667,25 +654,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, slave_map}}]}
   end
 
-  def synced({:call, from}, {:create_domain, name, interval}, data) do
-    case Map.has_key?(data.domains, name) do
-      true ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_already_exists}}]}
-
-      false ->
-        case Nif.master_create_domain(data.master_ref, name, interval) do
-          {:ok, domain_ref} ->
-            domain_info = %{ref: domain_ref, interval: interval}
-            new_domains = Map.put(data.domains, name, domain_info)
-
-            {:keep_state, %{data | domains: new_domains}, [{:reply, from, {:ok, domain_ref}}]}
-
-          {:error, _} = error ->
-            {:keep_state_and_data, [{:reply, from, error}]}
-        end
-    end
-  end
-
   def synced({:call, from}, {:set_hardware_config, config}, data) do
     Logger.info("New hardware config received, stopping drivers and transitioning to :stale")
 
@@ -825,77 +793,9 @@ defmodule EtherCAT.Master do
   # State: :operational
   # ============================================================================
 
-  def operational(:enter, _old_state, data) do
+  def operational(:enter, _old_state, _data) do
     Logger.info("Entered :operational state - cyclic mode active")
-    # Start monitoring for hardware changes
-    {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
-  end
-
-  def operational(:state_timeout, :monitor_hardware, data) do
-    case Nif.get_master_state(data.master_ref) do
-      {:ok, master_state} ->
-        current_slave_count = master_state.slaves_responding
-
-        if current_slave_count != data.last_slave_count do
-          Logger.error(
-            "Hardware change detected in :operational state: #{data.last_slave_count} -> #{current_slave_count} slaves, stopping cyclic and transitioning to :stale"
-          )
-
-          # Kill cyclic task
-          if data.task_pid do
-            Process.exit(data.task_pid, :kill)
-          end
-
-          # Stop all slave drivers
-          stop_all_slave_drivers(data)
-
-          # Clear subscribers as PDO entries will be re-registered
-          Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to hardware change")
-
-          # Reset state and transition to :stale
-          new_data = %{
-            data
-            | task_pid: nil,
-              slaves: %{},
-              domains: %{},
-              subscribers: %{},
-              last_slave_count: nil,
-              stability_timer_ref: nil
-          }
-
-          {:next_state, :stale, new_data}
-        else
-          # Hardware still stable
-          {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
-        end
-
-      {:error, reason} ->
-        Logger.error("Failed to monitor hardware in :operational: #{inspect(reason)}, cleaning up and transitioning to :offline")
-
-        # Kill cyclic task if running
-        if data.task_pid do
-          Process.exit(data.task_pid, :kill)
-        end
-
-        # Stop all slave drivers
-        stop_all_slave_drivers(data)
-
-        # Clear subscribers
-        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure")
-
-        # Reset state and transition to :offline
-        new_data = %{
-          data
-          | task_pid: nil,
-            slaves: %{},
-            domains: %{},
-            subscribers: %{},
-            last_slave_count: nil,
-            stability_timer_ref: nil
-        }
-
-        {:next_state, :offline, new_data}
-    end
+    :keep_state_and_data
   end
 
   def operational({:call, from}, :stop_cyclic, data) do
@@ -1104,43 +1004,6 @@ defmodule EtherCAT.Master do
       end
     end)
   end
-
-  defp start_slave_driver(data, position) do
-    slave_name = :"slave_#{position}"
-
-    with {:ok, slave_info} <- Nif.master_get_slave(data.master_ref, position),
-         {:ok, slave_config} <-
-           Nif.master_slave_config(
-             data.master_ref,
-             0,
-             position,
-             slave_info.vendor_id,
-             slave_info.product_code
-           ),
-         {:ok, eeprom_data} <-
-           read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
-         driver_module = driver_for_slave(slave_info.vendor_id, slave_info.product_code),
-         {:ok, pid} <-
-           driver_module.start_link(
-             master: self(),
-             position: position,
-             name: slave_name,
-             eeprom_data: eeprom_data
-           ) do
-      {:ok,
-       %{
-         pid: pid,
-         name: slave_name,
-         vendor: slave_info.vendor_id,
-         product: slave_info.product_code,
-         driver: driver_module,
-         slave_config: slave_config
-       }}
-    end
-  end
-
-  defp driver_for_slave(0x02, 0x0C823052), do: EtherCAT.Slave.GenericDriver
-  defp driver_for_slave(_vendor_id, _product_code), do: EtherCAT.Slave.GenericDriver
 
   # Parse driver configuration
   # Returns {driver_module, driver_opts}
@@ -1622,32 +1485,6 @@ defmodule EtherCAT.Master do
          driver: driver_module,
          slave_config: slave_config_ref
        }}
-    end
-  end
-
-  defp activate_and_start_cyclic(data, config) do
-    cycle_interval = config.master.cycle_interval || 10_000
-    nif_yield_interval = config.master.nif_yield_interval || 100_000
-
-    case Nif.master_activate(data.master_ref) do
-      :ok ->
-        domain_refs = data.domains |> Map.values() |> Enum.map(& &1.ref)
-
-        task_pid =
-          spawn_link(fn ->
-            Nif.cyclic_task(
-              self(),
-              data.master_ref,
-              domain_refs,
-              cycle_interval,
-              nif_yield_interval
-            )
-          end)
-
-        {:ok, %{data | task_pid: task_pid, hardware_config: config}}
-
-      {:error, _} = error ->
-        error
     end
   end
 
