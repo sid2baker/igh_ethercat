@@ -91,8 +91,9 @@ defmodule EtherCAT.Master do
           # Map of {domain_name, unique_name} => [subscriber_pids]
           subscribers: %{{atom(), String.t()} => [pid()]},
           task_pid: pid() | nil,
+          # Hardware check interval in milliseconds (for state_timeout)
           scan_interval: pos_integer(),
-          # How long hardware must be stable before :stale -> :synced (microseconds)
+          # How long hardware must be stable before :stale -> :synced (milliseconds)
           stability_timeout: pos_integer(),
           # Expected hardware configuration (required for :stale -> :synced)
           hardware_config: map() | nil,
@@ -247,10 +248,16 @@ defmodule EtherCAT.Master do
 
   ## Timeout Expectations
 
-  - **Hardware stability**: Configurable via `stability_timeout` (default: 1 second)
+  - **Hardware stability**: Configurable via `stability_timeout` option (default: 1000ms = 1 second)
   - **State transition**: Max 10 seconds to reach :synced state
   - **Total timeout**: ~10 seconds + stability_timeout + activation time
   - For large systems (>10 slaves), consider using the low-level API for custom timeouts
+
+  ## Configuration Options
+
+  Master accepts these init options (in microseconds, converted internally):
+  - `scan_interval`: Hardware polling interval (default: 100_000µs = 100ms)
+  - `stability_timeout`: Required stable duration (default: 1_000_000µs = 1000ms)
 
   ## Parameters
   - `master` - Master process (PID or module name)
@@ -350,8 +357,11 @@ defmodule EtherCAT.Master do
     Process.flag(:trap_exit, true)
 
     master_index = Keyword.get(opts, :master_index, 0)
-    scan_interval = Keyword.get(opts, :scan_interval, 100_000)
-    stability_timeout = Keyword.get(opts, :stability_timeout, 1_000_000)
+    # Convert microseconds to milliseconds for timer functions
+    scan_interval_us = Keyword.get(opts, :scan_interval, 100_000)
+    stability_timeout_us = Keyword.get(opts, :stability_timeout, 1_000_000)
+    scan_interval = div(scan_interval_us, 1000)
+    stability_timeout = div(stability_timeout_us, 1000)
 
     case Nif.request_master(master_index) do
       {:ok, ref} ->
@@ -449,7 +459,7 @@ defmodule EtherCAT.Master do
   # State: :stale
   # ============================================================================
 
-  def stale(:enter, _old_state, data) do
+  def stale(:enter, _old_state, _data) do
     Logger.info("Entered :stale state - monitoring hardware topology")
     {:keep_state_and_data, [{:state_timeout, 0, :check_hardware}]}
   end
@@ -502,7 +512,7 @@ defmodule EtherCAT.Master do
   end
 
   def stale(:info, :stability_timeout, data) do
-    Logger.info("Hardware stable for #{data.stability_timeout}µs, attempting sync")
+    Logger.info("Hardware stable for #{data.stability_timeout}ms, attempting sync")
 
     # Check if we have hardware_config
     if data.hardware_config == nil do
