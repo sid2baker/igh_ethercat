@@ -8,7 +8,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
   ## Fields
 
   - `index` - Sync manager index (0-15, typically 2=outputs, 3=inputs)
-  - `direction` - `:input` or `:output`
+  - `direction` - `:invalid`, `:output`, `:input`, or `:count`
   - `watchdog` - `:default`, `:enabled`, or `:disabled`
   - `pdos` - List of PDO configurations for this sync manager
   """
@@ -19,7 +19,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
 
   @type t :: %__MODULE__{
           index: non_neg_integer(),
-          direction: :input | :output,
+          direction: :invalid | :output | :input | :count,
           watchdog: :default | :enabled | :disabled,
           pdos: [PdoConfig.t()]
         }
@@ -53,7 +53,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
   defp validate_index(index) when is_integer(index) and index >= 0 and index < 16, do: :ok
   defp validate_index(_), do: {:error, :invalid_sync_manager_index}
 
-  defp validate_direction(dir) when dir in [:input, :output], do: :ok
+  defp validate_direction(dir) when dir in [:invalid, :output, :input, :count], do: :ok
   defp validate_direction(_), do: {:error, :invalid_direction}
 
   defp validate_watchdog(wd) when wd in [:default, :enabled, :disabled], do: :ok
