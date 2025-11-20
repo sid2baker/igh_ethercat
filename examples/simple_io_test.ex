@@ -39,10 +39,11 @@ defmodule Examples.SimpleIOTest do
 
   require Logger
 
-  alias EtherCAT.Master
-
   # Master always registers as EtherCAT.Master (hardcoded in start_link)
   @master_name EtherCAT.Master
+
+  # Process dictionary key for storing slave PIDs
+  @slaves_key :ethercat_slaves
 
   # ============================================================================
   # Public API
@@ -58,13 +59,15 @@ defmodule Examples.SimpleIOTest do
     config = SimpleHardwareConfig.hardware_config()
 
     # Start master process (registers as EtherCAT.Master automatically)
-    case Master.start_link(master_index: 0) do
+    case EtherCAT.Master.start_link(master_index: 0) do
       {:ok, _pid} ->
         Logger.info("Master started successfully")
 
-        # Configure and activate
-        case Master.configure_and_activate(@master_name, config) do
-          {:ok, _slaves} ->
+        # Configure hardware and get slave PIDs
+        case EtherCAT.configure_hardware(@master_name, config) do
+          {:ok, slaves} ->
+            # Store slave PIDs in process dictionary
+            Process.put(@slaves_key, slaves)
             Logger.info("Hardware configured and activated!")
             Logger.info("Ready for I/O operations")
             print_quick_start()
@@ -116,14 +119,12 @@ defmodule Examples.SimpleIOTest do
   """
   @spec set_output(0..15, boolean()) :: :ok | {:error, term()}
   def set_output(channel, value) when channel in 0..15 and is_boolean(value) do
-    unique_name = "digital_outputs:channel_#{channel + 1}:output"
-    binary_value = if value, do: <<1>>, else: <<0>>
-
-    case Master.write_pdo_entry(@master_name, unique_name, binary_value) do
-      :ok ->
-        Logger.debug("Set output channel #{channel} to #{value}")
-        :ok
-
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"channel_#{channel + 1}",
+         :ok <- EtherCAT.write(slaves.digital_outputs, pdo_name, :output, value) do
+      Logger.debug("Set output channel #{channel} to #{value}")
+      :ok
+    else
       {:error, reason} = error ->
         Logger.error("Failed to set output: #{inspect(reason)}")
         error
@@ -146,12 +147,11 @@ defmodule Examples.SimpleIOTest do
   """
   @spec get_input(0..15) :: {:ok, boolean()} | {:error, term()}
   def get_input(channel) when channel in 0..15 do
-    unique_name = "digital_inputs:channel_#{channel + 1}:input"
-
-    case Master.read_pdo_entry(@master_name, unique_name) do
-      {:ok, <<value>>} ->
-        {:ok, value == 1}
-
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"channel_#{channel + 1}",
+         {:ok, value} <- EtherCAT.read(slaves.digital_inputs, pdo_name, :input) do
+      {:ok, value}
+    else
       {:error, reason} = error ->
         Logger.error("Failed to read input: #{inspect(reason)}")
         error
@@ -356,11 +356,10 @@ defmodule Examples.SimpleIOTest do
   Subscribe to changes on a specific input channel.
 
   The calling process will receive messages of the form:
-  `{:pdo_value_changed, domain_name, unique_name, value}`
+  `{:pdo_value_changed, unique_name, value}`
 
   ## Parameters
   - `channel`: Input channel number (0-15)
-  - `pid`: Process to receive notifications (default: self())
 
   ## Examples
       # In IEx
@@ -369,15 +368,14 @@ defmodule Examples.SimpleIOTest do
       Examples.SimpleIOTest.set_output(0, true)
       flush()  # Should show {:pdo_value_changed, ...}
   """
-  @spec subscribe_input(0..15, pid()) :: :ok | {:error, term()}
-  def subscribe_input(channel, pid \\ self()) when channel in 0..15 do
-    unique_name = "digital_inputs:channel_#{channel + 1}:input"
-
-    case Master.subscribe(@master_name, unique_name, pid) do
-      :ok ->
-        Logger.info("Subscribed to input channel #{channel}")
-        :ok
-
+  @spec subscribe_input(0..15) :: :ok | {:error, term()}
+  def subscribe_input(channel) when channel in 0..15 do
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"channel_#{channel + 1}",
+         :ok <- EtherCAT.watch(slaves.digital_inputs, pdo_name, :input) do
+      Logger.info("Subscribed to input channel #{channel}")
+      :ok
+    else
       error ->
         Logger.error("Failed to subscribe: #{inspect(error)}")
         error
@@ -389,17 +387,15 @@ defmodule Examples.SimpleIOTest do
 
   ## Parameters
   - `channel`: Input channel number (0-15)
-  - `pid`: Process to unsubscribe (default: self())
   """
-  @spec unsubscribe_input(0..15, pid()) :: :ok | {:error, term()}
-  def unsubscribe_input(channel, pid \\ self()) when channel in 0..15 do
-    unique_name = "digital_inputs:channel_#{channel + 1}:input"
-
-    case Master.unsubscribe(@master_name, unique_name, pid) do
-      :ok ->
-        Logger.info("Unsubscribed from input channel #{channel}")
-        :ok
-
+  @spec unsubscribe_input(0..15) :: :ok | {:error, term()}
+  def unsubscribe_input(channel) when channel in 0..15 do
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"channel_#{channel + 1}",
+         :ok <- EtherCAT.unwatch(slaves.digital_inputs, pdo_name, :input) do
+      Logger.info("Unsubscribed from input channel #{channel}")
+      :ok
+    else
       error ->
         Logger.error("Failed to unsubscribe: #{inspect(error)}")
         error
@@ -409,6 +405,13 @@ defmodule Examples.SimpleIOTest do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp get_slaves do
+    case Process.get(@slaves_key) do
+      nil -> {:error, :slaves_not_initialized}
+      slaves -> {:ok, slaves}
+    end
+  end
 
   defp print_quick_start do
     IO.puts("""
