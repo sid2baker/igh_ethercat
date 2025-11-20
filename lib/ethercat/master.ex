@@ -908,8 +908,6 @@ defmodule EtherCAT.Master do
   # NIF sends: {:data_changed, domain_name, unique_name, value}
   # Where unique_name = "slave_name:pdo_name:entry_name"
   def operational(:info, {:data_changed, _domain_name, unique_name, value}, data) do
-    Logger.debug("Received :data_changed for #{unique_name} = #{inspect(value)}, subscribers: #{inspect(Map.get(data.subscribers, unique_name, []))}")
-
     case data.subscribers[unique_name] do
       nil ->
         :keep_state_and_data
@@ -961,8 +959,7 @@ defmodule EtherCAT.Master do
     handle_exit(pid, reason, data)
   end
 
-  def operational(event_type, event, _data) do
-    Logger.debug("Unhandled operational event: type=#{inspect(event_type)}, event=#{inspect(event)}")
+  def operational(_event_type, _event, _data) do
     :keep_state_and_data
   end
 

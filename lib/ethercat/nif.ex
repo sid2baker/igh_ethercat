@@ -962,14 +962,12 @@ defmodule EtherCAT.Nif do
                   }
 
                   if (changed) {
-                      std.log.debug("Change detected: '{s}' direction={}, old={any}, new={any}", .{ entry.name, entry.direction, entry.current_value[0..byte_count], domain_value[0..byte_count] });
                       if (entry.direction == .input) {
                           // Input changed: extract raw binary and notify
                           const required_bytes = (entry.bit_length + 7) / 8;
                           var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                           extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
 
-                          std.log.debug("Sending :data_changed for '{s}' to master_pid", .{entry.name});
                           // Send to Master with full routing context: domain_name + unique_name (slave:pdo:entry)
                           _ = try beam.send(master_pid, .{ .data_changed, accessor.domain_name, entry.name, buffer[0..required_bytes] }, .{});
 

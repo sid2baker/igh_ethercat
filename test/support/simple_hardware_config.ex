@@ -18,8 +18,7 @@ defmodule SimpleHardwareConfig do
     DomainConfig,
     SlaveConfig,
     SyncManagerConfig,
-    PdoConfig,
-    SdoConfig
+    PdoConfig
   }
 
   def hardware_config do
