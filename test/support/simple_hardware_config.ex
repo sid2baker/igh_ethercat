@@ -13,13 +13,12 @@ defmodule SimpleHardwareConfig do
 
   Domain Configuration:
   - :fast domain (cycle_multiplier=1, every cycle = 10ms)
-    - Input channels 1-16 (EL1809 has single SM - cannot split across domains)
-    - Output channels 1-8
-  - :slow domain (cycle_multiplier=200, every 200 cycles = 2 seconds)
-    - Output channels 9-16
+    - Input channels 1-16
+    - Output channels 1-16
 
-  Note: EL1809 has 1 SM with all 16 channels, so all inputs must be in the same domain.
-  EL2809 has 2 SMs (SM0: ch1-8, SM1: ch9-16), allowing outputs to be split across domains.
+  Note: In IgH EtherCAT, once a slave's sync managers are configured, ALL of them
+  must be registered to the SAME domain. You cannot split a slave's SMs across domains.
+  Both EL1809 and EL2809 must have all their channels in one domain.
   """
 
   alias EtherCAT.Config.{
@@ -39,8 +38,8 @@ defmodule SimpleHardwareConfig do
         nif_yield_interval: 100_000
       },
       domains: [
-        %DomainConfig{name: :fast, cycle_multiplier: 1},
-        %DomainConfig{name: :slow, cycle_multiplier: 200}
+        %DomainConfig{name: :fast, cycle_multiplier: 1}
+        # Note: slow domain removed - cannot split slaves across domains in IgH EtherCAT
       ],
       slaves: [
         # EK1100 - EtherCAT Coupler at position 0
@@ -149,12 +148,10 @@ defmodule SimpleHardwareConfig do
             ]
           },
           registered_entries: %{
+            # All EL2809 channels must be in the same domain
+            # Cannot split SM0 and SM1 across different domains
             fast:
-              for ch <- 1..8 do
-                {:"channel_#{ch}", :output}
-              end,
-            slow:
-              for ch <- 9..16 do
+              for ch <- 1..16 do
                 {:"channel_#{ch}", :output}
               end
           }
