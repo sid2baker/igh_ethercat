@@ -810,9 +810,9 @@ pub fn slave_config_sdo(
 /// Cycle sequence (deterministic, repeats at `interval` µs):
 ///   1. Sync application time
 ///   2. Receive frames (slave → master)
-///   3. Process domains, detect changes, send notifications
+///   3. Process domains (respecting individual domain intervals)
 ///   4. Check master state changes
-///   5. Queue domain outputs (if interval reached)
+///   5. Queue domain outputs (respecting individual domain intervals)
 ///   6. Send frames (master → slave)
 ///   7. Sleep to maintain precise cycle time
 ///
@@ -861,9 +861,18 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         // 2. Receive frames from network (contains slave responses with input data)
         _ = ecrt.ecrt_master_receive(master);
 
-        // 3. Process domains
+        // 3. Process domains (respecting interval configuration)
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
+
+            // Calculate cycles per domain interval
+            const cycles_per_interval = @divTrunc(accessor.interval, interval);
+
+            // Only process this domain if we're at an interval boundary
+            if (counter % cycles_per_interval != 0) {
+                continue;
+            }
+
             var new_state: ecrt.ec_domain_state_t = undefined;
 
             // Process domain data (updates buffer from received frame)
@@ -940,11 +949,17 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         prev_master_state = master_state;
 
-        // Step 5: Queue domain outputs every cycle
-        // (accessor.interval is in microseconds but not used for queueing frequency)
+        // Step 5: Queue domain outputs (respecting interval configuration)
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
-            _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+
+            // Calculate cycles per domain interval
+            const cycles_per_interval = @divTrunc(accessor.interval, interval);
+
+            // Only queue this domain if we're at an interval boundary
+            if (counter % cycles_per_interval == 0) {
+                _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+            }
         }
 
         // Step 6: Send queued frames to network
