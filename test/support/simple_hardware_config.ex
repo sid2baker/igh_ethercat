@@ -13,14 +13,13 @@ defmodule SimpleHardwareConfig do
 
   Domain Configuration:
   - :fast domain (cycle_multiplier=1, every cycle = 10ms)
-    - Input channels 1-8
+    - Input channels 1-16 (EL1809 has single SM - cannot split across domains)
     - Output channels 1-8
   - :slow domain (cycle_multiplier=200, every 200 cycles = 2 seconds)
-    - Input channels 9-16
     - Output channels 9-16
 
-  Note: Domain assignments respect sync manager boundaries to avoid exceeding
-  FMMU limits. EL1809 has 1 SM, EL2809 has 2 SMs (SM0: ch1-8, SM1: ch9-16).
+  Note: EL1809 has 1 SM with all 16 channels, so all inputs must be in the same domain.
+  EL2809 has 2 SMs (SM0: ch1-8, SM1: ch9-16), allowing outputs to be split across domains.
   """
 
   alias EtherCAT.Config.{
@@ -93,12 +92,10 @@ defmodule SimpleHardwareConfig do
             ]
           },
           registered_entries: %{
+            # EL1809 has single SM with all 16 channels - cannot be split across domains
+            # All channels must go to ONE domain to avoid double allocation
             fast:
-              for ch <- 1..8 do
-                {:"channel_#{ch}", :input}
-              end,
-            slow:
-              for ch <- 9..16 do
+              for ch <- 1..16 do
                 {:"channel_#{ch}", :input}
               end
           }
