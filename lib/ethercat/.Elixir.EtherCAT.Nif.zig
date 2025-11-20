@@ -810,9 +810,9 @@ pub fn slave_config_sdo(
 /// Cycle sequence (deterministic, repeats at `interval` µs):
 ///   1. Sync application time
 ///   2. Receive frames (slave → master)
-///   3. Process domains (respecting individual domain cycle_multipliers)
+///   3. Process domains, detect changes, send notifications
 ///   4. Check master state changes
-///   5. Queue domain outputs (respecting individual domain cycle_multipliers)
+///   5. Queue domain outputs (if interval reached)
 ///   6. Send frames (master → slave)
 ///   7. Sleep to maintain precise cycle time
 ///
@@ -867,8 +867,7 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             const accessor = domain_accessor_resource.unpack();
 
             // Only process this domain 1 cycle after it was queued
-            // (counter - 1) % cycle_multiplier == 0 means we queued last cycle
-            if (counter == 0 or (counter - 1) % accessor.cycle_multiplier != 0) {
+            if ((counter + 1) % accessor.cycle_multiplier != 0) {
                 continue;
             }
 
@@ -912,14 +911,12 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                 }
 
                 if (changed) {
-                    std.log.debug("Change detected: '{s}' direction={}, old={any}, new={any}", .{ entry.name, entry.direction, entry.current_value[0..byte_count], domain_value[0..byte_count] });
                     if (entry.direction == .input) {
                         // Input changed: extract raw binary and notify
                         const required_bytes = (entry.bit_length + 7) / 8;
                         var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                         extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
 
-                        std.log.debug("Sending :data_changed for '{s}' to master_pid", .{entry.name});
                         // Send to Master with full routing context: domain_name + unique_name (slave:pdo:entry)
                         _ = try beam.send(master_pid, .{ .data_changed, accessor.domain_name, entry.name, buffer[0..required_bytes] }, .{});
 

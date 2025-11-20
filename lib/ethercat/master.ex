@@ -120,7 +120,9 @@ defmodule EtherCAT.Master do
           # Master cycle interval in microseconds (set when operational)
           cycle_interval_us: pos_integer() | nil,
           # Map of {domain_name, unique_name} => %{from, timer_ref}
-          pending_writes: %{{atom(), String.t()} => %{from: :gen_statem.from(), timer_ref: reference()}}
+          pending_writes: %{
+            {atom(), String.t()} => %{from: :gen_statem.from(), timer_ref: reference()}
+          }
         }
 
   # ============================================================================
@@ -734,7 +736,12 @@ defmodule EtherCAT.Master do
                 )
               end)
 
-            new_data = %{data_with_registry | task_pid: task_pid, cycle_interval_us: cycle_interval}
+            new_data = %{
+              data_with_registry
+              | task_pid: task_pid,
+                cycle_interval_us: cycle_interval
+            }
+
             {:next_state, :operational, new_data, [{:reply, from, :ok}]}
 
           {:error, _} = error ->
@@ -886,10 +893,13 @@ defmodule EtherCAT.Master do
                 # Calculate timeout: max(2 * cycle_multiplier * cycle_interval_us / 1_000_000, 1.0) seconds
                 domain_info = data.domains[domain_name]
                 cycle_multiplier = domain_info.cycle_multiplier
-                timeout_ms = max(trunc(2 * cycle_multiplier * data.cycle_interval_us / 1000), 1000)
+
+                timeout_ms =
+                  max(trunc(2 * cycle_multiplier * data.cycle_interval_us / 1000), 1000)
 
                 # Start timer
-                timer_ref = Process.send_after(self(), {:write_timeout, write_key, from}, timeout_ms)
+                timer_ref =
+                  Process.send_after(self(), {:write_timeout, write_key, from}, timeout_ms)
 
                 # Add to pending_writes
                 new_pending_writes =
@@ -978,7 +988,10 @@ defmodule EtherCAT.Master do
   # NIF sends: {:output_changed, domain_name, unique_name, value}
   def operational(:info, {:output_changed, domain_name, unique_name, _value}, data) do
     write_key = {domain_name, unique_name}
-    Logger.debug("Received :output_changed for #{inspect(write_key)}, pending_writes keys: #{inspect(Map.keys(data.pending_writes))}")
+
+    Logger.debug(
+      "Received :output_changed for #{inspect(write_key)}, pending_writes keys: #{inspect(Map.keys(data.pending_writes))}"
+    )
 
     case Map.get(data.pending_writes, write_key) do
       nil ->

@@ -925,8 +925,7 @@ defmodule EtherCAT.Nif do
               const accessor = domain_accessor_resource.unpack();
 
               // Only process this domain 1 cycle after it was queued
-              // (counter - 1) % cycle_multiplier == 0 means we queued last cycle
-              if (counter == 0 or (counter - 1) % accessor.cycle_multiplier != 0) {
+              if ((counter + 1) % accessor.cycle_multiplier != 0) {
                   continue;
               }
 

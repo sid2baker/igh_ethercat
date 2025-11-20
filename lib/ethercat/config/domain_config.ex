@@ -24,7 +24,8 @@ defmodule EtherCAT.Config.DomainConfig do
   - `cycle_multiplier` - Process this domain every N master cycles (1 = every cycle, 200 = every 200th cycle)
   """
   @spec new(atom(), pos_integer()) :: t()
-  def new(name, cycle_multiplier) when is_atom(name) and is_integer(cycle_multiplier) and cycle_multiplier > 0 do
+  def new(name, cycle_multiplier)
+      when is_atom(name) and is_integer(cycle_multiplier) and cycle_multiplier > 0 do
     %__MODULE__{
       name: name,
       cycle_multiplier: cycle_multiplier
