@@ -11,8 +11,8 @@ Multi-Domain Timing Diagnostic Test
 ========================================
 
 Domain Configuration:
-  :fast  → interval=1   (10ms/cycle)
-  :slow  → interval=200 (2000ms/cycle)
+  :fast  → cycle_multiplier=1   (every cycle = 10ms)
+  :slow  → cycle_multiplier=200 (every 200 cycles = 2000ms)
 
 Output Assignment (respects sync manager boundaries):
   Channels 1-8 (SM0) → :fast

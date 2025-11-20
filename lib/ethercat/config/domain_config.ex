@@ -3,17 +3,17 @@ defmodule EtherCAT.Config.DomainConfig do
   Domain configuration for cyclic data exchange.
 
   A domain represents a group of PDO entries that are updated together
-  at a specific interval.
+  at a specific cycle rate.
   """
 
   defstruct [
     :name,
-    :interval
+    :cycle_multiplier
   ]
 
   @type t :: %__MODULE__{
           name: atom(),
-          interval: pos_integer()
+          cycle_multiplier: pos_integer()
         }
 
   @doc """
@@ -21,13 +21,13 @@ defmodule EtherCAT.Config.DomainConfig do
 
   ## Parameters
   - `name` - Unique domain identifier (atom)
-  - `interval` - Update interval in milliseconds
+  - `cycle_multiplier` - Process this domain every N master cycles (1 = every cycle, 200 = every 200th cycle)
   """
   @spec new(atom(), pos_integer()) :: t()
-  def new(name, interval) when is_atom(name) and is_integer(interval) and interval > 0 do
+  def new(name, cycle_multiplier) when is_atom(name) and is_integer(cycle_multiplier) and cycle_multiplier > 0 do
     %__MODULE__{
       name: name,
-      interval: interval
+      cycle_multiplier: cycle_multiplier
     }
   end
 end

@@ -188,18 +188,18 @@ pub const DomainAccessor = struct {
     domain_ptr: usize,  // Store as usize to avoid C pointer in BEAM resource
     domain_name: beam.term,  // Domain name atom for routing (e.g., :default_domain)
     layout: DomainLayout,
-    interval: u32,  // Interval multiplier for cyclic task
+    cycle_multiplier: u32,  // Process domain every N master cycles (1 = every cycle, 200 = every 200th)
     data: []u8,       // Current cycle data (points to ecrt-managed memory)
     state: ecrt.ec_domain_state_t,  // Domain state for change detection
     mutex: std.Thread.Mutex,  // Protects current_value in entries
     cleaned_up: std.atomic.Value(bool),  // Atomic flag to prevent double-free
 
-    pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, interval: u32) DomainAccessor {
+    pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, cycle_multiplier: u32) DomainAccessor {
         return .{
             .domain_ptr = @intFromPtr(domain),
             .domain_name = domain_name,
             .layout = DomainLayout.init(),
-            .interval = interval,
+            .cycle_multiplier = cycle_multiplier,
             .data = &[_]u8{},       // Will be set in cyclic_task
             .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
             .mutex = .{},
@@ -810,9 +810,9 @@ pub fn slave_config_sdo(
 /// Cycle sequence (deterministic, repeats at `interval` µs):
 ///   1. Sync application time
 ///   2. Receive frames (slave → master)
-///   3. Process domains (respecting individual domain intervals)
+///   3. Process domains (respecting individual domain cycle_multipliers)
 ///   4. Check master state changes
-///   5. Queue domain outputs (respecting individual domain intervals)
+///   5. Queue domain outputs (respecting individual domain cycle_multipliers)
 ///   6. Send frames (master → slave)
 ///   7. Sleep to maintain precise cycle time
 ///
@@ -861,15 +861,12 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         // 2. Receive frames from network (contains slave responses with input data)
         _ = ecrt.ecrt_master_receive(master);
 
-        // 3. Process domains (respecting interval configuration)
+        // 3. Process domains (respecting cycle_multiplier configuration)
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
 
-            // Calculate cycles per domain interval
-            const cycles_per_interval = @divTrunc(accessor.interval, interval);
-
-            // Only process this domain if we're at an interval boundary
-            if (counter % cycles_per_interval != 0) {
+            // Only process this domain if we're at a cycle_multiplier boundary
+            if (counter % accessor.cycle_multiplier != 0) {
                 continue;
             }
 
@@ -949,15 +946,12 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         prev_master_state = master_state;
 
-        // Step 5: Queue domain outputs (respecting interval configuration)
+        // Step 5: Queue domain outputs (respecting cycle_multiplier configuration)
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
 
-            // Calculate cycles per domain interval
-            const cycles_per_interval = @divTrunc(accessor.interval, interval);
-
-            // Only queue this domain if we're at an interval boundary
-            if (counter % cycles_per_interval == 0) {
+            // Only queue this domain if we're at a cycle_multiplier boundary
+            if (counter % accessor.cycle_multiplier == 0) {
                 _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
             }
         }

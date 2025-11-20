@@ -1261,12 +1261,12 @@ defmodule EtherCAT.Master do
   defp create_domains_from_config(data, config) do
     result =
       Enum.reduce_while(config.domains, {:ok, data}, fn domain_config, {:ok, acc_data} ->
-        # Convert milliseconds to microseconds (DomainConfig uses ms, NIF expects µs)
-        interval_us = domain_config.interval * 1000
+        # Pass cycle_multiplier directly to NIF (no conversion needed)
+        cycle_multiplier = domain_config.cycle_multiplier
 
-        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, interval_us) do
+        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, cycle_multiplier) do
           {:ok, domain_ref} ->
-            domain_info = %{ref: domain_ref, interval: interval_us}
+            domain_info = %{ref: domain_ref, cycle_multiplier: cycle_multiplier}
             new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)
             {:cont, {:ok, %{acc_data | domains: new_domains}}}
 

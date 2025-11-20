@@ -246,18 +246,18 @@ defmodule EtherCAT.Nif do
       domain_ptr: usize,  // Store as usize to avoid C pointer in BEAM resource
       domain_name: beam.term,  // Domain name atom for routing (e.g., :default_domain)
       layout: DomainLayout,
-      interval: u32,  // Interval multiplier for cyclic task
+      cycle_multiplier: u32,  // Process domain every N master cycles (1 = every cycle, 200 = every 200th)
       data: []u8,       // Current cycle data (points to ecrt-managed memory)
       state: ecrt.ec_domain_state_t,  // Domain state for change detection
       mutex: std.Thread.Mutex,  // Protects current_value in entries
       cleaned_up: std.atomic.Value(bool),  // Atomic flag to prevent double-free
 
-      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, interval: u32) DomainAccessor {
+      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, cycle_multiplier: u32) DomainAccessor {
           return .{
               .domain_ptr = @intFromPtr(domain),
               .domain_name = domain_name,
               .layout = DomainLayout.init(),
-              .interval = interval,
+              .cycle_multiplier = cycle_multiplier,
               .data = &[_]u8{},       // Will be set in cyclic_task
               .state = std.mem.zeroes(ecrt.ec_domain_state_t),  // Initialize state
               .mutex = .{},

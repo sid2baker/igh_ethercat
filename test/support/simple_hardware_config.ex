@@ -12,10 +12,10 @@ defmodule SimpleHardwareConfig do
     (Output Ch1 → Input Ch1, Output Ch2 → Input Ch2, etc.)
 
   Domain Configuration:
-  - :fast domain (interval=1, 10ms cycle time)
+  - :fast domain (cycle_multiplier=1, every cycle = 10ms)
     - Input channels 1-8
     - Output channels 1-8
-  - :slow domain (interval=200, 2 second cycle time)
+  - :slow domain (cycle_multiplier=200, every 200 cycles = 2 seconds)
     - Input channels 9-16
     - Output channels 9-16
 
@@ -40,8 +40,8 @@ defmodule SimpleHardwareConfig do
         nif_yield_interval: 100_000
       },
       domains: [
-        %DomainConfig{name: :fast, interval: 1},
-        %DomainConfig{name: :slow, interval: 200}
+        %DomainConfig{name: :fast, cycle_multiplier: 1},
+        %DomainConfig{name: :slow, cycle_multiplier: 200}
       ],
       slaves: [
         # EK1100 - EtherCAT Coupler at position 0
