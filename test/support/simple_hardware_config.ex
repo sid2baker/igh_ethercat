@@ -12,7 +12,15 @@ defmodule SimpleHardwareConfig do
     (Output Ch1 → Input Ch1, Output Ch2 → Input Ch2, etc.)
   """
 
-  alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig}
+  alias EtherCAT.Config.{
+    HardwareConfig,
+    MasterConfig,
+    DomainConfig,
+    SlaveConfig,
+    SyncManagerConfig,
+    PdoConfig,
+    SdoConfig
+  }
 
   def hardware_config do
     %HardwareConfig{
@@ -29,28 +37,111 @@ defmodule SimpleHardwareConfig do
         %SlaveConfig{
           position: 0,
           name: :coupler,
+          device_identity: %{
+            vendor_id: 0x00000002,
+            product_code: 0x044C2C52,
+            revision_no: nil,
+            serial_no: nil
+          },
           driver: nil,
-          expected: %{vendor: 0x00000002, product: 0x044C2C52},
-          config: %{},
-          entries: []
+          config: %{
+            sync_managers: [],
+            sdos: []
+          },
+          registered_entries: %{}
         },
         # EL1809 - 16-channel digital input at position 1
         %SlaveConfig{
           position: 1,
           name: :digital_inputs,
+          device_identity: %{
+            vendor_id: 0x00000002,
+            product_code: 0x07113052,
+            revision_no: nil,
+            serial_no: nil
+          },
           driver: nil,
-          expected: %{vendor: 0x00000002, product: 0x07113052},
-          config: %{},
-          entries: []
+          config: %{
+            sdos: [],
+            sync_managers: [
+              %SyncManagerConfig{
+                index: 3,
+                direction: :input,
+                watchdog: :disable,
+                pdos:
+                  for ch <- 1..16 do
+                    %PdoConfig{
+                      index: 0x1A00 + (ch - 1),
+                      name: :"channel_#{ch}",
+                      entries: %{
+                        input: {0x6000 + (ch - 1) * 0x10, 0x01, 1}
+                      }
+                    }
+                  end
+              }
+            ]
+          },
+          registered_entries: %{
+            default_domain:
+              for ch <- 1..16 do
+                {:"channel_#{ch}", :input}
+              end
+          }
         },
         # EL2809 - 16-channel digital output at position 2
         %SlaveConfig{
           position: 2,
           name: :digital_outputs,
+          device_identity: %{
+            vendor_id: 0x00000002,
+            product_code: 0x0AF93052,
+            revision_no: nil,
+            serial_no: nil
+          },
           driver: nil,
-          expected: %{vendor: 0x00000002, product: 0x0AF93052},
-          config: %{},
-          entries: []
+          config: %{
+            sdos: [],
+            sync_managers: [
+              # First 8 channels in SM0
+              %SyncManagerConfig{
+                index: 0,
+                direction: :output,
+                watchdog: :enable,
+                pdos:
+                  for ch <- 1..8 do
+                    %PdoConfig{
+                      index: 0x1600 + (ch - 1),
+                      name: :"channel_#{ch}",
+                      entries: %{
+                        output: {0x7000 + (ch - 1) * 0x10, 0x01, 1}
+                      }
+                    }
+                  end
+              },
+              # Second 8 channels in SM1
+              %SyncManagerConfig{
+                index: 1,
+                direction: :output,
+                watchdog: :enable,
+                pdos:
+                  for ch <- 9..16 do
+                    %PdoConfig{
+                      index: 0x1600 + (ch - 1),
+                      name: :"channel_#{ch}",
+                      entries: %{
+                        output: {0x7000 + (ch - 1) * 0x10, 0x01, 1}
+                      }
+                    }
+                  end
+              }
+            ]
+          },
+          registered_entries: %{
+            default_domain:
+              for ch <- 1..16 do
+                {:"channel_#{ch}", :output}
+              end
+          }
         }
       ]
     }
