@@ -757,31 +757,6 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:error, :not_implemented}}]}
   end
 
-  def synced({:call, from}, {:subscribe, unique_name, subscriber_pid}, data) do
-    Process.monitor(subscriber_pid)
-
-    new_subscribers = Map.update(data.subscribers, unique_name, [subscriber_pid], &[subscriber_pid | &1])
-
-    {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
-  end
-
-  def synced({:call, from}, {:unsubscribe, unique_name, subscriber_pid}, data) do
-    new_subscribers =
-      case data.subscribers[unique_name] do
-        nil ->
-          data.subscribers
-
-        pids ->
-          updated = List.delete(pids, subscriber_pid)
-
-          if updated == [],
-            do: Map.delete(data.subscribers, unique_name),
-            else: Map.put(data.subscribers, unique_name, updated)
-      end
-
-    {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
-  end
-
   def synced(:info, {:DOWN, _ref, :process, pid, _reason}, data) do
     # Remove dead subscriber from all subscriptions
     new_subscribers =
