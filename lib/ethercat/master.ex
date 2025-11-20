@@ -98,8 +98,8 @@ defmodule EtherCAT.Master do
           # Map of position => %{pid, name, vendor, product, driver, slave_config}
           # slave_config: NIF SlaveConfigResource owned by Master
           slaves: %{non_neg_integer() => map()},
-          # Map of domain_name => %{ref, interval}
-          domains: %{atom() => %{ref: reference(), interval: pos_integer()}},
+          # Map of domain_name => %{ref, cycle_multiplier}
+          domains: %{atom() => %{ref: reference(), cycle_multiplier: pos_integer()}},
           # Map of unique_name => [subscriber_pids]
           subscribers: %{String.t() => [pid()]},
           # Map of unique_name => domain_name (for routing)
@@ -1288,6 +1288,12 @@ defmodule EtherCAT.Master do
         # Clear subscribers as system needs recovery
         Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to task crash")
 
+        # Reply to all pending writes with error and cancel their timers
+        Enum.each(data.pending_writes, fn {_key, %{from: from, timer_ref: timer_ref}} ->
+          :gen_statem.reply(from, {:error, :cyclic_task_crashed})
+          Process.cancel_timer(timer_ref)
+        end)
+
         # Reset state and transition to :stale
         new_data = %{
           data
@@ -1296,7 +1302,9 @@ defmodule EtherCAT.Master do
             domains: %{},
             subscribers: %{},
             last_slave_count: nil,
-            stability_timer_ref: nil
+            stability_timer_ref: nil,
+            cycle_interval_us: nil,
+            pending_writes: %{}
         }
 
         {:next_state, :stale, new_data}
@@ -1322,6 +1330,12 @@ defmodule EtherCAT.Master do
               "Clearing #{map_size(data.subscribers)} subscriber(s) due to slave crash"
             )
 
+            # Reply to all pending writes with error and cancel their timers
+            Enum.each(data.pending_writes, fn {_key, %{from: from, timer_ref: timer_ref}} ->
+              :gen_statem.reply(from, {:error, :slave_crashed})
+              Process.cancel_timer(timer_ref)
+            end)
+
             # Reset state and transition to :stale
             new_data = %{
               data
@@ -1330,7 +1344,9 @@ defmodule EtherCAT.Master do
                 domains: %{},
                 subscribers: %{},
                 last_slave_count: nil,
-                stability_timer_ref: nil
+                stability_timer_ref: nil,
+                cycle_interval_us: nil,
+                pending_writes: %{}
             }
 
             {:next_state, :stale, new_data}
