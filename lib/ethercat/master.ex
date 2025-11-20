@@ -708,11 +708,12 @@ defmodule EtherCAT.Master do
         case Nif.master_activate(data_with_registry.master_ref) do
           :ok ->
             domain_refs = data_with_registry.domains |> Map.values() |> Enum.map(& &1.ref)
+            master_pid = self()
 
             task_pid =
               spawn_link(fn ->
                 Nif.cyclic_task(
-                  self(),
+                  master_pid,
                   data_with_registry.master_ref,
                   domain_refs,
                   cycle_interval,
