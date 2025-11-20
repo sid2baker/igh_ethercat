@@ -978,14 +978,17 @@ defmodule EtherCAT.Master do
   # NIF sends: {:output_changed, domain_name, unique_name, value}
   def operational(:info, {:output_changed, domain_name, unique_name, _value}, data) do
     write_key = {domain_name, unique_name}
+    Logger.debug("Received :output_changed for #{inspect(write_key)}, pending_writes keys: #{inspect(Map.keys(data.pending_writes))}")
 
     case Map.get(data.pending_writes, write_key) do
       nil ->
         # No pending write for this entry, just ignore
+        Logger.debug("No pending write found for #{inspect(write_key)}")
         :keep_state_and_data
 
       %{from: from, timer_ref: timer_ref} ->
         # Reply to the waiting caller
+        Logger.debug("Found pending write for #{inspect(write_key)}, replying :ok to caller")
         :gen_statem.reply(from, :ok)
 
         # Cancel the timeout timer
