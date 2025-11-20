@@ -726,23 +726,22 @@ defmodule EtherCAT.Nif do
       const data_slice = accessor.data;
 
       if (data_slice.len > 0) {
-          // Domain initialized - write directly to domain buffer
-          // DO NOT update current_value here! The cyclic task needs to detect the difference
-          // between domain_value (from buffer) and current_value to send :output_changed
+          // Domain initialized - write to domain buffer
           write_bits_to_domain(data_slice, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
               std.log.err("set_value: Failed to write bits to domain: {}", .{err});
               return err;
           };
           std.log.debug("set_value: successfully wrote to domain buffer (confirmation pending)", .{});
       } else {
-          // Domain not yet initialized by cyclic task - update current_value
-          // The cyclic task will write it to the buffer when it starts
+          // Domain not yet initialized by cyclic task - will be written when it starts
           std.log.debug("set_value: domain not initialized yet, storing value for cyclic task", .{});
-
-          accessor.mutex.lock();
-          defer accessor.mutex.unlock();
-          accessor.layout.updateEntryValue(entry.bit_offset, value_data);
       }
+
+      // Always update current_value - this is the source of truth for outputs
+      // The cyclic task will write current_value to the buffer to ensure it's not overwritten by ecrt_domain_process
+      accessor.mutex.lock();
+      defer accessor.mutex.unlock();
+      accessor.layout.updateEntryValue(entry.bit_offset, value_data);
   }
 
   // ============================================================================
@@ -983,13 +982,13 @@ defmodule EtherCAT.Nif do
                           // Update stored value
                           entry.current_value = domain_value;
                       } else {
-                          // Output changed: buffer was already updated by set_value, just confirm
-                          // Update current_value to match the new buffer value
-                          entry.current_value = domain_value;
+                          // Output changed: write current_value to domain (ecrt_domain_process may have overwritten it)
+                          // and notify. current_value is the source of truth for outputs.
+                          try write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
 
                           const required_bytes = (entry.bit_length + 7) / 8;
                           std.log.debug("Sending :output_changed for '{s}' to master_pid", .{entry.name});
-                          _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, domain_value[0..required_bytes] }, .{});
+                          _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
                       }
                   }
               }
