@@ -3,7 +3,7 @@ defmodule EtherCAT.Config.HardwareConfig do
   Complete EtherCAT system hardware configuration.
 
   This struct represents the full declarative configuration of an EtherCAT system,
-  including master settings, domains, slaves, and entry routing.
+  including master settings, domains, and slaves with their PDO/SDO configurations.
   """
 
   alias EtherCAT.Config.{MasterConfig, DomainConfig, SlaveConfig}
@@ -40,14 +40,14 @@ defmodule EtherCAT.Config.HardwareConfig do
   - All referenced domains exist
   - No duplicate slave positions
   - No duplicate slave names
-  - All entry domain references are valid
+  - All registered_entries reference valid domains
   """
   @spec validate(t()) :: :ok | {:error, term()}
   def validate(%__MODULE__{} = config) do
     with :ok <- validate_master(config),
          :ok <- validate_domains(config),
          :ok <- validate_slaves(config),
-         :ok <- validate_entry_domains(config) do
+         :ok <- validate_registered_entry_domains(config) do
       :ok
     end
   end
@@ -85,21 +85,22 @@ defmodule EtherCAT.Config.HardwareConfig do
     end
   end
 
-  defp validate_entry_domains(%{domains: domains, slaves: slaves}) do
+  defp validate_registered_entry_domains(%{domains: domains, slaves: slaves}) do
     domain_names = MapSet.new(domains, & &1.name)
 
-    invalid_refs =
-      Enum.flat_map(slaves, fn slave ->
-        Enum.filter(slave.entries, fn entry ->
-          not MapSet.member?(domain_names, entry.domain)
-        end)
+    invalid_domains =
+      slaves
+      |> Enum.flat_map(fn slave ->
+        slave.registered_entries
+        |> Map.keys()
+        |> Enum.reject(&MapSet.member?(domain_names, &1))
       end)
+      |> Enum.uniq()
 
-    if Enum.empty?(invalid_refs) do
+    if Enum.empty?(invalid_domains) do
       :ok
     else
-      invalid_domains = Enum.map(invalid_refs, & &1.domain) |> Enum.uniq()
-      {:error, {:unknown_domains, invalid_domains}}
+      {:error, {:unknown_domains_in_registered_entries, invalid_domains}}
     end
   end
 end

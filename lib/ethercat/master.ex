@@ -40,13 +40,22 @@ defmodule EtherCAT.Master do
 
   ```elixir
   subscribers: %{
-    {domain_name, unique_name} => [pid, ...]
+    unique_name => [pid, ...]
   }
   ```
 
   Where:
-  - `domain_name` - Domain identifier (e.g., `:default_domain`)
   - `unique_name` - Full entry identifier (e.g., `"slave_0:pdo:entry"`)
+
+  ## Entry Registry
+
+  ```elixir
+  entry_registry: %{
+    unique_name => domain_name
+  }
+  ```
+
+  Maps unique entry names to their domains for routing read/write operations
 
   ## Hardware Diff Structure
 
@@ -71,6 +80,7 @@ defmodule EtherCAT.Master do
     :slaves,
     :domains,
     :subscribers,
+    :entry_registry,
     :task_pid,
     :scan_interval,
     :stability_timeout,
@@ -88,8 +98,10 @@ defmodule EtherCAT.Master do
           slaves: %{non_neg_integer() => map()},
           # Map of domain_name => %{ref, interval}
           domains: %{atom() => %{ref: reference(), interval: pos_integer()}},
-          # Map of {domain_name, unique_name} => [subscriber_pids]
-          subscribers: %{{atom(), String.t()} => [pid()]},
+          # Map of unique_name => [subscriber_pids]
+          subscribers: %{String.t() => [pid()]},
+          # Map of unique_name => domain_name (for routing)
+          entry_registry: %{String.t() => atom()},
           task_pid: pid() | nil,
           # Hardware check interval in milliseconds (for state_timeout)
           scan_interval: pos_integer(),
@@ -140,20 +152,20 @@ defmodule EtherCAT.Master do
     :gen_statem.call(master, :stop_cyclic)
   end
 
-  def read_pdo_entry(master \\ __MODULE__, domain_name, unique_name) do
-    :gen_statem.call(master, {:read_pdo_entry, domain_name, unique_name})
+  def read_pdo_entry(master \\ __MODULE__, unique_name) do
+    :gen_statem.call(master, {:read_pdo_entry, unique_name})
   end
 
-  def write_pdo_entry(master \\ __MODULE__, domain_name, unique_name, binary_data) do
-    :gen_statem.call(master, {:write_pdo_entry, domain_name, unique_name, binary_data})
+  def write_pdo_entry(master \\ __MODULE__, unique_name, binary_data) do
+    :gen_statem.call(master, {:write_pdo_entry, unique_name, binary_data})
   end
 
-  def subscribe(master \\ __MODULE__, domain_name, unique_name, subscriber_pid) do
-    :gen_statem.call(master, {:subscribe, domain_name, unique_name, subscriber_pid})
+  def subscribe(master \\ __MODULE__, unique_name, subscriber_pid) do
+    :gen_statem.call(master, {:subscribe, unique_name, subscriber_pid})
   end
 
-  def unsubscribe(master \\ __MODULE__, domain_name, unique_name, subscriber_pid) do
-    :gen_statem.call(master, {:unsubscribe, domain_name, unique_name, subscriber_pid})
+  def unsubscribe(master \\ __MODULE__, unique_name, subscriber_pid) do
+    :gen_statem.call(master, {:unsubscribe, unique_name, subscriber_pid})
   end
 
   def get_sync_manager(master \\ __MODULE__, position, sync_index) do
@@ -355,6 +367,7 @@ defmodule EtherCAT.Master do
           slaves: %{},
           domains: %{},
           subscribers: %{},
+          entry_registry: %{},
           task_pid: nil,
           scan_interval: scan_interval,
           stability_timeout: stability_timeout,

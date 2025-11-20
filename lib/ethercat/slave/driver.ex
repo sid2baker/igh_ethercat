@@ -3,127 +3,87 @@ defmodule EtherCAT.Slave.Driver do
   Behaviour for EtherCAT slave drivers.
 
   This module defines the contract that all EtherCAT slave drivers must implement
-  and provides shared helper functions for common operations.
+  and provides shared helper functions for type-based encoding/decoding.
 
-  ## Default Driver
+  ## Driver Responsibilities
+
+  1. **SDO Configuration** - Return list of SDOs to configure before PDO activation
+  2. **PDO Configuration** - Return sync manager/PDO structure for hardware setup
+  3. **Value Encoding** - Convert Elixir values to binary for writing to hardware
+  4. **Value Decoding** - Convert binary from hardware to Elixir values
+
+  ## GenericDriver (Default)
 
   When `driver: nil` is specified in SlaveConfig, `EtherCAT.Slave.GenericDriver` is used
-  with auto-discovery and type-based encoding.
+  with type-based encoding inferred from bit lengths.
 
-  ## Custom Encoding (Strategy Pattern)
+  ## Custom Drivers
 
-  For simple customization (custom encoding/decoding only), use GenericDriver with a callback module:
-
-      defmodule MyTempEncoder do
-        @behaviour EtherCAT.Slave.Driver
-
-        alias EtherCAT.Slave.Driver
-
-        def encode_pdo_value(:temp, :value, celsius, _state) do
-          {:ok, <<round(celsius * 10)::little-signed-16>>}
-        end
-
-        def encode_pdo_value(pdo, entry, value, state) do
-          Driver.default_encode(pdo, entry, value, state)
-        end
-
-        def decode_pdo_value(:temp, :value, <<raw::little-signed-16>>, _state) do
-          {:ok, raw / 10.0}
-        end
-
-        def decode_pdo_value(pdo, entry, binary, state) do
-          Driver.default_decode(pdo, entry, binary, state)
-        end
-      end
-
-      # In SlaveConfig:
-      %SlaveConfig{
-        position: 1,
-        driver: {EtherCAT.Slave.GenericDriver, callback_module: MyTempEncoder},
-        ...
-      }
-
-  ## Complex Drivers (Full GenServer Control)
-
-  For complex drivers that need custom state machines (like CIA 402), implement a full GenServer:
+  For devices requiring custom logic (e.g., CIA 402 motor controllers):
 
       defmodule MyCIA402Driver do
         use GenServer
         @behaviour EtherCAT.Slave.Driver
 
-        alias EtherCAT.Slave.Driver
-
-        defstruct [
-          :master, :position, :name, :pdo_map,  # Keep for default encoding
-          :state_machine, :target_position      # Custom fields
-        ]
+        defstruct [:master, :name, :sync_managers, :sdos, :state_machine]
 
         def start_link(opts) do
           GenServer.start_link(__MODULE__, opts)
         end
 
         def init(opts) do
-          # Use helper to build base state
-          {:ok, base_state} = Driver.build_default_state(__MODULE__, opts)
+          config = opts[:config]
 
           state = %__MODULE__{
-            master: base_state.master,
-            position: base_state.position,
-            name: base_state.name,
-            pdo_map: base_state.pdo_map,
-            state_machine: :not_ready_to_switch_on,
-            target_position: 0
+            master: opts[:master],
+            name: opts[:name],
+            sync_managers: config[:sync_managers] || [],
+            sdos: config[:sdos] || [],
+            state_machine: :not_ready_to_switch_on
           }
 
           {:ok, state}
         end
 
-        def handle_call({:move_to, position}, _from, state) do
-          # Custom motion control commands
-          {:reply, :ok, %{state | target_position: position}}
+        def get_sdo_config(pid) do
+          GenServer.call(pid, :get_sdo_config)
         end
 
-        def handle_call({:write, pdo, entry, value}, _from, state) do
-          # Can use standard write logic with custom encoding
-          with {:ok, binary} <- encode_pdo_value(pdo, entry, value, state),
-               :ok <- EtherCAT.Master.write_pdo_entry(state.master, :default_domain,
-                                                      "\#{state.name}:\#{pdo}:\#{entry}", binary) do
-            {:reply, :ok, state}
-          else
-            error -> {:reply, error, state}
-          end
+        def get_pdo_config(pid) do
+          GenServer.call(pid, :get_pdo_config)
         end
 
-        def encode_pdo_value(:control_word, :value, value, state) do
-          # CIA 402 specific control word based on state machine
-          control_word = calculate_control_word(state.state_machine, value)
+        def handle_call(:get_sdo_config, _from, state) do
+          {:reply, state.sdos, state}
+        end
+
+        def handle_call(:get_pdo_config, _from, state) do
+          {:reply, state.sync_managers, state}
+        end
+
+        # Custom encode/decode with state machine logic
+        def encode_pdo_value(:control_word, :value, command, state) do
+          # CIA 402 specific control word calculation
+          control_word = calculate_control_word(state.state_machine, command)
           {:ok, <<control_word::little-unsigned-16>>}
         end
 
         def encode_pdo_value(pdo, entry, value, state) do
-          # Fallback to default for other PDOs
-          Driver.default_encode(pdo, entry, value, state)
+          # Fallback to type-based encoding
+          type = find_type(state.sync_managers, pdo, entry)
+          EtherCAT.Slave.Driver.encode_by_type(type, value)
         end
 
         def decode_pdo_value(pdo, entry, binary, state) do
-          Driver.default_decode(pdo, entry, binary, state)
-        end
-
-        defp calculate_control_word(state_machine, value) do
-          # CIA 402 state machine logic
-          # ...
+          type = find_type(state.sync_managers, pdo, entry)
+          EtherCAT.Slave.Driver.decode_by_type(type, binary)
         end
       end
-
-      # In SlaveConfig:
-      %SlaveConfig{
-        position: 1,
-        driver: MyCIA402Driver,
-        ...
-      }
   """
 
   require Logger
+
+  alias EtherCAT.Config.{SyncManagerConfig, SdoConfig}
 
   # ========================================================================
   # Behaviour Definition
@@ -136,13 +96,55 @@ defmodule EtherCAT.Slave.Driver do
   @type entry_name :: atom() | String.t()
 
   @doc """
+  Get SDO configuration for this slave.
+
+  Returns a list of SDO writes to perform before PDO configuration.
+  SDOs are applied in order during slave setup.
+
+  ## Returns
+  - `[SdoConfig.t()]` - List of SDO configurations
+
+  ## Example
+
+      def get_sdo_config(_pid) do
+        [
+          %SdoConfig{index: 0x8000, subindex: 0x01, data: <<0xFF>>},
+          %SdoConfig{index: 0x8001, subindex: 0x02, data: <<100::little-unsigned-16>>}
+        ]
+      end
+  """
+  @callback get_sdo_config(pid()) :: [SdoConfig.t()]
+
+  @doc """
+  Get PDO configuration for this slave.
+
+  Returns the sync manager structure defining PDO layout.
+  This is used by Master to configure the slave's PDO assignments and mappings.
+
+  ## Returns
+  - `[SyncManagerConfig.t()]` - List of sync manager configurations
+
+  ## Example
+
+      def get_pdo_config(pid) do
+        GenServer.call(pid, :get_pdo_config)
+      end
+
+      # In handle_call
+      def handle_call(:get_pdo_config, _from, state) do
+        {:reply, state.sync_managers, state}
+      end
+  """
+  @callback get_pdo_config(pid()) :: [SyncManagerConfig.t()]
+
+  @doc """
   Encode a PDO value to binary.
 
   ## Parameters
   - `pdo_name` - PDO identifier (e.g., `:ch1`)
   - `entry_name` - Entry identifier (e.g., `:value`)
   - `value` - Value to encode
-  - `state` - Driver state (for type lookup)
+  - `state` - Driver state (for type lookup or custom logic)
 
   ## Returns
   - `{:ok, binary}` on success
@@ -158,7 +160,7 @@ defmodule EtherCAT.Slave.Driver do
   - `pdo_name` - PDO identifier (e.g., `:ch1`)
   - `entry_name` - Entry identifier (e.g., `:value`)
   - `binary` - Raw binary data from hardware
-  - `state` - Driver state (for type lookup)
+  - `state` - Driver state (for type lookup or custom logic)
 
   ## Returns
   - `{:ok, value}` on success
@@ -172,136 +174,11 @@ defmodule EtherCAT.Slave.Driver do
   # ========================================================================
 
   @doc """
-  Build default state structure for a driver module.
-
-  This helper is used by GenericDriver and can be used by custom drivers
-  to build their initial state with auto-discovered PDO mappings.
-
-  Only sets common fields that all drivers need. Custom drivers can extend
-  the returned state with their own fields.
-  """
-  def build_default_state(module, opts) do
-    position = Keyword.fetch!(opts, :position)
-    name = Keyword.fetch!(opts, :name)
-    eeprom_data = Keyword.fetch!(opts, :eeprom_data)
-
-    # Auto-discover PDO mappings from EEPROM
-    pdo_map = process_eeprom_data(eeprom_data, position)
-
-    # Build field list - only common fields that all drivers have
-    fields = [
-      master: Keyword.fetch!(opts, :master),
-      position: position,
-      name: name,
-      pdo_map: pdo_map
-    ]
-
-    # Add optional callback_module if the struct has that field (GenericDriver only)
-    fields =
-      if :callback_module in Map.keys(struct(module)) do
-        Keyword.put(fields, :callback_module, Keyword.get(opts, :callback_module))
-      else
-        fields
-      end
-
-    state = struct!(module, fields)
-
-    Logger.info("Driver started for slave #{position} (#{name}) with #{map_size(pdo_map)} PDOs")
-
-    {:ok, state}
-  end
-
-  @doc """
-  Default encode implementation using type-based encoding.
-
-  This function infers the type from bit length and encodes accordingly.
-  Can be called by custom drivers as a fallback for PDOs they don't handle specially.
-  """
-  def default_encode(pdo_name, entry_name, value, %{pdo_map: pdo_map}) do
-    type = get_entry_type(pdo_map, pdo_name, entry_name)
-    encode_by_type(type, value)
-  end
-
-  @doc """
-  Default decode implementation using type-based decoding.
-
-  This function infers the type from bit length and decodes accordingly.
-  Can be called by custom drivers as a fallback for PDOs they don't handle specially.
-  """
-  def default_decode(pdo_name, entry_name, binary, %{pdo_map: pdo_map}) do
-    type = get_entry_type(pdo_map, pdo_name, entry_name)
-    decode_by_type(type, binary)
-  end
-
-  @doc false
-  def process_eeprom_data(eeprom_data, _position) do
-    eeprom_data
-    |> Enum.flat_map(fn {_sync_index, sync_data} ->
-      sync_manager = sync_data.sync_manager
-      pdos = sync_data.pdos || %{}
-
-      Enum.map(pdos, fn {_pdo_pos, pdo_data} ->
-        pdo = pdo_data.pdo
-        entries = pdo_data.entries || %{}
-
-        pdo_name = "0x#{Integer.to_string(pdo.index, 16) |> String.downcase()}"
-        direction = normalize_direction(sync_manager.dir)
-        watchdog_mode = normalize_watchdog_mode(sync_manager.watchdog_mode)
-
-        entry_map =
-          Enum.map(entries, fn {_entry_pos, entry} ->
-            index_hex = Integer.to_string(entry.index, 16) |> String.downcase()
-            entry_name = "0x#{index_hex}:#{entry.subindex}"
-            {entry_name, {entry.index, entry.subindex, entry.bit_length}}
-          end)
-          |> Map.new()
-
-        {pdo_name,
-         %{
-           sync_manager: {sync_manager.index, direction, watchdog_mode},
-           pdo_index: pdo.index,
-           entries: entry_map
-         }}
-      end)
-    end)
-    |> Map.new()
-  end
-
-  @doc false
-  def convert_pdo_config(pdo_map) do
-    Enum.map(pdo_map, fn {pdo_name, pdo_info} ->
-      %{
-        name: safe_to_atom(pdo_name),
-        sync_manager: pdo_info.sync_manager,
-        pdo_index: pdo_info.pdo_index,
-        entries:
-          Map.new(pdo_info.entries, fn {entry_name, {index, subindex, bit_length}} ->
-            type = infer_type_from_bit_length(bit_length)
-            {safe_to_atom(entry_name), {type, index, subindex, bit_length}}
-          end),
-        domain: :default_domain,
-        # Fixed EEPROM PDO mappings - do not allow dynamic reconfiguration
-        supports_pdo_config?: false
-      }
-    end)
-  end
-
-  @doc false
-  def get_entry_type(pdo_map, pdo_name, entry_name) do
-    pdo_name_str = to_string(pdo_name)
-    entry_name_str = to_string(entry_name)
-
-    with {:ok, pdo_info} <- Map.fetch(pdo_map, pdo_name_str),
-         {:ok, {_index, _subindex, bit_length}} <- Map.fetch(pdo_info.entries, entry_name_str) do
-      infer_type_from_bit_length(bit_length)
-    else
-      _ -> :uint16
-    end
-  end
-
-  @doc """
   Infer type from bit length for entries without explicit type annotation.
+
+  Used by drivers to determine encoding/decoding type from PDO entry bit lengths.
   """
+  @spec infer_type_from_bit_length(pos_integer()) :: atom()
   def infer_type_from_bit_length(1), do: :bool
   def infer_type_from_bit_length(size) when size >= 2 and size < 8, do: :uint8
   def infer_type_from_bit_length(8), do: :uint8
@@ -314,7 +191,10 @@ defmodule EtherCAT.Slave.Driver do
   # Type-Based Encoding/Decoding
   # ========================================================================
 
-  @doc false
+  @doc """
+  Encode value by type using standard EtherCAT binary formats.
+  """
+  @spec encode_by_type(atom(), term()) :: {:ok, binary()} | {:error, term()}
   def encode_by_type(:bool, value) when is_boolean(value) do
     {:ok, <<if(value, do: 1, else: 0)>>}
   end
@@ -356,7 +236,10 @@ defmodule EtherCAT.Slave.Driver do
     {:error, {:invalid_value_for_type, value, type}}
   end
 
-  @doc false
+  @doc """
+  Decode binary by type using standard EtherCAT binary formats.
+  """
+  @spec decode_by_type(atom(), binary()) :: {:ok, term()} | {:error, term()}
   def decode_by_type(:bool, <<value>>) do
     {:ok, value != 0}
   end
@@ -396,30 +279,4 @@ defmodule EtherCAT.Slave.Driver do
   def decode_by_type(type, data) do
     {:error, {:invalid_data_for_type, byte_size(data), type}}
   end
-
-  # ========================================================================
-  # Private Helpers
-  # ========================================================================
-
-  # SECURITY: Safely convert string to atom, only if it already exists
-  defp safe_to_atom(string) when is_binary(string) do
-    try do
-      String.to_existing_atom(string)
-    rescue
-      ArgumentError ->
-        # Atom doesn't exist - use string instead to prevent atom creation
-        string
-    end
-  end
-
-  defp safe_to_atom(value), do: value
-
-  defp normalize_direction(0), do: :invalid
-  defp normalize_direction(1), do: :output
-  defp normalize_direction(2), do: :input
-  defp normalize_direction(3), do: :count
-
-  defp normalize_watchdog_mode(0), do: :default
-  defp normalize_watchdog_mode(1), do: :enabled
-  defp normalize_watchdog_mode(2), do: :disabled
 end
