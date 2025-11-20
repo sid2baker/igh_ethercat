@@ -919,9 +919,15 @@ defmodule EtherCAT.Nif do
           // 2. Receive frames from network (contains slave responses with input data)
           _ = ecrt.ecrt_master_receive(master);
 
-          // 3. Process domains
+          // 3. Process domains (respecting cycle_multiplier configuration)
           for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
+
+              // Only process this domain if we're at a cycle_multiplier boundary
+              if (counter % accessor.cycle_multiplier != 0) {
+                  continue;
+              }
+
               var new_state: ecrt.ec_domain_state_t = undefined;
 
               // Process domain data (updates buffer from received frame)
@@ -996,11 +1002,14 @@ defmodule EtherCAT.Nif do
 
           prev_master_state = master_state;
 
-          // Step 5: Queue domain outputs every cycle
-          // (accessor.interval is in microseconds but not used for queueing frequency)
+          // Step 5: Queue domain outputs (respecting cycle_multiplier configuration)
           for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
-              _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+
+              // Only queue this domain if we're at a cycle_multiplier boundary
+              if (counter % accessor.cycle_multiplier == 0) {
+                  _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
+              }
           }
 
           // Step 6: Send queued frames to network
