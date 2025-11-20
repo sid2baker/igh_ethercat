@@ -63,8 +63,9 @@ defmodule EtherCAT.Config.SdoConfig do
   defp validate_index(index) when is_integer(index) and index >= 0 and index <= 0xFFFF, do: :ok
   defp validate_index(_), do: {:error, :invalid_sdo_index}
 
-  defp validate_subindex(subindex) when is_integer(subindex) and subindex >= 0 and subindex <= 0xFF,
-    do: :ok
+  defp validate_subindex(subindex)
+       when is_integer(subindex) and subindex >= 0 and subindex <= 0xFF,
+       do: :ok
 
   defp validate_subindex(_), do: {:error, :invalid_sdo_subindex}
 

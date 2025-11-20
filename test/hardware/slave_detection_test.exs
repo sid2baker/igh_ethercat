@@ -20,7 +20,10 @@ defmodule Hardware.SlaveDetectionTest do
   describe "System Initialization" do
     test "successfully configures EtherCAT hardware" do
       master = Process.whereis(EtherCAT.Master)
-      assert {:ok, slaves} = EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
+
+      assert {:ok, slaves} =
+               EtherCAT.configure_hardware(master, TestHardwareConfig.hardware_config())
+
       assert is_map(slaves)
       assert map_size(slaves) > 0
     end

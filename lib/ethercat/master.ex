@@ -579,8 +579,7 @@ defmodule EtherCAT.Master do
         stability_timer_ref: nil
     }
 
-    {:keep_state, new_data,
-     [{:reply, from, :ok}, {:next_event, :internal, :check_hardware}]}
+    {:keep_state, new_data, [{:reply, from, :ok}, {:next_event, :internal, :check_hardware}]}
   end
 
   def stale({:call, from}, _event, _data) do
@@ -615,7 +614,9 @@ defmodule EtherCAT.Master do
           stop_all_slave_drivers(data)
 
           # Clear subscribers as PDO entries will be re-registered
-          Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to hardware change")
+          Logger.debug(
+            "Clearing #{map_size(data.subscribers)} subscriber(s) due to hardware change"
+          )
 
           # Reset state and transition to :stale
           new_data = %{
@@ -634,13 +635,17 @@ defmodule EtherCAT.Master do
         end
 
       {:error, reason} ->
-        Logger.error("Failed to monitor hardware: #{inspect(reason)}, cleaning up and transitioning to :offline")
+        Logger.error(
+          "Failed to monitor hardware: #{inspect(reason)}, cleaning up and transitioning to :offline"
+        )
 
         # Stop all slave drivers
         stop_all_slave_drivers(data)
 
         # Clear subscribers
-        Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure")
+        Logger.debug(
+          "Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure"
+        )
 
         # Reset state and transition to :offline
         new_data = %{
@@ -880,7 +885,8 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, {:subscribe, unique_name, subscriber_pid}, data) do
     Process.monitor(subscriber_pid)
 
-    new_subscribers = Map.update(data.subscribers, unique_name, [subscriber_pid], &[subscriber_pid | &1])
+    new_subscribers =
+      Map.update(data.subscribers, unique_name, [subscriber_pid], &[subscriber_pid | &1])
 
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
   end
@@ -1023,7 +1029,6 @@ defmodule EtherCAT.Master do
     end)
   end
 
-
   defp configure_all_slaves(data) do
     Enum.reduce_while(data.slaves, {:ok, data}, fn {position, slave_info}, {:ok, acc_data} ->
       case configure_single_slave(acc_data, position, slave_info) do
@@ -1045,7 +1050,8 @@ defmodule EtherCAT.Master do
          :ok <- apply_sdos(slave_config_nif, position, sdos),
          sync_managers <- driver_module.get_pdo_config(slave_pid),
          :ok <- configure_pdos(slave_config_nif, position, sync_managers),
-         {:ok, new_data} <- register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
+         {:ok, new_data} <-
+           register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
       {:ok, new_data}
     end
   end
@@ -1185,7 +1191,9 @@ defmodule EtherCAT.Master do
   defp handle_exit(pid, reason, data) do
     cond do
       pid == data.task_pid ->
-        Logger.error("Cyclic task crashed: #{inspect(reason)}, transitioning to :stale for recovery")
+        Logger.error(
+          "Cyclic task crashed: #{inspect(reason)}, transitioning to :stale for recovery"
+        )
 
         # Stop all slave drivers
         stop_all_slave_drivers(data)
@@ -1210,7 +1218,9 @@ defmodule EtherCAT.Master do
         # Check if it's a slave
         case Enum.find(data.slaves, fn {_pos, info} -> info.pid == pid end) do
           {position, _info} ->
-            Logger.warning("Slave #{position} exited: #{inspect(reason)}, transitioning to :stale")
+            Logger.warning(
+              "Slave #{position} exited: #{inspect(reason)}, transitioning to :stale"
+            )
 
             # Stop remaining slave drivers
             stop_all_slave_drivers(data)
@@ -1221,7 +1231,9 @@ defmodule EtherCAT.Master do
             end
 
             # Clear subscribers as slave drivers are being restarted
-            Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to slave crash")
+            Logger.debug(
+              "Clearing #{map_size(data.subscribers)} subscriber(s) due to slave crash"
+            )
 
             # Reset state and transition to :stale
             new_data = %{
