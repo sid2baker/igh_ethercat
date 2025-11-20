@@ -757,20 +757,17 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:error, :not_implemented}}]}
   end
 
-  def synced({:call, from}, {:subscribe, domain_name, unique_name, subscriber_pid}, data) do
+  def synced({:call, from}, {:subscribe, unique_name, subscriber_pid}, data) do
     Process.monitor(subscriber_pid)
 
-    key = {domain_name, unique_name}
-    new_subscribers = Map.update(data.subscribers, key, [subscriber_pid], &[subscriber_pid | &1])
+    new_subscribers = Map.update(data.subscribers, unique_name, [subscriber_pid], &[subscriber_pid | &1])
 
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
   end
 
-  def synced({:call, from}, {:unsubscribe, domain_name, unique_name, subscriber_pid}, data) do
-    key = {domain_name, unique_name}
-
+  def synced({:call, from}, {:unsubscribe, unique_name, subscriber_pid}, data) do
     new_subscribers =
-      case data.subscribers[key] do
+      case data.subscribers[unique_name] do
         nil ->
           data.subscribers
 
@@ -778,8 +775,8 @@ defmodule EtherCAT.Master do
           updated = List.delete(pids, subscriber_pid)
 
           if updated == [],
-            do: Map.delete(data.subscribers, key),
-            else: Map.put(data.subscribers, key, updated)
+            do: Map.delete(data.subscribers, unique_name),
+            else: Map.put(data.subscribers, unique_name, updated)
       end
 
     {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
@@ -855,12 +852,14 @@ defmodule EtherCAT.Master do
     {:next_state, :stale, new_data, [{:reply, from, :ok}]}
   end
 
-  def operational({:call, from}, {:read_pdo_entry, domain_name, unique_name}, data) do
-    case get_in(data.domains, [domain_name, :ref]) do
+  def operational({:call, from}, {:read_pdo_entry, unique_name}, data) do
+    case data.entry_registry[unique_name] do
       nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+        {:keep_state_and_data, [{:reply, from, {:error, :entry_not_registered}}]}
 
-      domain_ref ->
+      domain_name ->
+        domain_ref = data.domains[domain_name].ref
+
         result =
           case Nif.get_value(domain_ref, unique_name) do
             {:error, _} = error -> error
@@ -871,12 +870,13 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational({:call, from}, {:write_pdo_entry, domain_name, unique_name, binary_data}, data) do
-    case get_in(data.domains, [domain_name, :ref]) do
+  def operational({:call, from}, {:write_pdo_entry, unique_name, binary_data}, data) do
+    case data.entry_registry[unique_name] do
       nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :domain_not_found}}]}
+        {:keep_state_and_data, [{:reply, from, {:error, :entry_not_registered}}]}
 
-      domain_ref ->
+      domain_name ->
+        domain_ref = data.domains[domain_name].ref
         result = Nif.set_value(domain_ref, unique_name, binary_data)
         {:keep_state_and_data, [{:reply, from, result}]}
     end
@@ -904,16 +904,14 @@ defmodule EtherCAT.Master do
   # Handle data change notifications from NIF
   # NIF sends: {:data_changed, domain_name, unique_name, value}
   # Where unique_name = "slave_name:pdo_name:entry_name"
-  def operational(:info, {:data_changed, domain_name, unique_name, value}, data) do
-    key = {domain_name, unique_name}
-
-    case data.subscribers[key] do
+  def operational(:info, {:data_changed, _domain_name, unique_name, value}, data) do
+    case data.subscribers[unique_name] do
       nil ->
         :keep_state_and_data
 
       pids ->
         Enum.each(pids, fn pid ->
-          send(pid, {:pdo_value_changed, domain_name, unique_name, value})
+          send(pid, {:pdo_value_changed, unique_name, value})
         end)
 
         :keep_state_and_data
@@ -1022,96 +1020,6 @@ defmodule EtherCAT.Master do
     end)
   end
 
-  # Parse driver configuration
-  # Returns {driver_module, driver_opts}
-  # Supports:
-  #   - nil -> {GenericDriver, []}
-  #   - Module -> {Module, []}
-  #   - {Module, opts} -> {Module, opts}
-  defp parse_driver_config(nil), do: {EtherCAT.Slave.GenericDriver, []}
-  defp parse_driver_config({module, opts}) when is_atom(module) and is_list(opts), do: {module, opts}
-  defp parse_driver_config(module) when is_atom(module), do: {module, []}
-
-  # Read all EEPROM data for a slave (sync managers, PDOs, entries)
-  # This is done by Master to avoid circular dependency with drivers
-  defp read_slave_eeprom_data(master_ref, position, sync_count) do
-    try do
-      sync_results =
-        if sync_count > 0 do
-          for sync_index <- 0..(sync_count - 1) do
-            case Nif.master_get_sync_manager(master_ref, position, sync_index) do
-              sync_manager when is_map(sync_manager) ->
-                pdos =
-                  read_sync_manager_pdos(master_ref, position, sync_index, sync_manager.n_pdos)
-
-                {sync_index, %{sync_manager: sync_manager, pdos: pdos}}
-
-              error ->
-                Logger.warning(
-                  "Failed to get sync manager #{sync_index} for slave #{position}: #{inspect(error)}"
-                )
-
-                nil
-            end
-          end
-          |> Enum.reject(&is_nil/1)
-          |> Map.new()
-        else
-          %{}
-        end
-
-      {:ok, sync_results}
-    rescue
-      error ->
-        Logger.error("Failed to read EEPROM data for slave #{position}: #{inspect(error)}")
-        {:error, error}
-    end
-  end
-
-  defp read_sync_manager_pdos(master_ref, position, sync_index, n_pdos) do
-    if n_pdos > 0 do
-      for pdo_pos <- 0..(n_pdos - 1) do
-        case Nif.master_get_pdo(master_ref, position, sync_index, pdo_pos) do
-          pdo when is_map(pdo) ->
-            entries = read_pdo_entries(master_ref, position, sync_index, pdo_pos, pdo.n_entries)
-            {pdo_pos, %{pdo: pdo, entries: entries}}
-
-          error ->
-            Logger.warning(
-              "Failed to get PDO #{pdo_pos} for sync #{sync_index} on slave #{position}: #{inspect(error)}"
-            )
-
-            nil
-        end
-      end
-      |> Enum.reject(&is_nil/1)
-      |> Map.new()
-    else
-      %{}
-    end
-  end
-
-  defp read_pdo_entries(master_ref, position, sync_index, pdo_pos, n_entries) do
-    if n_entries > 0 do
-      for entry_pos <- 0..(n_entries - 1) do
-        case Nif.master_get_pdo_entry(master_ref, position, sync_index, pdo_pos, entry_pos) do
-          entry when is_map(entry) ->
-            {entry_pos, entry}
-
-          error ->
-            Logger.warning(
-              "Failed to get PDO entry #{entry_pos} for slave #{position}: #{inspect(error)}"
-            )
-
-            nil
-        end
-      end
-      |> Enum.reject(&is_nil/1)
-      |> Map.new()
-    else
-      %{}
-    end
-  end
 
   defp configure_all_slaves(data) do
     Enum.reduce_while(data.slaves, {:ok, data}, fn {position, slave_info}, {:ok, acc_data} ->
@@ -1422,20 +1330,13 @@ defmodule EtherCAT.Master do
              slave_info.vendor_id,
              slave_info.product_code
            ),
-         {:ok, eeprom_data} <-
-           read_slave_eeprom_data(data.master_ref, position, slave_info.sync_count),
-         {driver_module, driver_opts} = parse_driver_config(slave_config.driver),
+         driver_module = slave_config.driver || EtherCAT.Slave.GenericDriver,
          {:ok, pid} <-
            driver_module.start_link(
-             Keyword.merge(
-               [
-                 master: self(),
-                 position: position,
-                 name: slave_config.name,
-                 eeprom_data: eeprom_data
-               ],
-               driver_opts
-             )
+             master: self(),
+             position: position,
+             name: slave_config.name,
+             config: slave_config.config
            ) do
       {:ok,
        %{
