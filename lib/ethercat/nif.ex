@@ -245,7 +245,6 @@ defmodule EtherCAT.Nif do
   pub const DomainAccessor = struct {
       domain_ptr: usize,  // Store as usize to avoid C pointer in BEAM resource
       domain_name: beam.term,  // Domain name atom for routing (e.g., :default_domain)
-      master_pid: beam.pid,  // Master process PID for sending notifications
       layout: DomainLayout,
       cycle_multiplier: u32,  // Process domain every N master cycles (1 = every cycle, 200 = every 200th)
       data: []u8,       // Current cycle data (points to ecrt-managed memory)
@@ -253,11 +252,10 @@ defmodule EtherCAT.Nif do
       mutex: std.Thread.Mutex,  // Protects current_value in entries
       cleaned_up: std.atomic.Value(bool),  // Atomic flag to prevent double-free
 
-      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, master_pid: beam.pid, cycle_multiplier: u32) DomainAccessor {
+      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, cycle_multiplier: u32) DomainAccessor {
           return .{
               .domain_ptr = @intFromPtr(domain),
               .domain_name = domain_name,
-              .master_pid = master_pid,
               .layout = DomainLayout.init(),
               .cycle_multiplier = cycle_multiplier,
               .data = &[_]u8{},       // Will be set in cyclic_task
@@ -430,7 +428,7 @@ defmodule EtherCAT.Nif do
   /// Create a new domain accessor with layout tracking
   /// Domains are used to group PDO registrations for efficient I/O
   /// Returns {:ok, domain_accessor_resource} | {:error, reason}
-  pub fn master_create_domain(master: MasterResource, domain_name: beam.term, master_pid: beam.pid, interval: u32) beam.term {
+  pub fn master_create_domain(master: MasterResource, domain_name: beam.term, interval: u32) beam.term {
       const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse {
           return beam.make_error_pair(.domain_creation_failed, .{});
       };
@@ -438,7 +436,7 @@ defmodule EtherCAT.Nif do
       const accessor = beam.allocator.create(DomainAccessor) catch {
           return beam.make_error_pair(.out_of_memory, .{});
       };
-      accessor.* = DomainAccessor.init(domain, domain_name, master_pid, interval);
+      accessor.* = DomainAccessor.init(domain, domain_name, interval);
 
       const resource = DomainAccessorResource.create(accessor, .{}) catch {
           beam.allocator.destroy(accessor);
@@ -721,7 +719,7 @@ defmodule EtherCAT.Nif do
   /// Set a value - directly updates the entry's expected value from binary data
   /// The cyclic task will write this value to the domain buffer every cycle
   /// Encoding is handled by driver on Elixir side, this just stores the raw binary
-  pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, value: beam.term) !void {
+  pub fn set_value(domain_accessor: DomainAccessorResource, master_pid: beam.pid, name: []const u8, value: beam.term) !void {
       const accessor = domain_accessor.unpack();
       const entry = accessor.layout.findEntry(name) orelse
           return DomainError.InvalidOffset;
@@ -769,7 +767,7 @@ defmodule EtherCAT.Nif do
       if (already_matches) {
           // Value already matches - send immediate confirmation
           std.log.debug("set_value: value already matches domain, sending immediate confirmation", .{});
-          _ = beam.send(accessor.master_pid, .{ .output_changed, accessor.domain_name, entry.name, binary }, .{}) catch |err| {
+          _ = beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, binary }, .{}) catch |err| {
               std.log.err("set_value: failed to send immediate confirmation: {}", .{err});
           };
       } else {

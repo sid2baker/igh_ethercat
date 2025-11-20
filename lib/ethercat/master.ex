@@ -888,7 +888,7 @@ defmodule EtherCAT.Master do
             # No pending write, proceed with NIF call
             domain_ref = data.domains[domain_name].ref
 
-            case Nif.set_value(domain_ref, unique_name, binary_data) do
+            case Nif.set_value(domain_ref, self(), unique_name, binary_data) do
               :ok ->
                 # Calculate timeout: max(2 * cycle_multiplier * cycle_interval_us / 1_000_000, 1.0) seconds
                 domain_info = data.domains[domain_name]
@@ -1383,7 +1383,7 @@ defmodule EtherCAT.Master do
         # Pass cycle_multiplier directly to NIF (no conversion needed)
         cycle_multiplier = domain_config.cycle_multiplier
 
-        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, self(), cycle_multiplier) do
+        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, cycle_multiplier) do
           {:ok, domain_ref} ->
             domain_info = %{ref: domain_ref, cycle_multiplier: cycle_multiplier}
             new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)
