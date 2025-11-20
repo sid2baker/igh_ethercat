@@ -87,7 +87,9 @@ defmodule EtherCAT.Master do
     :hardware_config,
     :hardware_diff,
     :last_slave_count,
-    :stability_timer_ref
+    :stability_timer_ref,
+    :cycle_interval_us,
+    :pending_writes
   ]
 
   @type t :: %__MODULE__{
@@ -114,7 +116,11 @@ defmodule EtherCAT.Master do
           # Last observed slave count (for change detection)
           last_slave_count: non_neg_integer() | nil,
           # Timer reference for stability monitoring
-          stability_timer_ref: reference() | nil
+          stability_timer_ref: reference() | nil,
+          # Master cycle interval in microseconds (set when operational)
+          cycle_interval_us: pos_integer() | nil,
+          # Map of {domain_name, unique_name} => %{from, timer_ref}
+          pending_writes: %{{atom(), String.t()} => %{from: :gen_statem.from(), timer_ref: reference()}}
         }
 
   # ============================================================================
@@ -374,7 +380,9 @@ defmodule EtherCAT.Master do
           hardware_config: nil,
           hardware_diff: nil,
           last_slave_count: nil,
-          stability_timer_ref: nil
+          stability_timer_ref: nil,
+          cycle_interval_us: nil,
+          pending_writes: %{}
         }
 
         Logger.info("Master #{master_index} initialized")
@@ -726,7 +734,7 @@ defmodule EtherCAT.Master do
                 )
               end)
 
-            new_data = %{data_with_registry | task_pid: task_pid}
+            new_data = %{data_with_registry | task_pid: task_pid, cycle_interval_us: cycle_interval}
             {:next_state, :operational, new_data, [{:reply, from, :ok}]}
 
           {:error, _} = error ->
@@ -819,6 +827,12 @@ defmodule EtherCAT.Master do
     # Clear subscribers as PDO entries will be re-registered
     Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to stop_cyclic")
 
+    # Reply to all pending writes with error and cancel their timers
+    Enum.each(data.pending_writes, fn {_key, %{from: from, timer_ref: timer_ref}} ->
+      :gen_statem.reply(from, {:error, :cyclic_stopped})
+      Process.cancel_timer(timer_ref)
+    end)
+
     # Reset state and transition to :stale
     new_data = %{
       data
@@ -827,7 +841,9 @@ defmodule EtherCAT.Master do
         domains: %{},
         subscribers: %{},
         last_slave_count: nil,
-        stability_timer_ref: nil
+        stability_timer_ref: nil,
+        cycle_interval_us: nil,
+        pending_writes: %{}
     }
 
     {:next_state, :stale, new_data, [{:reply, from, :ok}]}
@@ -857,9 +873,40 @@ defmodule EtherCAT.Master do
         {:keep_state_and_data, [{:reply, from, {:error, :entry_not_registered}}]}
 
       domain_name ->
-        domain_ref = data.domains[domain_name].ref
-        result = Nif.set_value(domain_ref, unique_name, binary_data)
-        {:keep_state_and_data, [{:reply, from, result}]}
+        # Check if there's already a pending write for this entry
+        write_key = {domain_name, unique_name}
+
+        case Map.get(data.pending_writes, write_key) do
+          nil ->
+            # No pending write, proceed with NIF call
+            domain_ref = data.domains[domain_name].ref
+
+            case Nif.set_value(domain_ref, unique_name, binary_data) do
+              :ok ->
+                # Calculate timeout: max(2 * cycle_multiplier * cycle_interval_us / 1_000_000, 1.0) seconds
+                domain_info = data.domains[domain_name]
+                cycle_multiplier = domain_info.cycle_multiplier
+                timeout_ms = max(trunc(2 * cycle_multiplier * data.cycle_interval_us / 1000), 1000)
+
+                # Start timer
+                timer_ref = Process.send_after(self(), {:write_timeout, write_key, from}, timeout_ms)
+
+                # Add to pending_writes
+                new_pending_writes =
+                  Map.put(data.pending_writes, write_key, %{from: from, timer_ref: timer_ref})
+
+                new_data = %{data | pending_writes: new_pending_writes}
+                {:keep_state, new_data}
+
+              {:error, _} = error ->
+                # NIF error, reply immediately
+                {:keep_state_and_data, [{:reply, from, error}]}
+            end
+
+          _pending_write ->
+            # There's already a pending write for this entry
+            {:keep_state_and_data, [{:reply, from, {:error, :write_pending}}]}
+        end
     end
   end
 
@@ -929,9 +976,49 @@ defmodule EtherCAT.Master do
 
   # Handle output change notifications from NIF (for telemetry/debugging)
   # NIF sends: {:output_changed, domain_name, unique_name, value}
-  def operational(:info, {:output_changed, _domain_name, _unique_name, _value}, _data) do
-    # Currently unused - could be used for output monitoring/telemetry
-    :keep_state_and_data
+  def operational(:info, {:output_changed, domain_name, unique_name, _value}, data) do
+    write_key = {domain_name, unique_name}
+
+    case Map.get(data.pending_writes, write_key) do
+      nil ->
+        # No pending write for this entry, just ignore
+        :keep_state_and_data
+
+      %{from: from, timer_ref: timer_ref} ->
+        # Reply to the waiting caller
+        :gen_statem.reply(from, :ok)
+
+        # Cancel the timeout timer
+        Process.cancel_timer(timer_ref)
+
+        # Remove from pending_writes
+        new_pending_writes = Map.delete(data.pending_writes, write_key)
+        new_data = %{data | pending_writes: new_pending_writes}
+
+        {:keep_state, new_data}
+    end
+  end
+
+  # Handle write timeout
+  def operational(:info, {:write_timeout, write_key, from}, data) do
+    case Map.get(data.pending_writes, write_key) do
+      nil ->
+        # Already handled (output_changed arrived first), ignore
+        :keep_state_and_data
+
+      %{from: ^from} ->
+        # Timeout occurred, reply with error
+        :gen_statem.reply(from, {:error, :timeout})
+
+        # Remove from pending_writes
+        new_pending_writes = Map.delete(data.pending_writes, write_key)
+        new_data = %{data | pending_writes: new_pending_writes}
+
+        {domain_name, unique_name} = write_key
+        Logger.warning("Write timeout for #{unique_name} in domain #{domain_name}")
+
+        {:keep_state, new_data}
+    end
   end
 
   # Handle domain working counter changes
