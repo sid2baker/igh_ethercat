@@ -901,6 +901,33 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:ok, data.hardware_diff}}]}
   end
 
+  def operational({:call, from}, {:subscribe, unique_name, subscriber_pid}, data) do
+    Process.monitor(subscriber_pid)
+
+    new_subscribers = Map.update(data.subscribers, unique_name, [subscriber_pid], &[subscriber_pid | &1])
+
+    {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
+  end
+
+  def operational({:call, from}, {:unsubscribe, unique_name, subscriber_pid}, data) do
+    new_subscribers =
+      case data.subscribers[unique_name] do
+        nil ->
+          data.subscribers
+
+        pids ->
+          new_pids = List.delete(pids, subscriber_pid)
+
+          if new_pids == [] do
+            Map.delete(data.subscribers, unique_name)
+          else
+            Map.put(data.subscribers, unique_name, new_pids)
+          end
+      end
+
+    {:keep_state, %{data | subscribers: new_subscribers}, [{:reply, from, :ok}]}
+  end
+
   # Handle data change notifications from NIF
   # NIF sends: {:data_changed, domain_name, unique_name, value}
   # Where unique_name = "slave_name:pdo_name:entry_name"
