@@ -669,21 +669,22 @@ pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, valu
 
     if (data_slice.len > 0) {
         // Domain initialized - write directly to domain buffer
+        // DO NOT update current_value here! The cyclic task needs to detect the difference
+        // between domain_value (from buffer) and current_value to send :output_changed
         write_bits_to_domain(data_slice, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
             std.log.err("set_value: Failed to write bits to domain: {}", .{err});
             return err;
         };
-        std.log.debug("set_value: successfully wrote to domain buffer", .{});
+        std.log.debug("set_value: successfully wrote to domain buffer (confirmation pending)", .{});
     } else {
-        // Domain not yet initialized by cyclic task - just update current_value
-        // The cyclic task will write it when it starts
+        // Domain not yet initialized by cyclic task - update current_value
+        // The cyclic task will write it to the buffer when it starts
         std.log.debug("set_value: domain not initialized yet, storing value for cyclic task", .{});
-    }
 
-    // Update the expected value in the entry (thread-safe)
-    accessor.mutex.lock();
-    defer accessor.mutex.unlock();
-    accessor.layout.updateEntryValue(entry.bit_offset, value_data);
+        accessor.mutex.lock();
+        defer accessor.mutex.unlock();
+        accessor.layout.updateEntryValue(entry.bit_offset, value_data);
+    }
 }
 
 // ============================================================================
