@@ -599,23 +599,41 @@ defmodule EtherCAT.Nif do
   fn extractBitsToBuffer(buffer: []u8, data: []const u8, bit_offset: usize, bit_length: usize) void {
       @memset(buffer, 0);
       var bits_read: usize = 0;
-      var byte_idx = bit_offset / 8;
-      var bit_idx = bit_offset % 8;
-      var out_byte_idx: usize = 0;
 
-      while (bits_read < bit_length and byte_idx < data.len and out_byte_idx < buffer.len) {
-          const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
-          const mask: u8 = if (bits_in_byte >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
-          const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
+      while (bits_read < bit_length) {
+          // Recalculate source position in domain data (same pattern as write_bits_to_domain)
+          const current_bit_offset = bit_offset + bits_read;
+          const byte_idx = current_bit_offset / 8;
+          const bit_idx_usize = current_bit_offset % 8;
+          const bit_idx = @as(u3, @intCast(bit_idx_usize));
 
-          buffer[out_byte_idx] |= bits << @intCast(bits_read % 8);
-
-          bits_read += bits_in_byte;
-          byte_idx += 1;
-          bit_idx = 0;
-          if (bits_read % 8 == 0 and bits_read > 0) {
-              out_byte_idx += 1;
+          // Bounds check for source data
+          if (byte_idx >= data.len) {
+              break;
           }
+
+          // Calculate how many bits to read from current byte
+          const bits_remaining_in_byte = 8 - bit_idx_usize;
+          const bits_to_read = @min(bit_length - bits_read, bits_remaining_in_byte);
+
+          // Recalculate destination position in output buffer
+          const out_byte_idx = bits_read / 8;
+          const out_bit_idx_usize = bits_read % 8;
+          const out_bit_idx = @as(u3, @intCast(out_bit_idx_usize));
+
+          // Bounds check for output buffer
+          if (out_byte_idx >= buffer.len) {
+              break;
+          }
+
+          // Extract bits from source
+          const mask = (@as(u8, 1) << @intCast(bits_to_read)) - 1;
+          const bits = (data[byte_idx] >> bit_idx) & mask;
+
+          // Write bits to destination
+          buffer[out_byte_idx] |= bits << out_bit_idx;
+
+          bits_read += bits_to_read;
       }
   }
 
@@ -631,21 +649,31 @@ defmodule EtherCAT.Nif do
   fn extractBits(comptime T: type, data: []const u8, bit_offset: usize, bit_length: usize) T {
       var result: T = 0;
       var bits_read: usize = 0;
-      var byte_idx = bit_offset / 8;
-      var bit_idx = bit_offset % 8;
 
-      while (bits_read < bit_length and byte_idx < data.len) {
-          // Read as many bits as possible from current byte
-          const bits_in_byte = @min(8 - bit_idx, bit_length - bits_read);
-          const mask: u8 = if (bits_in_byte >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_in_byte)) - 1;
-          const bits = (data[byte_idx] >> @intCast(bit_idx)) & mask;
+      while (bits_read < bit_length) {
+          // Recalculate position in source data (same pattern as write_bits_to_domain)
+          const current_bit_offset = bit_offset + bits_read;
+          const byte_idx = current_bit_offset / 8;
+          const bit_idx_usize = current_bit_offset % 8;
+          const bit_idx = @as(u3, @intCast(bit_idx_usize));
+
+          // Bounds check
+          if (byte_idx >= data.len) {
+              break;
+          }
+
+          // Calculate how many bits to read from current byte
+          const bits_remaining_in_byte = 8 - bit_idx_usize;
+          const bits_to_read = @min(bit_length - bits_read, bits_remaining_in_byte);
+
+          // Extract bits from source
+          const mask: u8 = (@as(u8, 1) << @intCast(bits_to_read)) - 1;
+          const bits = (data[byte_idx] >> bit_idx) & mask;
 
           // Accumulate bits into result at correct position
           result |= @as(T, bits) << @intCast(bits_read);
 
-          bits_read += bits_in_byte;
-          byte_idx += 1;
-          bit_idx = 0;  // Subsequent bytes start at bit 0
+          bits_read += bits_to_read;
       }
 
       return result;
