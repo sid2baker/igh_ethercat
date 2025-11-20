@@ -1,6 +1,6 @@
 defmodule SimpleHardwareConfig do
   @moduledoc """
-  Simplified hardware configuration for basic digital I/O testing.
+  Simplified hardware configuration for basic digital I/O testing with multi-domain support.
 
   Physical Hardware Setup:
   - Position 0: EK1100 EtherCAT Coupler (Vendor: 0x00000002, Product: 0x044c2c52)
@@ -10,6 +10,17 @@ defmodule SimpleHardwareConfig do
   Wiring:
   - Each EL2809 output channel is connected to the corresponding EL1809 input channel
     (Output Ch1 → Input Ch1, Output Ch2 → Input Ch2, etc.)
+
+  Domain Configuration:
+  - :fast domain (interval=1, 10ms cycle time)
+    - Input channels 1-8
+    - Output channels 1-8
+  - :slow domain (interval=200, 2 second cycle time)
+    - Input channels 9-16
+    - Output channels 9-16
+
+  Note: Domain assignments respect sync manager boundaries to avoid exceeding
+  FMMU limits. EL1809 has 1 SM, EL2809 has 2 SMs (SM0: ch1-8, SM1: ch9-16).
   """
 
   alias EtherCAT.Config.{
@@ -142,11 +153,11 @@ defmodule SimpleHardwareConfig do
           },
           registered_entries: %{
             fast:
-              for ch <- 1..16, rem(ch, 2) == 1 do
+              for ch <- 1..8 do
                 {:"channel_#{ch}", :output}
               end,
             slow:
-              for ch <- 1..16, rem(ch, 2) == 0 do
+              for ch <- 9..16 do
                 {:"channel_#{ch}", :output}
               end
           }
