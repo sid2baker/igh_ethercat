@@ -35,9 +35,6 @@ defmodule EtherCAT.Nif do
       master_reset: [],
       release_master: [],
       master_get_slave: [],
-      domain_process: [],
-      domain_queue: [],
-      get_domain_value_bool: [],
       get_value: [],
       set_value: [],
       domain_state: [],
@@ -524,37 +521,6 @@ defmodule EtherCAT.Nif do
   // DOMAIN OPERATIONS
   // ============================================================================
 
-  /// Process domain data after receiving frames
-  pub fn domain_process(domain_accessor: DomainAccessorResource) !void {
-      const accessor = domain_accessor.unpack();
-      const domain = try accessor.getDomain();
-      // Check return value for errors
-      _ = ecrt.ecrt_domain_process(domain);
-  }
-
-  /// Queue domain data for sending
-  pub fn domain_queue(domain_accessor: DomainAccessorResource) !void {
-      const accessor = domain_accessor.unpack();
-      const domain = try accessor.getDomain();
-      // Check return value for errors
-      _ = ecrt.ecrt_domain_queue(domain);
-  }
-
-  /// Get a boolean value from domain data at the specified bit offset
-  pub fn get_domain_value_bool(domain_accessor: DomainAccessorResource, offset: usize) !bool {
-      const accessor = domain_accessor.unpack();
-      const domain = try accessor.getDomain();
-      const data = ecrt.ecrt_domain_data(domain) orelse
-          return DomainError.NullPointer;
-      const domain_size = ecrt.ecrt_domain_size(domain);
-
-      if (offset >= domain_size * 8) return DomainError.OutOfBounds;
-
-      const byte_index = offset / 8;
-      const bit_index = @as(u3, @intCast(offset % 8));
-      return (data[byte_index] >> bit_index) & 1 != 0;
-  }
-
   /// Write arbitrary bits to domain buffer at specified bit offset
   /// Used by cyclic_task to apply output events
   ///
@@ -945,10 +911,6 @@ defmodule EtherCAT.Nif do
       std.log.info("Entering main cyclic loop", .{});
 
       while (true) {
-          // Debug: log first few cycles then every 100
-          if (counter < 5 or counter % 100 == 0) {
-              std.log.debug("Cyclic task running: cycle={}", .{counter});
-          }
           // 1. Set application time (synchronize with master)
           // Use wrapping add to handle overflow gracefully after 584 years
           cycle_start_time +%= (interval * std.time.ns_per_us);
@@ -965,11 +927,6 @@ defmodule EtherCAT.Nif do
               // Process domain data (updates buffer from received frame)
               // Use Unchecked variant: domain is guaranteed valid in cyclic_task
               _ = ecrt.ecrt_domain_process(accessor.getDomainUnchecked());
-
-              // Debug: log domain buffer contents first few cycles then every 100
-              if ((counter < 5 or counter % 100 == 0) and accessor.data.len > 0) {
-                  std.log.debug("Cycle {}: domain buffer (first 4 bytes) = {any}", .{counter, accessor.data[0..@min(4, accessor.data.len)]});
-              }
 
               _ = ecrt.ecrt_domain_state(accessor.getDomainUnchecked(), &new_state);
 
@@ -1044,9 +1001,6 @@ defmodule EtherCAT.Nif do
           for (domain_accessors) |domain_accessor_resource| {
               const accessor = domain_accessor_resource.unpack();
               _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
-              if (counter % 100 == 0) {
-                  std.log.debug("Cycle {}: queued domain", .{counter});
-              }
           }
 
           // Step 6: Send queued frames to network

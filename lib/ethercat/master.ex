@@ -445,10 +445,14 @@ defmodule EtherCAT.Master do
 
   def stale(:enter, _old_state, _data) do
     Logger.info("Entered :stale state - monitoring hardware topology")
-    {:keep_state_and_data, [{:state_timeout, 0, :check_hardware}]}
+    {:keep_state_and_data, [{:state_timeout, 0, :retry_check}]}
   end
 
-  def stale(:state_timeout, :check_hardware, data) do
+  def stale(:state_timeout, :retry_check, _data) do
+    {:keep_state_and_data, [{:next_event, :internal, :check_hardware}]}
+  end
+
+  def stale(:internal, :check_hardware, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} ->
         current_slave_count = master_state.slaves_responding
@@ -467,14 +471,14 @@ defmodule EtherCAT.Master do
 
             new_data = %{data | last_slave_count: current_slave_count, stability_timer_ref: nil}
 
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
           # First check - start stability monitoring
           data.last_slave_count == nil ->
             Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
 
             new_data = %{data | last_slave_count: current_slave_count}
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
           # Hardware stable but no timer yet - start stability countdown
           data.stability_timer_ref == nil ->
@@ -482,11 +486,11 @@ defmodule EtherCAT.Master do
             timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
             new_data = %{data | stability_timer_ref: timer_ref}
 
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
           # Hardware still stable, timer running - keep monitoring
           true ->
-            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
         end
 
       {:error, reason} ->
@@ -510,7 +514,7 @@ defmodule EtherCAT.Master do
     if data.hardware_config == nil do
       Logger.warning("Cannot transition to :synced - no hardware_config set")
       # Stay in :stale and keep monitoring
-      {:keep_state_and_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+      {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
     else
       # Re-check hardware hasn't changed since timer started
       case Nif.get_master_state(data.master_ref) do
@@ -527,7 +531,7 @@ defmodule EtherCAT.Master do
                 Logger.error("Hardware verification failed: #{inspect(reason)}")
                 # Reset and keep monitoring
                 new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
-                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
             end
           else
             # Hardware changed during timer - reset monitoring
@@ -536,7 +540,7 @@ defmodule EtherCAT.Master do
             )
 
             new_data = %{data | last_slave_count: current_slave_count, stability_timer_ref: nil}
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :check_hardware}]}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
           end
 
         {:error, reason} ->
@@ -563,7 +567,7 @@ defmodule EtherCAT.Master do
     }
 
     {:keep_state, new_data,
-     [{:reply, from, :ok}, {:state_timeout, 0, :check_hardware}]}
+     [{:reply, from, :ok}, {:next_event, :internal, :check_hardware}]}
   end
 
   def stale({:call, from}, _event, _data) do
