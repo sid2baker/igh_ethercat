@@ -960,7 +960,8 @@ defmodule EtherCAT.Master do
     handle_exit(pid, reason, data)
   end
 
-  def operational(_event_type, _event, _data) do
+  def operational(event_type, event, _data) do
+    Logger.debug("Unhandled operational event: type=#{inspect(event_type)}, event=#{inspect(event)}")
     :keep_state_and_data
   end
 
