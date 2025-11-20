@@ -927,12 +927,13 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                         // Update stored value
                         entry.current_value = domain_value;
                     } else {
-                        // Output changed: write current_value to domain and notify
-                        try write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
+                        // Output changed: buffer was already updated by set_value, just confirm
+                        // Update current_value to match the new buffer value
+                        entry.current_value = domain_value;
 
                         const required_bytes = (entry.bit_length + 7) / 8;
                         std.log.debug("Sending :output_changed for '{s}' to master_pid", .{entry.name});
-                        _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
+                        _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, domain_value[0..required_bytes] }, .{});
                     }
                 }
             }
