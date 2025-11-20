@@ -116,10 +116,10 @@ defmodule Examples.SimpleIOTest do
   """
   @spec set_output(0..15, boolean()) :: :ok | {:error, term()}
   def set_output(channel, value) when channel in 0..15 and is_boolean(value) do
-    entry_name = "digital_outputs:Output:Channel_#{channel + 1}"
+    unique_name = "digital_outputs:channel_#{channel + 1}:output"
     binary_value = if value, do: <<1>>, else: <<0>>
 
-    case Master.write_pdo_entry(@master_name, :default_domain, entry_name, binary_value) do
+    case Master.write_pdo_entry(@master_name, unique_name, binary_value) do
       :ok ->
         Logger.debug("Set output channel #{channel} to #{value}")
         :ok
@@ -146,9 +146,9 @@ defmodule Examples.SimpleIOTest do
   """
   @spec get_input(0..15) :: {:ok, boolean()} | {:error, term()}
   def get_input(channel) when channel in 0..15 do
-    entry_name = "digital_inputs:Input:Channel_#{channel + 1}"
+    unique_name = "digital_inputs:channel_#{channel + 1}:input"
 
-    case Master.read_pdo_entry(@master_name, :default_domain, entry_name) do
+    case Master.read_pdo_entry(@master_name, unique_name) do
       {:ok, <<value>>} ->
         {:ok, value == 1}
 
