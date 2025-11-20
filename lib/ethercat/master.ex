@@ -1383,7 +1383,7 @@ defmodule EtherCAT.Master do
         # Pass cycle_multiplier directly to NIF (no conversion needed)
         cycle_multiplier = domain_config.cycle_multiplier
 
-        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, cycle_multiplier) do
+        case Nif.master_create_domain(acc_data.master_ref, domain_config.name, self(), cycle_multiplier) do
           {:ok, domain_ref} ->
             domain_info = %{ref: domain_ref, cycle_multiplier: cycle_multiplier}
             new_domains = Map.put(acc_data.domains, domain_config.name, domain_info)

@@ -156,7 +156,6 @@ defmodule EtherCAT.Nif do
       bit_length: usize,
       direction: PdoDirection,
       current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Raw bytes storing the current value
-      pending_write: bool,  // True if output was written to and needs confirmation
   };
 
   /// Domain layout - collection of PDO entry descriptors
@@ -208,7 +207,6 @@ defmodule EtherCAT.Nif do
               .bit_length = bit_length,
               .direction = direction,
               .current_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
-              .pending_write = false,  // No pending write initially
           });
       }
 
@@ -232,12 +230,11 @@ defmodule EtherCAT.Nif do
           return null;
       }
 
-      /// Update the current_value field for an entry and mark as pending write
+      /// Update the current_value field for an entry
       pub fn updateEntryValue(self: *DomainLayout, bit_offset: usize, value: [8]u8) void {
           for (self.entries.items) |*entry| {
               if (entry.bit_offset == bit_offset) {
                   entry.current_value = value;
-                  entry.pending_write = true;  // Mark that this output needs confirmation
                   return;
               }
           }
@@ -248,6 +245,7 @@ defmodule EtherCAT.Nif do
   pub const DomainAccessor = struct {
       domain_ptr: usize,  // Store as usize to avoid C pointer in BEAM resource
       domain_name: beam.term,  // Domain name atom for routing (e.g., :default_domain)
+      master_pid: beam.pid,  // Master process PID for sending notifications
       layout: DomainLayout,
       cycle_multiplier: u32,  // Process domain every N master cycles (1 = every cycle, 200 = every 200th)
       data: []u8,       // Current cycle data (points to ecrt-managed memory)
@@ -255,10 +253,11 @@ defmodule EtherCAT.Nif do
       mutex: std.Thread.Mutex,  // Protects current_value in entries
       cleaned_up: std.atomic.Value(bool),  // Atomic flag to prevent double-free
 
-      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, cycle_multiplier: u32) DomainAccessor {
+      pub fn init(domain: *ecrt.ec_domain_t, domain_name: beam.term, master_pid: beam.pid, cycle_multiplier: u32) DomainAccessor {
           return .{
               .domain_ptr = @intFromPtr(domain),
               .domain_name = domain_name,
+              .master_pid = master_pid,
               .layout = DomainLayout.init(),
               .cycle_multiplier = cycle_multiplier,
               .data = &[_]u8{},       // Will be set in cyclic_task
@@ -431,7 +430,7 @@ defmodule EtherCAT.Nif do
   /// Create a new domain accessor with layout tracking
   /// Domains are used to group PDO registrations for efficient I/O
   /// Returns {:ok, domain_accessor_resource} | {:error, reason}
-  pub fn master_create_domain(master: MasterResource, domain_name: beam.term, interval: u32) beam.term {
+  pub fn master_create_domain(master: MasterResource, domain_name: beam.term, master_pid: beam.pid, interval: u32) beam.term {
       const domain = ecrt.ecrt_master_create_domain(master.unpack()) orelse {
           return beam.make_error_pair(.domain_creation_failed, .{});
       };
@@ -439,7 +438,7 @@ defmodule EtherCAT.Nif do
       const accessor = beam.allocator.create(DomainAccessor) catch {
           return beam.make_error_pair(.out_of_memory, .{});
       };
-      accessor.* = DomainAccessor.init(domain, domain_name, interval);
+      accessor.* = DomainAccessor.init(domain, domain_name, master_pid, interval);
 
       const resource = DomainAccessorResource.create(accessor, .{}) catch {
           beam.allocator.destroy(accessor);
@@ -746,16 +745,37 @@ defmodule EtherCAT.Nif do
       var value_data: [8]u8 = [_]u8{0} ** 8;
       @memcpy(value_data[0..binary.len], binary);
 
-      std.log.debug("set_value: '{s}' at bit_offset={} = {any} (updating current_value only)", .{name, entry.bit_offset, binary});
+      std.log.debug("set_value: '{s}' at bit_offset={} = {any}", .{name, entry.bit_offset, binary});
 
-      // For outputs: ONLY update current_value, do NOT write to domain buffer
-      // This allows the cyclic task to detect the change (domain_value != current_value)
-      // The cyclic task will then write to domain buffer and send :output_changed confirmation
+      // Lock before checking/updating
       accessor.mutex.lock();
       defer accessor.mutex.unlock();
+
+      // Check if the new value already matches what's in the domain
+      // If yes, we can send immediate confirmation without waiting for cyclic task
+      var already_matches = false;
+      if (accessor.data.len > 0) {
+          // Extract current domain value
+          var domain_value: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
+          extractBitsToBuffer(domain_value[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
+
+          // Compare with new value
+          already_matches = std.mem.eql(u8, domain_value[0..required_bytes], binary);
+      }
+
+      // Update current_value
       accessor.layout.updateEntryValue(entry.bit_offset, value_data);
 
-      std.log.debug("set_value: current_value updated, waiting for cyclic task to process and confirm", .{});
+      if (already_matches) {
+          // Value already matches - send immediate confirmation
+          std.log.debug("set_value: value already matches domain, sending immediate confirmation", .{});
+          _ = beam.send(accessor.master_pid, .{ .output_changed, accessor.domain_name, entry.name, binary }, .{}) catch |err| {
+              std.log.err("set_value: failed to send immediate confirmation: {}", .{err});
+          };
+      } else {
+          // Value different - cyclic task will detect change and send confirmation
+          std.log.debug("set_value: value differs from domain, waiting for cyclic task to confirm", .{});
+      }
   }
 
   // ============================================================================
@@ -983,9 +1003,9 @@ defmodule EtherCAT.Nif do
                       }
                   }
 
-                  if (entry.direction == .input) {
-                      // Input processing: only notify on actual changes
-                      if (changed) {
+                  if (changed) {
+                      if (entry.direction == .input) {
+                          // Input changed: extract raw binary and notify
                           const required_bytes = (entry.bit_length + 7) / 8;
                           var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                           extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
@@ -995,21 +1015,14 @@ defmodule EtherCAT.Nif do
 
                           // Update stored value
                           entry.current_value = domain_value;
-                      }
-                  } else {
-                      // Output processing: confirm writes even if value didn't change
-                      // This handles the case where user writes the same value that's already there
-                      if (changed or entry.pending_write) {
-                          // Write current_value to domain (ecrt_domain_process may have overwritten it)
-                          // current_value is the source of truth for outputs
+                      } else {
+                          // Output changed: write current_value to domain (ecrt_domain_process may have overwritten it)
+                          // and notify. current_value is the source of truth for outputs.
                           try write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
 
                           const required_bytes = (entry.bit_length + 7) / 8;
-                          std.log.debug("Sending :output_changed for '{s}' to master_pid (changed={}, pending_write={})", .{entry.name, changed, entry.pending_write});
+                          std.log.debug("Sending :output_changed for '{s}' to master_pid", .{entry.name});
                           _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
-
-                          // Clear pending write flag after confirmation
-                          entry.pending_write = false;
                       }
                   }
               }
