@@ -9,7 +9,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
 
   - `index` - Sync manager index (0-15, typically 2=outputs, 3=inputs)
   - `direction` - `:input` or `:output`
-  - `watchdog` - `:enable` or `:disable`
+  - `watchdog` - `:enabled` or `:disabled`
   - `pdos` - List of PDO configurations for this sync manager
   """
 
@@ -20,7 +20,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
   @type t :: %__MODULE__{
           index: non_neg_integer(),
           direction: :input | :output,
-          watchdog: :enable | :disable,
+          watchdog: :enabled | :disabled,
           pdos: [PdoConfig.t()]
         }
 
@@ -32,7 +32,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
     %__MODULE__{
       index: Keyword.fetch!(opts, :index),
       direction: Keyword.fetch!(opts, :direction),
-      watchdog: Keyword.get(opts, :watchdog, :disable),
+      watchdog: Keyword.get(opts, :watchdog, :disabled),
       pdos: Keyword.get(opts, :pdos, [])
     }
   end
@@ -56,7 +56,7 @@ defmodule EtherCAT.Config.SyncManagerConfig do
   defp validate_direction(dir) when dir in [:input, :output], do: :ok
   defp validate_direction(_), do: {:error, :invalid_direction}
 
-  defp validate_watchdog(wd) when wd in [:enable, :disable], do: :ok
+  defp validate_watchdog(wd) when wd in [:enabled, :disabled], do: :ok
   defp validate_watchdog(_), do: {:error, :invalid_watchdog_mode}
 
   defp validate_pdos(pdos) when is_list(pdos) do

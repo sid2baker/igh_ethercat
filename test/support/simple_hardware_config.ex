@@ -67,7 +67,7 @@ defmodule SimpleHardwareConfig do
               %SyncManagerConfig{
                 index: 3,
                 direction: :input,
-                watchdog: :disable,
+                watchdog: :disabled,
                 pdos:
                   for ch <- 1..16 do
                     %PdoConfig{
@@ -106,7 +106,7 @@ defmodule SimpleHardwareConfig do
               %SyncManagerConfig{
                 index: 0,
                 direction: :output,
-                watchdog: :enable,
+                watchdog: :enabled,
                 pdos:
                   for ch <- 1..8 do
                     %PdoConfig{
@@ -122,7 +122,7 @@ defmodule SimpleHardwareConfig do
               %SyncManagerConfig{
                 index: 1,
                 direction: :output,
-                watchdog: :enable,
+                watchdog: :enabled,
                 pdos:
                   for ch <- 9..16 do
                     %PdoConfig{
