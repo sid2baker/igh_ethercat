@@ -29,7 +29,8 @@ defmodule SimpleHardwareConfig do
         nif_yield_interval: 100_000
       },
       domains: [
-        %DomainConfig{name: :default_domain, interval: 1}
+        %DomainConfig{name: :fast, interval: 1},
+        %DomainConfig{name: :slow, interval: 200}
       ],
       slaves: [
         # EK1100 - EtherCAT Coupler at position 0
@@ -81,8 +82,12 @@ defmodule SimpleHardwareConfig do
             ]
           },
           registered_entries: %{
-            default_domain:
-              for ch <- 1..16 do
+            fast:
+              for ch <- 1..8 do
+                {:"channel_#{ch}", :input}
+              end,
+            slow:
+              for ch <- 9..16 do
                 {:"channel_#{ch}", :input}
               end
           }
@@ -136,8 +141,12 @@ defmodule SimpleHardwareConfig do
             ]
           },
           registered_entries: %{
-            default_domain:
-              for ch <- 1..16 do
+            fast:
+              for ch <- 1..16, rem(ch, 2) == 1 do
+                {:"channel_#{ch}", :output}
+              end,
+            slow:
+              for ch <- 1..16, rem(ch, 2) == 0 do
                 {:"channel_#{ch}", :output}
               end
           }
