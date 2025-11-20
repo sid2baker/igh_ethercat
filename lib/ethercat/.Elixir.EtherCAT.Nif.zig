@@ -224,11 +224,6 @@ pub const DomainAccessor = struct {
         return @ptrFromInt(self.domain_ptr);
     }
 
-    /// Get the domain pointer without error checking (for internal use where validation is guaranteed)
-    fn getDomainUnchecked(self: *const DomainAccessor) *ecrt.ec_domain_t {
-        return @ptrFromInt(self.domain_ptr);
-    }
-
     /// Initialize domain data pointer (called once during cyclic_task setup)
     pub fn initDomainData(self: *DomainAccessor) !void {
         const domain = try self.getDomain();
@@ -662,28 +657,16 @@ pub fn set_value(domain_accessor: DomainAccessorResource, name: []const u8, valu
     var value_data: [8]u8 = [_]u8{0} ** 8;
     @memcpy(value_data[0..binary.len], binary);
 
-    std.log.debug("set_value: '{s}' at bit_offset={} = {any} (writing to domain buffer)", .{name, entry.bit_offset, binary});
+    std.log.debug("set_value: '{s}' at bit_offset={} = {any} (updating current_value only)", .{name, entry.bit_offset, binary});
 
-    // Get actual domain data (may not be initialized yet if cyclic task hasn't started)
-    const data_slice = accessor.data;
-
-    if (data_slice.len > 0) {
-        // Domain initialized - write to domain buffer
-        write_bits_to_domain(data_slice, entry.bit_offset, value_data[0..binary.len], @intCast(entry.bit_length)) catch |err| {
-            std.log.err("set_value: Failed to write bits to domain: {}", .{err});
-            return err;
-        };
-        std.log.debug("set_value: successfully wrote to domain buffer (confirmation pending)", .{});
-    } else {
-        // Domain not yet initialized by cyclic task - will be written when it starts
-        std.log.debug("set_value: domain not initialized yet, storing value for cyclic task", .{});
-    }
-
-    // Always update current_value - this is the source of truth for outputs
-    // The cyclic task will write current_value to the buffer to ensure it's not overwritten by ecrt_domain_process
+    // For outputs: ONLY update current_value, do NOT write to domain buffer
+    // This allows the cyclic task to detect the change (domain_value != current_value)
+    // The cyclic task will then write to domain buffer and send :output_changed confirmation
     accessor.mutex.lock();
     defer accessor.mutex.unlock();
     accessor.layout.updateEntryValue(entry.bit_offset, value_data);
+
+    std.log.debug("set_value: current_value updated, waiting for cyclic task to process and confirm", .{});
 }
 
 // ============================================================================
@@ -870,14 +853,15 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
             if ((counter + 1) % accessor.cycle_multiplier != 0) {
                 continue;
             }
+            const domain: *ecrt.ec_domain_t = try accessor.getDomain();
 
             var new_state: ecrt.ec_domain_state_t = undefined;
 
             // Process domain data (updates buffer from received frame)
             // Use Unchecked variant: domain is guaranteed valid in cyclic_task
-            _ = ecrt.ecrt_domain_process(accessor.getDomainUnchecked());
+            _ = ecrt.ecrt_domain_process(domain);
 
-            _ = ecrt.ecrt_domain_state(accessor.getDomainUnchecked(), &new_state);
+            _ = ecrt.ecrt_domain_state(domain, &new_state);
 
             // Notify working counter changes
             if (new_state.working_counter != accessor.state.working_counter) {
@@ -934,6 +918,11 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
                 }
             }
 
+            // Only queue this domain if we're at a cycle_multiplier boundary
+            if (counter % accessor.cycle_multiplier == 0) {
+                _ = ecrt.ecrt_domain_queue(domain);
+            }
+
             // Update state for next iteration
             accessor.state = new_state;
         }
@@ -947,20 +936,10 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
 
         prev_master_state = master_state;
 
-        // Step 5: Queue domain outputs (respecting cycle_multiplier configuration)
-        for (domain_accessors) |domain_accessor_resource| {
-            const accessor = domain_accessor_resource.unpack();
-
-            // Only queue this domain if we're at a cycle_multiplier boundary
-            if (counter % accessor.cycle_multiplier == 0) {
-                _ = ecrt.ecrt_domain_queue(accessor.getDomainUnchecked());
-            }
-        }
-
-        // Step 6: Send queued frames to network
+        // Step 5: Send queued frames to network
         _ = ecrt.ecrt_master_send(master);
 
-        // Step 7: Deterministic sleep to maintain exact cycle rate
+        // Step 6: Deterministic sleep to maintain exact cycle rate
         next_cycle_time += cycle_period_ns;
         const now = std.time.nanoTimestamp();
         const sleep_ns = next_cycle_time - now;
