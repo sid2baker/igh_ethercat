@@ -371,9 +371,9 @@ defmodule Examples.SimpleIOTest do
   """
   @spec subscribe_input(0..15, pid()) :: :ok | {:error, term()}
   def subscribe_input(channel, pid \\ self()) when channel in 0..15 do
-    entry_name = "digital_inputs:Input:Channel_#{channel + 1}"
+    unique_name = "digital_inputs:channel_#{channel + 1}:input"
 
-    case Master.subscribe(@master_name, :default_domain, entry_name, pid) do
+    case Master.subscribe(@master_name, unique_name, pid) do
       :ok ->
         Logger.info("Subscribed to input channel #{channel}")
         :ok
@@ -393,9 +393,9 @@ defmodule Examples.SimpleIOTest do
   """
   @spec unsubscribe_input(0..15, pid()) :: :ok | {:error, term()}
   def unsubscribe_input(channel, pid \\ self()) when channel in 0..15 do
-    entry_name = "digital_inputs:Input:Channel_#{channel + 1}"
+    unique_name = "digital_inputs:channel_#{channel + 1}:input"
 
-    case Master.unsubscribe(@master_name, :default_domain, entry_name, pid) do
+    case Master.unsubscribe(@master_name, unique_name, pid) do
       :ok ->
         Logger.info("Unsubscribed from input channel #{channel}")
         :ok
