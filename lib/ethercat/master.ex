@@ -704,23 +704,23 @@ defmodule EtherCAT.Master do
 
     # Configure and register all PDOs
     case configure_all_slaves(data) do
-      :ok ->
-        case Nif.master_activate(data.master_ref) do
+      {:ok, data_with_registry} ->
+        case Nif.master_activate(data_with_registry.master_ref) do
           :ok ->
-            domain_refs = data.domains |> Map.values() |> Enum.map(& &1.ref)
+            domain_refs = data_with_registry.domains |> Map.values() |> Enum.map(& &1.ref)
 
             task_pid =
               spawn_link(fn ->
                 Nif.cyclic_task(
                   self(),
-                  data.master_ref,
+                  data_with_registry.master_ref,
                   domain_refs,
                   cycle_interval,
                   nif_yield_interval
                 )
               end)
 
-            new_data = %{data | task_pid: task_pid}
+            new_data = %{data_with_registry | task_pid: task_pid}
             {:next_state, :operational, new_data, [{:reply, from, :ok}]}
 
           {:error, _} = error ->
@@ -1114,9 +1114,9 @@ defmodule EtherCAT.Master do
   end
 
   defp configure_all_slaves(data) do
-    Enum.reduce_while(data.slaves, :ok, fn {position, slave_info}, :ok ->
-      case configure_single_slave(data, position, slave_info) do
-        :ok -> {:cont, :ok}
+    Enum.reduce_while(data.slaves, {:ok, data}, fn {position, slave_info}, {:ok, acc_data} ->
+      case configure_single_slave(acc_data, position, slave_info) do
+        {:ok, new_data} -> {:cont, {:ok, new_data}}
         {:error, _} = error -> {:halt, error}
       end
     end)
@@ -1125,31 +1125,32 @@ defmodule EtherCAT.Master do
   defp configure_single_slave(data, position, slave_info) do
     driver_module = slave_info.driver
     slave_pid = slave_info.pid
+    hw_slave_config = get_hw_slave_config(data, position)
 
     Logger.debug("Configuring slave #{position} (#{inspect(driver_module)})")
 
-    with {:ok, slave_config} <- get_slave_config_for_position(data, position),
-         :ok <- configure_slave_sdos(slave_config, position, driver_module, slave_pid),
-         pdo_configs = driver_module.get_pdo_config(slave_pid),
-         :ok <- configure_slave_pdos(data, position, pdo_configs),
-         :ok <- register_pdo_entries(data, position, slave_info, pdo_configs) do
-      :ok
+    with {:ok, slave_config_nif} <- get_slave_config_for_position(data, position),
+         sdos <- driver_module.get_sdo_config(slave_pid),
+         :ok <- apply_sdos(slave_config_nif, position, sdos),
+         sync_managers <- driver_module.get_pdo_config(slave_pid),
+         :ok <- configure_pdos(slave_config_nif, position, sync_managers),
+         {:ok, new_data} <- register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
+      {:ok, new_data}
     end
   end
 
-  defp configure_slave_sdos(slave_config, position, driver_module, slave_pid) do
-    sdo_configs = driver_module.get_sdo_config(slave_pid)
-
-    Enum.each(sdo_configs, fn {index, subindex, sdo_data} ->
-      case Nif.slave_config_sdo(slave_config, index, subindex, sdo_data) do
+  # Apply SDO configuration
+  defp apply_sdos(slave_config_nif, position, sdos) do
+    Enum.each(sdos, fn sdo ->
+      case Nif.slave_config_sdo(slave_config_nif, sdo.index, sdo.subindex, sdo.data) do
         :ok ->
           Logger.debug(
-            "Slave #{position}: Configured SDO 0x#{Integer.to_string(index, 16)}:#{subindex}"
+            "Slave #{position}: Configured SDO 0x#{Integer.to_string(sdo.index, 16)}:#{sdo.subindex}"
           )
 
         {:error, reason} ->
           Logger.warning(
-            "Slave #{position}: Failed to configure SDO 0x#{Integer.to_string(index, 16)}:#{subindex} - #{inspect(reason)}"
+            "Slave #{position}: Failed to configure SDO 0x#{Integer.to_string(sdo.index, 16)}:#{sdo.subindex} - #{inspect(reason)}"
           )
       end
     end)
@@ -1157,163 +1158,106 @@ defmodule EtherCAT.Master do
     :ok
   end
 
-  defp configure_slave_pdos(data, position, pdo_configs) do
-    # Group PDOs by sync manager
-    pdos_by_sm =
-      Enum.group_by(pdo_configs, fn pdo_config ->
-        {sm_index, _direction, _watchdog} = pdo_config.sync_manager
-        sm_index
-      end)
-
-    # Configure each sync manager
-    Enum.reduce_while(pdos_by_sm, :ok, fn {sm_index, sm_pdos}, :ok ->
-      case configure_sync_manager(data, position, sm_index, sm_pdos) do
-        :ok -> {:cont, :ok}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp configure_sync_manager(_data, _position, _sm_index, []) do
-    # Empty PDO list - nothing to configure
-    :ok
-  end
-
-  defp configure_sync_manager(data, position, sm_index, sm_pdos) when is_list(sm_pdos) do
-    with {:ok, slave_config} <- get_slave_config_for_position(data, position),
-         [first_pdo | _] = sm_pdos,
-         {_sm_index, direction, watchdog} = first_pdo.sync_manager,
-         :ok <- do_configure_sync_manager(slave_config, position, sm_index, direction, watchdog),
-         :ok <- do_clear_and_assign_pdos(slave_config, position, sm_index, sm_pdos),
-         :ok <- do_configure_pdo_mappings(slave_config, position, sm_pdos, first_pdo) do
-      :ok
-    end
-  end
-
-  defp do_configure_sync_manager(slave_config, position, sm_index, direction, watchdog) do
-    Logger.debug("Slave #{position}: Configuring SM#{sm_index} (#{direction})")
-    Nif.slave_config_sync_manager(slave_config, sm_index, direction, watchdog)
-    :ok
-  end
-
-  defp do_clear_and_assign_pdos(slave_config, position, sm_index, sm_pdos) do
-    # Clear PDO assignments
-    Nif.slave_config_pdo_assign_clear(slave_config, sm_index)
-
-    # Add all PDO assignments for this SM
-    pdo_indices = Enum.map(sm_pdos, & &1.pdo_index) |> Enum.uniq()
-
-    Enum.each(pdo_indices, fn pdo_index ->
-      Nif.slave_config_pdo_assign_add(slave_config, sm_index, pdo_index)
+  # Configure PDOs - direct translation of ecrt_slave_config_pdos
+  defp configure_pdos(slave_config_nif, position, sync_managers) do
+    Enum.each(sync_managers, fn sm ->
+      # Configure sync manager
+      Nif.slave_config_sync_manager(slave_config_nif, sm.index, sm.direction, sm.watchdog)
 
       Logger.debug(
-        "Slave #{position}: Assigned PDO 0x#{Integer.to_string(pdo_index, 16)} to SM#{sm_index}"
+        "Slave #{position}: Configured SM#{sm.index} (#{sm.direction}, watchdog: #{sm.watchdog})"
       )
+
+      # Clear PDO assignments
+      Nif.slave_config_pdo_assign_clear(slave_config_nif, sm.index)
+
+      # Configure each PDO
+      Enum.each(sm.pdos, fn pdo ->
+        # Assign PDO to sync manager
+        Nif.slave_config_pdo_assign_add(slave_config_nif, sm.index, pdo.index)
+
+        Logger.debug(
+          "Slave #{position}: Assigned PDO 0x#{Integer.to_string(pdo.index, 16)} to SM#{sm.index}"
+        )
+
+        # Clear PDO mappings
+        Nif.slave_config_pdo_mapping_clear(slave_config_nif, pdo.index)
+
+        # Add entry mappings
+        Enum.each(pdo.entries, fn {_entry_name, {index, subindex, bit_length}} ->
+          Nif.slave_config_pdo_mapping_add(
+            slave_config_nif,
+            pdo.index,
+            index,
+            subindex,
+            bit_length
+          )
+        end)
+      end)
     end)
 
     :ok
   end
 
-  defp do_configure_pdo_mappings(slave_config, position, sm_pdos, first_pdo) do
-    supports_pdo_config = Map.get(first_pdo, :supports_pdo_config?, true)
+  # Register entries with domains based on registered_entries map
+  defp register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
+    # Build entry_registry as we register
+    entry_registry =
+      for {domain_name, entry_list} <- hw_slave_config.registered_entries,
+          {pdo_name, entry_name} <- entry_list,
+          into: %{} do
+        # Find entry in sync_managers
+        {index, subindex, bit_length, direction} =
+          find_entry_in_sync_managers(sync_managers, pdo_name, entry_name)
 
-    if supports_pdo_config do
-      Enum.each(sm_pdos, fn pdo_config ->
-        configure_pdo_mappings(slave_config, position, pdo_config)
-      end)
-    end
+        unique_name = "#{hw_slave_config.name}:#{pdo_name}:#{entry_name}"
 
-    :ok
-  end
+        # Get domain ref
+        domain_ref = data.domains[domain_name].ref
 
-  defp configure_pdo_mappings(slave_config, position, pdo_config) do
-    pdo_index = pdo_config.pdo_index
-
-    # Clear existing mappings
-    Nif.slave_config_pdo_mapping_clear(slave_config, pdo_index)
-
-    # Add all entry mappings
-    Enum.each(pdo_config.entries, fn {entry_name,
-                                      {_type, entry_index, entry_subindex, bit_length}} ->
-      Nif.slave_config_pdo_mapping_add(
-        slave_config,
-        pdo_index,
-        entry_index,
-        entry_subindex,
-        bit_length
-      )
-
-      Logger.debug(
-        "Slave #{position}: Mapped entry #{entry_name} (0x#{Integer.to_string(entry_index, 16)}:#{entry_subindex}) to PDO 0x#{Integer.to_string(pdo_index, 16)}"
-      )
-    end)
-  end
-
-  defp register_pdo_entries(data, position, slave_info, pdo_configs) do
-    with {:ok, slave_config} <- get_slave_config_for_position(data, position) do
-      Enum.reduce_while(pdo_configs, :ok, fn pdo_config, :ok ->
-        # Determine which domain this PDO belongs to
-        domain_name = Map.get(pdo_config, :domain, :default_domain)
-
-        case data.domains[domain_name] do
-          nil ->
-            Logger.error(
-              "Slave #{position}: Domain #{domain_name} not found for PDO #{pdo_config.name}"
-            )
-
-            {:halt, {:error, {:domain_not_found, domain_name}}}
-
-          domain_info ->
-            case register_pdo_to_domain(
-                   slave_config,
-                   domain_info.ref,
-                   position,
-                   slave_info.name,
-                   pdo_config
-                 ) do
-              :ok -> {:cont, :ok}
-              {:error, _} = error -> {:halt, error}
-            end
-        end
-      end)
-    end
-  end
-
-  defp register_pdo_to_domain(slave_config, domain_ref, position, slave_name, pdo_config) do
-    {_sm_index, direction, _watchdog} = pdo_config.sync_manager
-
-    try do
-      Enum.each(pdo_config.entries, fn {entry_name,
-                                        {_type, entry_index, entry_subindex, bit_length}} ->
-        # Skip gap entries (0x0000:0x00) - these are padding and should not be registered
-        if entry_index != 0 or entry_subindex != 0 do
-          # Build unique name for this entry
-          unique_name = "#{slave_name}:#{pdo_config.name}:#{entry_name}"
-
-          # Register with NIF (can raise on error)
+        # Register with NIF (skip gap entries 0x0000:0x00)
+        if index != 0 or subindex != 0 do
           _offset =
             Nif.slave_config_reg_pdo_entry(
-              slave_config,
+              slave_config_nif,
               unique_name,
-              entry_index,
-              entry_subindex,
+              index,
+              subindex,
               bit_length,
               domain_ref,
               direction
             )
 
           Logger.debug(
-            "Slave #{position}: Registered #{unique_name} to domain (direction: #{direction})"
+            "Registered #{unique_name} to domain #{domain_name} (direction: #{direction})"
           )
         end
-      end)
 
-      :ok
-    rescue
-      error ->
-        Logger.error("Failed to register PDO entries for slave #{position}: #{inspect(error)}")
-        {:error, {:pdo_registration_failed, error}}
-    end
+        # Track in entry_registry
+        {unique_name, domain_name}
+      end
+
+    # Merge new entries into Master's entry_registry
+    new_data = %{data | entry_registry: Map.merge(data.entry_registry, entry_registry)}
+    {:ok, new_data}
+  end
+
+  # Find entry details in sync_managers structure
+  defp find_entry_in_sync_managers(sync_managers, pdo_name, entry_name) do
+    Enum.find_value(sync_managers, fn sm ->
+      pdo = Enum.find(sm.pdos, &(&1.name == pdo_name))
+
+      if pdo && Map.has_key?(pdo.entries, entry_name) do
+        {index, subindex, bit_length} = pdo.entries[entry_name]
+        {index, subindex, bit_length, sm.direction}
+      end
+    end) || raise "Entry #{pdo_name}:#{entry_name} not found in sync_managers"
+  end
+
+  # Get hardware slave config from HardwareConfig
+  defp get_hw_slave_config(data, position) do
+    Enum.find(data.hardware_config.slaves, &(&1.position == position)) ||
+      raise "No hardware config for slave at position #{position}"
   end
 
   defp get_slave_config_for_position(data, position) do
