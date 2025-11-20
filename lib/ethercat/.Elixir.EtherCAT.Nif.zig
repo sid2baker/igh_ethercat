@@ -862,11 +862,13 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         _ = ecrt.ecrt_master_receive(master);
 
         // 3. Process domains (respecting cycle_multiplier configuration)
+        // Process 1 cycle after queue to read the response from the previous cycle's send
         for (domain_accessors) |domain_accessor_resource| {
             const accessor = domain_accessor_resource.unpack();
 
-            // Only process this domain if we're at a cycle_multiplier boundary
-            if (counter % accessor.cycle_multiplier != 0) {
+            // Only process this domain 1 cycle after it was queued
+            // (counter - 1) % cycle_multiplier == 0 means we queued last cycle
+            if (counter == 0 or (counter - 1) % accessor.cycle_multiplier != 0) {
                 continue;
             }
 
