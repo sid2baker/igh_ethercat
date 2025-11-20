@@ -156,6 +156,7 @@ defmodule EtherCAT.Nif do
       bit_length: usize,
       direction: PdoDirection,
       current_value: [MAX_PDO_ENTRY_BYTES]u8,  // Raw bytes storing the current value
+      pending_write: bool,  // True if output was written to and needs confirmation
   };
 
   /// Domain layout - collection of PDO entry descriptors
@@ -207,6 +208,7 @@ defmodule EtherCAT.Nif do
               .bit_length = bit_length,
               .direction = direction,
               .current_value = [_]u8{0} ** MAX_PDO_ENTRY_BYTES,  // Initialize to zero
+              .pending_write = false,  // No pending write initially
           });
       }
 
@@ -230,11 +232,12 @@ defmodule EtherCAT.Nif do
           return null;
       }
 
-      /// Update the current_value field for an entry
+      /// Update the current_value field for an entry and mark as pending write
       pub fn updateEntryValue(self: *DomainLayout, bit_offset: usize, value: [8]u8) void {
           for (self.entries.items) |*entry| {
               if (entry.bit_offset == bit_offset) {
                   entry.current_value = value;
+                  entry.pending_write = true;  // Mark that this output needs confirmation
                   return;
               }
           }
@@ -980,9 +983,9 @@ defmodule EtherCAT.Nif do
                       }
                   }
 
-                  if (changed) {
-                      if (entry.direction == .input) {
-                          // Input changed: extract raw binary and notify
+                  if (entry.direction == .input) {
+                      // Input processing: only notify on actual changes
+                      if (changed) {
                           const required_bytes = (entry.bit_length + 7) / 8;
                           var buffer: [MAX_PDO_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_PDO_ENTRY_BYTES;
                           extractBitsToBuffer(buffer[0..required_bytes], accessor.data, entry.bit_offset, entry.bit_length);
@@ -992,14 +995,21 @@ defmodule EtherCAT.Nif do
 
                           // Update stored value
                           entry.current_value = domain_value;
-                      } else {
-                          // Output changed: write current_value to domain (ecrt_domain_process may have overwritten it)
-                          // and notify. current_value is the source of truth for outputs.
+                      }
+                  } else {
+                      // Output processing: confirm writes even if value didn't change
+                      // This handles the case where user writes the same value that's already there
+                      if (changed or entry.pending_write) {
+                          // Write current_value to domain (ecrt_domain_process may have overwritten it)
+                          // current_value is the source of truth for outputs
                           try write_bits_to_domain(accessor.data, entry.bit_offset, &entry.current_value, @intCast(entry.bit_length));
 
                           const required_bytes = (entry.bit_length + 7) / 8;
-                          std.log.debug("Sending :output_changed for '{s}' to master_pid", .{entry.name});
+                          std.log.debug("Sending :output_changed for '{s}' to master_pid (changed={}, pending_write={})", .{entry.name, changed, entry.pending_write});
                           _ = try beam.send(master_pid, .{ .output_changed, accessor.domain_name, entry.name, entry.current_value[0..required_bytes] }, .{});
+
+                          // Clear pending write flag after confirmation
+                          entry.pending_write = false;
                       }
                   }
               }
