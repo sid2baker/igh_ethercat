@@ -1288,7 +1288,7 @@ defmodule EtherCAT.Master do
           end
         else
           # Existing slave - check if we can reuse it
-          {requested_driver, _driver_opts} = parse_driver_config(slave_config.driver)
+          requested_driver = slave_config.driver || EtherCAT.Slave.GenericDriver
 
           # Reuse default driver only if name hasn't changed (to avoid PDO re-discovery deadlock)
           if existing_slave.driver == EtherCAT.Slave.GenericDriver and
