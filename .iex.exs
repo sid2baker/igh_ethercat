@@ -8,7 +8,7 @@ alias EtherCAT.Master
 alias EtherCAT.Config.{HardwareConfig, MasterConfig, DomainConfig, SlaveConfig}
 
 # Load SimpleHardwareConfig from test/support
-Code.require_file("test/support/simple_hardware_config.ex")
+Code.require_file("test/support/hardware_configs/simple_hardware_config.ex")
 Code.require_file("examples/simple_io_test.ex")
 
 # Create a shorter alias for the example module

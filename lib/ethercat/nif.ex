@@ -626,12 +626,12 @@ defmodule EtherCAT.Nif do
               break;
           }
 
-          // Extract bits from source
-          const mask = (@as(u8, 1) << @intCast(bits_to_read)) - 1;
+          // Extract bits from source (handle 8-bit case to avoid overflow)
+          const mask: u8 = if (bits_to_read >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_to_read)) - 1;
           const bits = (data[byte_idx] >> bit_idx) & mask;
 
-          // Write bits to destination
-          buffer[out_byte_idx] |= bits << out_bit_idx;
+          // Write bits to destination (use u16 to prevent shift overflow)
+          buffer[out_byte_idx] |= @as(u8, @truncate(@as(u16, bits) << out_bit_idx));
 
           bits_read += bits_to_read;
       }
@@ -666,8 +666,8 @@ defmodule EtherCAT.Nif do
           const bits_remaining_in_byte = 8 - bit_idx_usize;
           const bits_to_read = @min(bit_length - bits_read, bits_remaining_in_byte);
 
-          // Extract bits from source
-          const mask: u8 = (@as(u8, 1) << @intCast(bits_to_read)) - 1;
+          // Extract bits from source (handle 8-bit case to avoid overflow)
+          const mask: u8 = if (bits_to_read >= 8) 0xFF else (@as(u8, 1) << @intCast(bits_to_read)) - 1;
           const bits = (data[byte_idx] >> bit_idx) & mask;
 
           // Accumulate bits into result at correct position
@@ -708,7 +708,10 @@ defmodule EtherCAT.Nif do
       var buffer: [8]u8 = [_]u8{0} ** 8;
       extractBitsToBuffer(buffer[0..required_bytes], data_slice, entry.bit_offset, entry.bit_length);
 
-      std.log.debug("get_value: '{s}' at bit_offset={} = {any}", .{name, entry.bit_offset, buffer[0..required_bytes]});
+      // Debug: show raw domain bytes around the entry
+      const byte_offset = entry.bit_offset / 8;
+      const end_byte = @min(byte_offset + 4, data_slice.len);
+      std.log.debug("get_value: '{s}' bit_offset={} raw_domain[{}..{}]={any} extracted={any}", .{name, entry.bit_offset, byte_offset, end_byte, data_slice[byte_offset..end_byte], buffer[0..required_bytes]});
 
       // Return as Elixir binary for driver to decode (only the required bytes)
       const bin = try beam.allocator.alloc(u8, required_bytes);

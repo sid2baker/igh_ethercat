@@ -1142,17 +1142,18 @@ defmodule EtherCAT.Master do
   end
 
   defp configure_single_slave(data, position, slave_info) do
-    driver_module = slave_info.driver
     slave_pid = slave_info.pid
     hw_slave_config = get_hw_slave_config(data, position)
+    configurable_pdos? = GenServer.call(slave_pid, :configurable_pdos?)
 
-    Logger.debug("Configuring slave #{position} (#{inspect(driver_module)})")
+    Logger.debug("Configuring slave #{position} (#{inspect(slave_info.driver)})")
 
     with {:ok, slave_config_nif} <- get_slave_config_for_position(data, position),
-         sdos <- driver_module.get_sdo_config(slave_pid),
+         sdos <- GenServer.call(slave_pid, :get_sdo_config),
          :ok <- apply_sdos(slave_config_nif, position, sdos),
-         sync_managers <- driver_module.get_pdo_config(slave_pid),
-         :ok <- configure_pdos(slave_config_nif, position, sync_managers),
+         sync_managers <- GenServer.call(slave_pid, :get_pdo_config),
+         :ok <-
+           maybe_configure_pdos(slave_config_nif, position, sync_managers, configurable_pdos?),
          {:ok, new_data} <-
            register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
       {:ok, new_data}
@@ -1176,6 +1177,16 @@ defmodule EtherCAT.Master do
     end)
 
     :ok
+  end
+
+  # Conditionally configure PDOs based on driver capability
+  defp maybe_configure_pdos(_slave_config_nif, position, _sync_managers, false) do
+    Logger.debug("Slave #{position}: Skipping PDO configuration (fixed PDO layout)")
+    :ok
+  end
+
+  defp maybe_configure_pdos(slave_config_nif, position, sync_managers, true) do
+    configure_pdos(slave_config_nif, position, sync_managers)
   end
 
   # Configure PDOs - direct translation of ecrt_slave_config_pdos

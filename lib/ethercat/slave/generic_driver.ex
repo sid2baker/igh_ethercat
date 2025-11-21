@@ -43,11 +43,10 @@ defmodule EtherCAT.Slave.GenericDriver do
       }
 
   For custom encoding logic or complex state machines, implement a full driver
-  using the `EtherCAT.Slave.Driver` behaviour.
+  using `use EtherCAT.Slave.Driver`.
   """
 
-  use GenServer
-  @behaviour EtherCAT.Slave.Driver
+  use EtherCAT.Slave.Driver
   require Logger
 
   alias EtherCAT.Slave.Driver
@@ -63,53 +62,10 @@ defmodule EtherCAT.Slave.GenericDriver do
         }
 
   # ========================================================================
-  # Client API
-  # ========================================================================
-
-  @doc """
-  Start the generic driver process.
-
-  ## Options
-  - `:master` - Master process PID (required)
-  - `:position` - Slave bus position (required)
-  - `:name` - Slave semantic name (required)
-  - `:config` - Driver configuration map with `:sync_managers` and `:sdos` (required)
-  """
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
-  end
-
-  # ========================================================================
-  # Driver Behaviour Callbacks
-  # ========================================================================
-
-  @impl EtherCAT.Slave.Driver
-  def get_sdo_config(pid) do
-    GenServer.call(pid, :get_sdo_config)
-  end
-
-  @impl EtherCAT.Slave.Driver
-  def get_pdo_config(pid) do
-    GenServer.call(pid, :get_pdo_config)
-  end
-
-  @impl EtherCAT.Slave.Driver
-  def encode_pdo_value(pdo_name, entry_name, value, state) do
-    type = find_type(state.sync_managers, pdo_name, entry_name)
-    Driver.encode_by_type(type, value)
-  end
-
-  @impl EtherCAT.Slave.Driver
-  def decode_pdo_value(pdo_name, entry_name, binary, state) do
-    type = find_type(state.sync_managers, pdo_name, entry_name)
-    Driver.decode_by_type(type, binary)
-  end
-
-  # ========================================================================
   # GenServer Callbacks
   # ========================================================================
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     position = Keyword.fetch!(opts, :position)
     name = Keyword.fetch!(opts, :name)
@@ -128,60 +84,35 @@ defmodule EtherCAT.Slave.GenericDriver do
     {:ok, state}
   end
 
-  @impl true
-  def handle_call(:get_sdo_config, _from, state) do
-    {:reply, state.sdos, state}
-  end
-
-  @impl true
-  def handle_call(:get_pdo_config, _from, state) do
-    {:reply, state.sync_managers, state}
-  end
-
-  @impl true
-  def handle_call({:read, pdo_name, entry_name}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      with {:ok, binary} <- EtherCAT.Master.read_pdo_entry(state.master, unique_name),
-           {:ok, value} <- decode_pdo_value(pdo_name, entry_name, binary, state) do
-        {:ok, value}
-      end
-
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
-    result =
-      with {:ok, binary} <- encode_pdo_value(pdo_name, entry_name, value, state),
-           :ok <- EtherCAT.Master.write_pdo_entry(state.master, unique_name, binary) do
-        :ok
-      end
-
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:subscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-    result = EtherCAT.Master.subscribe(state.master, unique_name, subscriber)
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:unsubscribe, pdo_name, entry_name, subscriber}, _from, state) do
-    unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-    result = EtherCAT.Master.unsubscribe(state.master, unique_name, subscriber)
-    {:reply, result, state}
-  end
-
-  @impl true
+  @impl GenServer
   def terminate(reason, state) do
     Logger.info("GenericDriver terminating for slave #{state.position}: #{inspect(reason)}")
     :ok
+  end
+
+  # ========================================================================
+  # Driver Behaviour Callbacks
+  # ========================================================================
+
+  @impl EtherCAT.Slave.Driver
+  def configurable_pdos?(_state), do: true
+
+  @impl EtherCAT.Slave.Driver
+  def get_sdo_config(state), do: state.sdos
+
+  @impl EtherCAT.Slave.Driver
+  def get_pdo_config(state), do: state.sync_managers
+
+  @impl EtherCAT.Slave.Driver
+  def encode_pdo_value(pdo_name, entry_name, value, state) do
+    type = find_type(state.sync_managers, pdo_name, entry_name)
+    Driver.encode_by_type(type, value)
+  end
+
+  @impl EtherCAT.Slave.Driver
+  def decode_pdo_value(pdo_name, entry_name, binary, state) do
+    type = find_type(state.sync_managers, pdo_name, entry_name)
+    Driver.decode_by_type(type, binary)
   end
 
   # ========================================================================
