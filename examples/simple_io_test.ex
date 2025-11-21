@@ -9,6 +9,7 @@ defmodule Examples.SimpleIOTest do
   - Position 0: EK1100 EtherCAT Coupler
   - Position 1: EL1809 16-channel digital input (24V DC)
   - Position 2: EL2809 16-channel digital output (24V DC, 0.5A)
+  - Position 3: EL3202 2-channel RTD input (PT100/PT1000)
 
   ## Wiring
   For loopback testing, connect each output to its corresponding input:
@@ -403,6 +404,63 @@ defmodule Examples.SimpleIOTest do
   end
 
   # ============================================================================
+  # RTD (EL3202) Functions
+  # ============================================================================
+
+  @doc """
+  Read RTD channel value (resistance in 0.1 ohm units).
+
+  ## Parameters
+  - `channel`: RTD channel number (1 or 2)
+
+  ## Returns
+  - `{:ok, value}` - Raw resistance value (divide by 10 for ohms)
+  - `{:error, reason}` - On failure
+
+  ## Examples
+      {:ok, raw} = Examples.SimpleIOTest.get_rtd(1)
+      ohms = raw / 10.0
+      IO.puts("Channel 1: \#{ohms} Ω")
+  """
+  @spec get_rtd(1..2) :: {:ok, integer()} | {:error, term()}
+  def get_rtd(channel) when channel in 1..2 do
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"rtd_channel_#{channel}",
+         {:ok, value} <- EtherCAT.read(slaves.rtd_inputs, pdo_name, :value) do
+      {:ok, value}
+    else
+      {:error, reason} = error ->
+        Logger.error("Failed to read RTD channel #{channel}: #{inspect(reason)}")
+        error
+    end
+  end
+
+  @doc """
+  Read RTD channel status flags.
+
+  ## Parameters
+  - `channel`: RTD channel number (1 or 2)
+
+  ## Returns
+  - `{:ok, %{underrange: bool, overrange: bool, error: bool}}` - Status flags
+  - `{:error, reason}` - On failure
+  """
+  @spec get_rtd_status(1..2) :: {:ok, map()} | {:error, term()}
+  def get_rtd_status(channel) when channel in 1..2 do
+    with {:ok, slaves} <- get_slaves(),
+         pdo_name = :"rtd_channel_#{channel}",
+         {:ok, underrange} <- EtherCAT.read(slaves.rtd_inputs, pdo_name, :underrange),
+         {:ok, overrange} <- EtherCAT.read(slaves.rtd_inputs, pdo_name, :overrange),
+         {:ok, error} <- EtherCAT.read(slaves.rtd_inputs, pdo_name, :error) do
+      {:ok, %{underrange: underrange, overrange: overrange, error: error}}
+    else
+      {:error, reason} = error ->
+        Logger.error("Failed to read RTD status for channel #{channel}: #{inspect(reason)}")
+        error
+    end
+  end
+
+  # ============================================================================
   # Private Helpers
   # ============================================================================
 
@@ -420,11 +478,16 @@ defmodule Examples.SimpleIOTest do
     Simple I/O Test Ready!
     ========================================
 
-    Try these commands:
+    Digital I/O:
       Examples.SimpleIOTest.pattern_test()       # Visual test
       Examples.SimpleIOTest.loopback_test()      # Verify wiring
       Examples.SimpleIOTest.set_output(0, true)  # Manual control
       Examples.SimpleIOTest.get_input(0)         # Read input
+
+    RTD (EL3202):
+      Examples.SimpleIOTest.print_rtd()          # Print all RTD values
+      Examples.SimpleIOTest.get_rtd(1)           # Read channel 1
+      Examples.SimpleIOTest.get_rtd_status(1)    # Read channel 1 status
 
     Type: h Examples.SimpleIOTest
     ========================================

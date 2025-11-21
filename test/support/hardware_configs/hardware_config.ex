@@ -115,10 +115,8 @@ defmodule TestHardwareConfig do
       device_identity: %{vendor_id: 0x00000002, product_code: 0x0C823052},
       driver: Drivers.EL3202,
       config: %{
-        channels: [
-          %{rtd_element: :resistance_100, connection: :two_wire},
-          %{rtd_element: :resistance_100, connection: :two_wire}
-        ]
+        channel_1: %{rtd_element: :ohm_1_64, connection: :two_wire},
+        channel_2: %{rtd_element: :ohm_1_16, connection: :two_wire}
       },
       registered_entries: %{
         io_domain: el3202_registered_entries()
