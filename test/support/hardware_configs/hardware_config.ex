@@ -89,14 +89,14 @@ defmodule TestHardwareConfig do
           SyncManagerConfig.new(
             index: 0,
             direction: :output,
-            watchdog: :disabled,
+            watchdog: :enabled,
             pdos: el2809_pdos_sm0()
           ),
           # SM1: Channels 9-16
           SyncManagerConfig.new(
             index: 1,
             direction: :output,
-            watchdog: :disabled,
+            watchdog: :enabled,
             pdos: el2809_pdos_sm1()
           )
         ]
