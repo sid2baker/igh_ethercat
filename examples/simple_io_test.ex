@@ -56,7 +56,7 @@ defmodule Examples.SimpleIOTest do
   """
   @spec start() :: :ok | {:error, term()}
   def start do
-    config = SimpleHardwareConfig.hardware_config()
+    config = TestHardwareConfig.hardware_config()
 
     # Start master process (registers as EtherCAT.Master automatically)
     case EtherCAT.Master.start_link(master_index: 0) do

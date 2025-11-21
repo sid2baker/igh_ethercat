@@ -89,7 +89,9 @@ defmodule EtherCAT.Master do
     :last_slave_count,
     :stability_timer_ref,
     :cycle_interval_us,
-    :pending_writes
+    :pending_writes,
+    :pending_config_from,
+    :pending_activation_from
   ]
 
   @type t :: %__MODULE__{
@@ -122,7 +124,11 @@ defmodule EtherCAT.Master do
           # Map of {domain_name, unique_name} => %{from, timer_ref}
           pending_writes: %{
             {atom(), String.t()} => %{from: :gen_statem.from(), timer_ref: reference()}
-          }
+          },
+          # Caller waiting for set_hardware_config to complete (stale -> synced)
+          pending_config_from: :gen_statem.from() | nil,
+          # Caller waiting for start_cyclic to complete (all slaves OP)
+          pending_activation_from: :gen_statem.from() | nil
         }
 
   # ============================================================================
@@ -245,65 +251,6 @@ defmodule EtherCAT.Master do
   end
 
   @doc """
-  Configure hardware and start cyclic communication (high-level API).
-
-  This is a convenience function that:
-  1. Sets the hardware config
-  2. Waits for hardware to stabilize and sync (up to 10 seconds)
-  3. Configures slaves and starts cyclic mode
-  4. Returns slave PIDs
-
-  ## Timeout Expectations
-
-  - **Hardware stability**: Configurable via `stability_timeout` option (default: 1000ms = 1 second)
-  - **State transition**: Max 10 seconds to reach :synced state
-  - **Total timeout**: ~10 seconds + stability_timeout + activation time
-  - For large systems (>10 slaves), consider using the low-level API for custom timeouts
-
-  ## Configuration Options
-
-  Master accepts these init options (in microseconds, converted internally):
-  - `scan_interval`: Hardware polling interval (default: 100_000µs = 100ms)
-  - `stability_timeout`: Required stable duration (default: 1_000_000µs = 1000ms)
-
-  ## Parameters
-  - `master` - Master process (PID or module name)
-  - `config` - HardwareConfig struct
-
-  ## Returns
-  - `{:ok, %{slave_name => pid}}` - Map of slave names to driver PIDs
-  - `{:error, {:timeout_waiting_for_state, :synced}}` - Hardware didn't stabilize in time
-  - `{:error, reason}` - Configuration or verification error
-
-  ## Examples
-
-      # Quick setup (may timeout on slow hardware)
-      {:ok, slaves} = Master.configure_and_activate(master, config)
-
-      # Manual control for better timeout handling
-      :ok = Master.set_hardware_config(master, config)
-      # Monitor state with custom timeout...
-      :ok = Master.start_cyclic(master, 10_000, 100_000)
-      {:ok, slaves} = Master.get_slave_name_map(master)
-
-  For more control, use `set_hardware_config/2`, monitor state transitions,
-  and call `start_cyclic/3` manually.
-  """
-  @spec configure_and_activate(pid() | atom(), EtherCAT.Config.HardwareConfig.t()) ::
-          {:ok, %{atom() => pid()}} | {:error, term()}
-  def configure_and_activate(master \\ __MODULE__, config) do
-    alias EtherCAT.Config.HardwareConfig
-
-    with :ok <- HardwareConfig.validate(config),
-         :ok <- set_hardware_config(master, config),
-         :ok <- wait_for_state(master, :synced, 10_000),
-         {:ok, _} <- configure_all_and_activate(master, config),
-         {:ok, slave_map} <- get_slave_name_map(master) do
-      {:ok, slave_map}
-    end
-  end
-
-  @doc """
   Get a map of slave names to PIDs from the master's internal state.
 
   ## Returns
@@ -312,41 +259,6 @@ defmodule EtherCAT.Master do
   """
   def get_slave_name_map(master \\ __MODULE__) do
     :gen_statem.call(master, :get_slave_name_map)
-  end
-
-  defp wait_for_state(master, target_state, timeout) do
-    end_time = System.monotonic_time(:millisecond) + timeout
-
-    wait_loop = fn wait_fn ->
-      case get_state(master) do
-        ^target_state ->
-          :ok
-
-        _other_state ->
-          remaining = end_time - System.monotonic_time(:millisecond)
-
-          if remaining > 0 do
-            Process.sleep(min(100, remaining))
-            wait_fn.(wait_fn)
-          else
-            {:error, {:timeout_waiting_for_state, target_state}}
-          end
-      end
-    end
-
-    wait_loop.(wait_loop)
-  end
-
-  defp configure_all_and_activate(master, config) do
-    # This transitions from :synced to :operational
-    cycle_interval = config.master.cycle_interval || 10_000
-    nif_yield_interval = config.master.nif_yield_interval || 100_000
-
-    # start_cyclic will configure slaves and activate
-    case start_cyclic(master, cycle_interval, nif_yield_interval) do
-      :ok -> {:ok, :activated}
-      error -> error
-    end
   end
 
   # ============================================================================
@@ -384,7 +296,9 @@ defmodule EtherCAT.Master do
           last_slave_count: nil,
           stability_timer_ref: nil,
           cycle_interval_us: nil,
-          pending_writes: %{}
+          pending_writes: %{},
+          pending_config_from: nil,
+          pending_activation_from: nil
         }
 
         Logger.info("Master #{master_index} initialized")
@@ -552,9 +466,25 @@ defmodule EtherCAT.Master do
 
               {:error, reason} ->
                 Logger.error("Hardware verification failed: #{inspect(reason)}")
+
+                # Reply with error to pending caller if any
+                actions =
+                  if data.pending_config_from do
+                    [{:reply, data.pending_config_from, {:error, {:hardware_mismatch, reason}}}]
+                  else
+                    []
+                  end
+
                 # Reset and keep monitoring
-                new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
-                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+                new_data = %{
+                  data
+                  | last_slave_count: nil,
+                    stability_timer_ref: nil,
+                    pending_config_from: nil
+                }
+
+                {:keep_state, new_data,
+                 actions ++ [{:state_timeout, data.scan_interval, :retry_check}]}
             end
           else
             # Hardware changed during timer - reset monitoring
@@ -568,9 +498,24 @@ defmodule EtherCAT.Master do
 
         {:error, reason} ->
           Logger.error("Failed to re-check hardware: #{inspect(reason)}")
-          {:next_state, :offline, data}
+
+          # Reply with error to pending caller if any
+          actions =
+            if data.pending_config_from do
+              [{:reply, data.pending_config_from, {:error, {:connection_failed, reason}}}]
+            else
+              []
+            end
+
+          new_data = %{data | pending_config_from: nil}
+          {:next_state, :offline, new_data, actions}
       end
     end
+  end
+
+  def stale({:call, from}, {:set_hardware_config, _config}, %{pending_config_from: pending})
+      when pending != nil do
+    {:keep_state_and_data, [{:reply, from, {:error, :config_in_progress}}]}
   end
 
   def stale({:call, from}, {:set_hardware_config, config}, data) do
@@ -581,15 +526,17 @@ defmodule EtherCAT.Master do
       cancel_stability_timer(data.stability_timer_ref)
     end
 
-    # Reset monitoring state with new config
+    # Reset monitoring state with new config, store caller for deferred reply
     new_data = %{
       data
       | hardware_config: config,
         last_slave_count: nil,
-        stability_timer_ref: nil
+        stability_timer_ref: nil,
+        pending_config_from: from
     }
 
-    {:keep_state, new_data, [{:reply, from, :ok}, {:next_event, :internal, :check_hardware}]}
+    # Don't reply yet - will reply when check_hardware succeeds
+    {:keep_state, new_data, [{:next_event, :internal, :check_hardware}]}
   end
 
   def stale({:call, from}, _event, _data) do
@@ -604,10 +551,16 @@ defmodule EtherCAT.Master do
   # State: :synced
   # ============================================================================
 
+  def synced(:enter, _old_state, %{pending_config_from: nil} = data) do
+    Logger.info("Entered :synced state - hardware verified, slave drivers running")
+    {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
+  end
+
   def synced(:enter, _old_state, data) do
     Logger.info("Entered :synced state - hardware verified, slave drivers running")
-    # Start monitoring for hardware changes
-    {:keep_state_and_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
+    :gen_statem.reply(data.pending_config_from, :ok)
+    new_data = %{data | pending_config_from: nil}
+    {:keep_state, new_data, [{:state_timeout, data.scan_interval, :monitor_hardware}]}
   end
 
   def synced(:state_timeout, :monitor_hardware, data) do
@@ -714,40 +667,44 @@ defmodule EtherCAT.Master do
     {:next_state, :stale, new_data, [{:reply, from, :ok}]}
   end
 
+  def synced(
+        {:call, from},
+        {:start_cyclic, _cycle_interval, _nif_yield_interval},
+        %{pending_activation_from: pending} = _data
+      )
+      when pending != nil do
+    {:keep_state_and_data, [{:reply, from, {:error, :activation_in_progress}}]}
+  end
+
   def synced({:call, from}, {:start_cyclic, cycle_interval, nif_yield_interval}, data) do
     Logger.info("Starting cyclic mode")
 
-    # Configure and register all PDOs
-    case configure_all_slaves(data) do
-      {:ok, data_with_registry} ->
-        case Nif.master_activate(data_with_registry.master_ref) do
-          :ok ->
-            domain_refs = data_with_registry.domains |> Map.values() |> Enum.map(& &1.ref)
-            master_pid = self()
+    with {:ok, data_with_registry} <- configure_all_slaves(data),
+         :ok <- Nif.master_activate(data_with_registry.master_ref) do
+      domain_refs = data_with_registry.domains |> Map.values() |> Enum.map(& &1.ref)
+      master_pid = self()
 
-            task_pid =
-              spawn_link(fn ->
-                Nif.cyclic_task(
-                  master_pid,
-                  data_with_registry.master_ref,
-                  domain_refs,
-                  cycle_interval,
-                  nif_yield_interval
-                )
-              end)
+      task_pid =
+        spawn_link(fn ->
+          Nif.cyclic_task(
+            master_pid,
+            data_with_registry.master_ref,
+            domain_refs,
+            cycle_interval,
+            nif_yield_interval
+          )
+        end)
 
-            new_data = %{
-              data_with_registry
-              | task_pid: task_pid,
-                cycle_interval_us: cycle_interval
-            }
+      new_data = %{
+        data_with_registry
+        | task_pid: task_pid,
+          cycle_interval_us: cycle_interval,
+          pending_activation_from: from
+      }
 
-            {:next_state, :operational, new_data, [{:reply, from, :ok}]}
-
-          {:error, _} = error ->
-            {:keep_state_and_data, [{:reply, from, error}]}
-        end
-
+      # Don't reply yet - will reply when all slaves reach OP state
+      {:next_state, :operational, new_data}
+    else
       {:error, _} = error ->
         {:keep_state_and_data, [{:reply, from, error}]}
     end
@@ -1034,6 +991,48 @@ defmodule EtherCAT.Master do
         Logger.warning("Write timeout for #{unique_name} in domain #{domain_name}")
 
         {:keep_state, new_data}
+    end
+  end
+
+  # Handle master state changes from NIF
+  # NIF sends: {:master_state_changed, master_state}
+  # master_state contains al_states field indicating slave states
+  def operational(:info, {:master_state_changed, master_state}, %{pending_activation_from: nil}) do
+    Logger.debug("Master state changed: #{inspect(master_state)}")
+    :keep_state_and_data
+  end
+
+  def operational(:info, {:master_state_changed, master_state}, data) do
+    # Check if all slaves are in OP state
+    # al_state_* are booleans: true if ANY slave is in that state
+    # All slaves in OP means: op=true, init=false, preop=false, safeop=false
+    all_op? =
+      master_state.al_state_op == 1 and
+        master_state.al_state_init == 0 and
+        master_state.al_state_preop == 0 and
+        master_state.al_state_safeop == 0
+
+    if all_op? do
+      Logger.info("All slaves reached OP state")
+
+      # Build slave_name_map for reply
+      slave_map =
+        data.slaves
+        |> Map.values()
+        |> Enum.map(fn slave_info -> {slave_info.name, slave_info.pid} end)
+        |> Map.new()
+
+      # Reply to pending caller
+      :gen_statem.reply(data.pending_activation_from, {:ok, slave_map})
+
+      new_data = %{data | pending_activation_from: nil}
+      {:keep_state, new_data}
+    else
+      Logger.debug(
+        "Waiting for all slaves to reach OP (init=#{master_state.al_state_init}, preop=#{master_state.al_state_preop}, safeop=#{master_state.al_state_safeop}, op=#{master_state.al_state_op})"
+      )
+
+      :keep_state_and_data
     end
   end
 

@@ -133,7 +133,13 @@ defmodule EtherCAT do
           {:ok, %{atom() => pid()}} | {:error, term()}
   def configure_hardware(master, config_or_module) do
     with {:ok, config} <- get_config(config_or_module),
-         {:ok, slave_pids} <- Master.configure_and_activate(master, config) do
+         :ok <- Master.set_hardware_config(master, config),
+         {:ok, slave_pids} <-
+           Master.start_cyclic(
+             master,
+             config.master.cycle_interval || 10_000,
+             config.master.nif_yield_interval || 100_000
+           ) do
       {:ok, slave_pids}
     end
   end
