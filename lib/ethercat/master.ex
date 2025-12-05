@@ -1,72 +1,126 @@
 defmodule EtherCAT.Master do
   @moduledoc """
-  Simplified EtherCAT Master using gen_statem.
+  Master state machine orchestrating EtherCAT configuration and operation.
 
   ## State Machine
 
+  The Master progresses through 4 states as hardware becomes available and stable:
+
   ```
-  :offline ──connect──> :stale ──stable──> :synced ──activate──> :operational
-                           ↑                  ↓                        │
-                           └──hardware_change─┘                        │
-                           ↑                                            │
-                           └────────────stop_cyclic────────────────────┘
-  ```
-
-  States:
-  - `:offline` - No EtherCAT link, waiting for connection
-  - `:stale` - Link up, monitoring hardware topology for stability
-  - `:synced` - Hardware stable and verified, slave drivers running
-  - `:operational` - Cyclic task active, real-time operation
-
-  ## Simplified Architecture
-
-  1. **Domains** - Just ref + interval (no entries/subscribers in domain)
-  2. **Subscribers** - Stored in Master as `%{{slave_name, pdo, entry} => [pids]}`
-  3. **Hardware tracking** - Expected config + actual + diff tree
-  4. **Slaves** - Driver processes managed by Master
-
-  ## Domain Structure
-
-  ```elixir
-  domains: %{
-    domain_name => %{
-      ref: reference(),
-      interval: pos_integer()
-    }
-  }
+  :offline ──────connect──────> :stale ──────stable──────> :synced ──activate──> :operational
+                                   ↑                         ↓                        │
+                                   └─────hardware_change─────┘                       │
+                                   ↑                                                 │
+                                   └────────────stop_cyclic────────────────────────┘
   ```
 
-  ## Subscriber Structure
+  **:offline**
+  - Entry: No EtherCAT link, master not yet requested
+  - Action: Polls for link
+  - Exit: On `:connect` event (link detected)
 
-  ```elixir
-  subscribers: %{
-    unique_name => [pid, ...]
-  }
-  ```
+  **:stale**
+  - Entry: Link is up, topology may be unstable
+  - Action: Monitors slave count for 1 second (stability_timeout)
+  - Detects: If slave count changes, resets timer
+  - Exit: On stable topology, verify and transition to :synced
+  - Also exits to: :offline on connection loss, :stale again if hardware changes
 
-  Where:
-  - `unique_name` - Full entry identifier (e.g., `"slave_0:pdo:entry"`)
+  **:synced**
+  - Entry: Hardware verified, slave drivers started, domains created
+  - Action: Continuous monitoring (state_timeout every 100ms) for hardware changes
+  - Subscribers can be added
+  - Can apply new configuration
+  - Exit: On :start_cyclic → :operational, or on hardware change → :stale
 
-  ## Entry Registry
+  **:operational**
+  - Entry: Cyclic task started, all slaves in OP state
+  - Action: Real-time I/O active, processing every cycle_interval
+  - Notifications sent on value changes
+  - Writes buffered until processed
+  - Exit: On :stop_cyclic → :stale, or on errors → :stale
 
-  ```elixir
-  entry_registry: %{
-    unique_name => domain_name
-  }
-  ```
+  ## How Configuration Works
 
-  Maps unique entry names to their domains for routing read/write operations
+  When `set_hardware_config/2` is called:
 
-  ## Hardware Diff Structure
+  1. **Validation**: Check config structure, references, consistency
+  2. **Atomic Application**:
+     - Stop any existing slaves and domains
+     - For each slave in config:
+       a. Get/request slave config from IgH
+       b. Apply SDO configuration (device parameters)
+       c. Configure sync managers
+       d. Configure PDO mappings (complete before any registration)
+       e. Start slave driver process
+     - Create domain refs for each domain config
+     - Build entry registry (`%{unique_name => domain_name}`)
+  3. **State**: Stay in :stale until topology stable, then transition to :synced
+  4. **Blocking**: Caller blocks until entire config complete and verified
 
-  ```elixir
-  %{
-    type: :match | :mismatch | :partial_match,
-    path: [atom()],
-    changes: %{field => {expected, actual}},
-    children: [diff_tree]
-  }
-  ```
+  ## How Cyclic I/O Works
+
+  When `start_cyclic/3` is called from :synced state:
+
+  1. **Start Task**: Launch Zig cyclic_task in separate OS thread
+  2. **Wait for OP**: Block caller until all slaves reach operational state
+  3. **Enter :operational**: Now running real-time loop
+
+  The cyclic task:
+  - Runs every cycle_interval (e.g., 10ms)
+  - For each domain (respecting cycle_multiplier):
+    - Reads latest domain buffer from IgH (contains slave input values)
+    - Compares with cached values for each entry
+    - Sends change notifications for inputs
+    - Writes cached output values to domain buffer
+    - Queues domain for transmission to slaves
+  - Detects cycle overruns and reports diagnostics
+  - Yields to BEAM periodically (every nif_yield_interval)
+
+  ## State Data
+
+  The Master maintains:
+
+  - `master_ref` - IgH master resource (created/released in :offline)
+  - `slaves` - Map of position → %{pid, name, vendor, product, config}
+  - `domains` - Map of domain_name → %{ref, cycle_multiplier}
+  - `subscribers` - Map of unique_name → [pid, ...]
+  - `entry_registry` - Map of unique_name → domain_name (for routing I/O)
+  - `task_pid` - Cyclic task process PID (when operational)
+  - `hardware_config` - Expected configuration (from caller)
+  - `hardware_diff` - Mismatch details if verification fails
+  - `pending_writes` - Writes waiting for cyclic confirmation
+  - `pending_config_from` - Caller waiting for config application
+  - `pending_activation_from` - Caller waiting for OP state
+
+  ## Error Recovery
+
+  If any slave driver crashes:
+  1. Caught via `:EXIT` trap
+  2. All slaves stopped immediately
+  3. Cyclic task stopped
+  4. Master transitions to :stale for re-verification
+  5. Caller can reapply configuration
+
+  If cyclic task crashes:
+  1. Caught via `:EXIT` trap
+  2. All slaves stopped
+  3. Master transitions to :stale
+  4. Safe state: no PDO access without task running
+
+  ## Direct Slave Access
+
+  After configuration completes, use slave PIDs directly:
+
+      {:ok, slaves} = EtherCAT.configure_hardware(master, config)
+      EtherCAT.read(slaves.sensor_1, :ch1, :value)
+
+  Slave drivers handle:
+  - Decoding binary values to Elixir terms
+  - Routing I/O to correct domain
+  - Notifying subscribers of changes
+
+  No indirection, no hidden state, just direct GenServer calls to slave processes.
   """
 
   @behaviour :gen_statem
@@ -581,12 +635,17 @@ defmodule EtherCAT.Master do
             "Clearing #{map_size(data.subscribers)} subscriber(s) due to hardware change"
           )
 
+          # Reply to all pending operations
+          cleanup_pending_operations(data)
+
           # Reset state and transition to :stale
           new_data = %{
             data
             | slaves: %{},
               domains: %{},
               subscribers: %{},
+              pending_writes: %{},
+              pending_activation_from: nil,
               last_slave_count: nil,
               stability_timer_ref: nil
           }
@@ -610,12 +669,17 @@ defmodule EtherCAT.Master do
           "Clearing #{map_size(data.subscribers)} subscriber(s) due to monitoring failure"
         )
 
+        # Reply to all pending operations
+        cleanup_pending_operations(data)
+
         # Reset state and transition to :offline
         new_data = %{
           data
           | slaves: %{},
             domains: %{},
             subscribers: %{},
+            pending_writes: %{},
+            pending_activation_from: nil,
             last_slave_count: nil,
             stability_timer_ref: nil
         }
@@ -653,6 +717,9 @@ defmodule EtherCAT.Master do
     # Clear subscribers as PDO entries will be re-registered with new config
     Logger.debug("Clearing #{map_size(data.subscribers)} subscriber(s) due to config change")
 
+    # Reply to all pending operations
+    cleanup_pending_operations(data)
+
     # Reset state with new config and transition to :stale
     new_data = %{
       data
@@ -660,6 +727,8 @@ defmodule EtherCAT.Master do
         slaves: %{},
         domains: %{},
         subscribers: %{},
+        pending_writes: %{},
+        pending_activation_from: nil,
         last_slave_count: nil,
         stability_timer_ref: nil
     }
@@ -798,6 +867,11 @@ defmodule EtherCAT.Master do
     end)
 
     # Reset state and transition to :stale
+    # Reply to pending activation caller if any
+    if data.pending_activation_from do
+      :gen_statem.reply(data.pending_activation_from, {:error, :cyclic_stopped})
+    end
+
     new_data = %{
       data
       | task_pid: nil,
@@ -807,7 +881,8 @@ defmodule EtherCAT.Master do
         last_slave_count: nil,
         stability_timer_ref: nil,
         cycle_interval_us: nil,
-        pending_writes: %{}
+        pending_writes: %{},
+        pending_activation_from: nil
     }
 
     {:next_state, :stale, new_data, [{:reply, from, :ok}]}
@@ -1075,6 +1150,21 @@ defmodule EtherCAT.Master do
   # Private Helpers
   # ============================================================================
 
+  # Clean up pending operations before state transition
+  # Replies to all callers waiting for write/activation confirmation
+  defp cleanup_pending_operations(data) do
+    # Reply to all pending writes with error and cancel their timers
+    Enum.each(data.pending_writes, fn {_key, %{from: from, timer_ref: timer_ref}} ->
+      :gen_statem.reply(from, {:error, :domain_destroyed})
+      Process.cancel_timer(timer_ref)
+    end)
+
+    # Reply to pending activation caller if any
+    if data.pending_activation_from do
+      :gen_statem.reply(data.pending_activation_from, {:error, :domain_destroyed})
+    end
+  end
+
   defp verify_and_sync_hardware(data) do
     alias EtherCAT.Config.HardwareConfig
 
@@ -1142,12 +1232,12 @@ defmodule EtherCAT.Master do
 
   defp configure_single_slave(data, position, slave_info) do
     slave_pid = slave_info.pid
-    hw_slave_config = get_hw_slave_config(data, position)
     configurable_pdos? = GenServer.call(slave_pid, :configurable_pdos?)
 
     Logger.debug("Configuring slave #{position} (#{inspect(slave_info.driver)})")
 
-    with {:ok, slave_config_nif} <- get_slave_config_for_position(data, position),
+    with {:ok, hw_slave_config} <- get_hw_slave_config(data, position),
+         {:ok, slave_config_nif} <- get_slave_config_for_position(data, position),
          sdos <- GenServer.call(slave_pid, :get_sdo_config),
          :ok <- apply_sdos(slave_config_nif, position, sdos),
          sync_managers <- GenServer.call(slave_pid, :get_pdo_config),
@@ -1232,62 +1322,86 @@ defmodule EtherCAT.Master do
   # Register entries with domains based on registered_entries map
   defp register_entries(data, slave_config_nif, hw_slave_config, sync_managers) do
     # Build entry_registry as we register
-    entry_registry =
-      for {domain_name, entry_list} <- hw_slave_config.registered_entries,
-          {pdo_name, entry_name} <- entry_list,
-          into: %{} do
-        # Find entry in sync_managers
-        {index, subindex, bit_length, direction} =
-          find_entry_in_sync_managers(sync_managers, pdo_name, entry_name)
+    result =
+      Enum.reduce_while(hw_slave_config.registered_entries, {:ok, %{}}, fn {domain_name,
+                                                                            entry_list},
+                                                                           {:ok, acc_registry} ->
+        result =
+          Enum.reduce_while(entry_list, {:ok, acc_registry}, fn {pdo_name, entry_name},
+                                                                {:ok, registry_acc} ->
+            # Find entry in sync_managers
+            case find_entry_in_sync_managers(sync_managers, pdo_name, entry_name) do
+              {:ok, {index, subindex, bit_length, direction}} ->
+                unique_name = "#{hw_slave_config.name}:#{pdo_name}:#{entry_name}"
 
-        unique_name = "#{hw_slave_config.name}:#{pdo_name}:#{entry_name}"
+                # Get domain ref
+                domain_ref = data.domains[domain_name].ref
 
-        # Get domain ref
-        domain_ref = data.domains[domain_name].ref
+                # Register with NIF (skip gap entries 0x0000:0x00)
+                if index != 0 or subindex != 0 do
+                  _offset =
+                    Nif.slave_config_reg_pdo_entry(
+                      slave_config_nif,
+                      unique_name,
+                      index,
+                      subindex,
+                      bit_length,
+                      domain_ref,
+                      direction
+                    )
 
-        # Register with NIF (skip gap entries 0x0000:0x00)
-        if index != 0 or subindex != 0 do
-          _offset =
-            Nif.slave_config_reg_pdo_entry(
-              slave_config_nif,
-              unique_name,
-              index,
-              subindex,
-              bit_length,
-              domain_ref,
-              direction
-            )
+                  Logger.debug(
+                    "Registered #{unique_name} to domain #{domain_name} (direction: #{direction})"
+                  )
+                end
 
-          Logger.debug(
-            "Registered #{unique_name} to domain #{domain_name} (direction: #{direction})"
-          )
+                # Add to entry_registry
+                {:cont, {:ok, Map.put(registry_acc, unique_name, domain_name)}}
+
+              {:error, error} ->
+                Logger.error("Failed to find entry #{pdo_name}:#{entry_name}: #{inspect(error)}")
+                {:halt, {:error, error}}
+            end
+          end)
+
+        case result do
+          {:ok, final_registry} -> {:cont, {:ok, final_registry}}
+          {:error, _} = error -> {:halt, error}
         end
+      end)
 
-        # Track in entry_registry
-        {unique_name, domain_name}
-      end
+    case result do
+      {:ok, entry_registry} ->
+        # Merge new entries into Master's entry_registry
+        new_data = %{data | entry_registry: Map.merge(data.entry_registry, entry_registry)}
+        {:ok, new_data}
 
-    # Merge new entries into Master's entry_registry
-    new_data = %{data | entry_registry: Map.merge(data.entry_registry, entry_registry)}
-    {:ok, new_data}
+      {:error, error} ->
+        {:error, error}
+    end
   end
 
   # Find entry details in sync_managers structure
   defp find_entry_in_sync_managers(sync_managers, pdo_name, entry_name) do
-    Enum.find_value(sync_managers, fn sm ->
-      pdo = Enum.find(sm.pdos, &(&1.name == pdo_name))
+    case Enum.find_value(sync_managers, fn sm ->
+           pdo = Enum.find(sm.pdos, &(&1.name == pdo_name))
 
-      if pdo && Map.has_key?(pdo.entries, entry_name) do
-        {index, subindex, bit_length} = pdo.entries[entry_name]
-        {index, subindex, bit_length, sm.direction}
-      end
-    end) || raise "Entry #{pdo_name}:#{entry_name} not found in sync_managers"
+           if pdo && Map.has_key?(pdo.entries, entry_name) do
+             {index, subindex, bit_length} = pdo.entries[entry_name]
+             {index, subindex, bit_length, sm.direction}
+           end
+         end) do
+      result when is_tuple(result) -> {:ok, result}
+      nil -> {:error, {:entry_not_found, pdo_name, entry_name}}
+    end
   end
 
   # Get hardware slave config from HardwareConfig
   defp get_hw_slave_config(data, position) do
-    Enum.find(data.hardware_config.slaves, &(&1.position == position)) ||
-      raise "No hardware config for slave at position #{position}"
+    case Enum.find(data.hardware_config.slaves, &(&1.position == position)) do
+      nil -> {:error, {:no_config_for_position, position}}
+      config -> {:ok, config}
+    end
   end
 
   defp get_slave_config_for_position(data, position) do

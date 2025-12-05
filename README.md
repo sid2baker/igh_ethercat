@@ -1,154 +1,312 @@
 # EtherCAT
 
-**Declarative** real-time EtherCAT master for Elixir via Zig NIFs, wrapping [IgH EtherCAT Master](https://etherlab.org/en/ethercat/).
+**Real-time industrial automation** via declarative EtherCAT master in Elixir, powered by Zig NIFs wrapping [IgH EtherCAT Master](https://etherlab.org/en/ethercat/).
 
-Define your hardware configuration once using a beautiful Spark DSL, then use semantic names for all I/O operations.
+Define your hardware configuration once with type-safe structs, then use semantic names and direct slave PIDs for all I/O operations. Real-time cyclic I/O runs at microsecond precision in a separate thread.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:ethercat, "~> 0.1.0"},
-    {:spark, "~> 2.0"}
+    {:ethercat, "~> 0.1.0"}
   ]
 end
 ```
 
-Add EtherCAT to your application's supervision tree:
+Add to your application supervision tree:
 
 ```elixir
 def start(_type, _args) do
   children = [
-    {EtherCAT, master_index: 0}
+    {EtherCAT, master_index: 0}  # Starts EtherCAT.Master
   ]
 
   Supervisor.start_link(children, strategy: :one_for_one)
 end
 ```
 
-**Requirements:** IgH EtherCAT Master (libethercat + kernel module), Zig 0.15.2, Elixir 1.19+, Linux
+**Requirements:** 
+- IgH EtherCAT Master (libethercat + kernel module)
+- Zig 0.15.2 (compile-time only)
+- Elixir 1.19+
+- Linux (kernel module required)
+
+## Core Concept
+
+The library separates **configuration** from **operation**:
+
+```
+CONFIG PHASE (blocking)          OPERATION PHASE (real-time async)
+─────────────────────────────────────────────────────────────────
+1. Master starts, waits for link
+2. Hardware detected, topology stable
+3. Config applied: PDO mappings, SDOs, etc.
+4. Slave drivers started
+5. Domains created
+6. Cyclic task started ───────────→ Continuous I/O at fixed rate
+                                  - Read sensor values from network
+                                  - Detect changes, send notifications
+                                  - Write output values to network
+                                  - Synchronize clocks
+                                  - Recovery on errors
+```
+
+**Two-Phase Usage:**
+
+```elixir
+# Phase 1: Start infrastructure (happens automatically)
+{:ok, _} = EtherCAT.start_link(master_index: 0, name: EtherCAT.Master)
+
+# Phase 2: Configure hardware (blocks until ready, then runs async)
+{:ok, slaves} = EtherCAT.configure_hardware(EtherCAT.Master, MyMachine)
+# slaves = %{temp_sensor: #PID<0.123.0>, valve1: #PID<0.124.0>}
+
+# Phase 3: Use slave PIDs directly for I/O
+{:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
+:ok = EtherCAT.write(slaves.valve1, :ch1, :value, true)
+```
 
 ## Quick Start
 
 ### 1. Define Your Hardware
 
+Hardware configuration is a module with `hardware_config/0` function returning a `HardwareConfig` struct:
+
 ```elixir
 defmodule MyMachine do
-  use EtherCAT.Config
-
-  # Define domains with update intervals
-  domain :fast_loop, interval: 1      # 1ms critical control
-  domain :slow_loop, interval: 10     # 10ms diagnostics
-
-  # Configure each slave
-  slave position: 0, name: :temp_sensor do
-    # Auto-discovery enabled by default (driver: nil)
-    expect vendor: 0x00000002, product: 0x0C5A3052
-
-    config do
-      limit1 1000
-      limit2 2000
-      filter :enabled
-    end
-
-    entry :ch1, :value, domain: :fast_loop
-    entry :ch1, :error, domain: :slow_loop
-    entry :ch2, :value, domain: :fast_loop
-  end
-
-  slave position: 1, name: :valve_outputs do
-    # Custom driver example (optional - uses auto-discovery if omitted)
-    driver MyApp.CustomValveDriver
-
-    entry :ch1, :value, domain: :fast_loop
-    entry :ch2, :value, domain: :fast_loop
-    entry :ch3, :value, domain: :fast_loop
+  alias EtherCAT.Config
+  
+  def hardware_config do
+    %Config.HardwareConfig{
+      master: %Config.MasterConfig{
+        index: 0,
+        cycle_interval: 10_000,      # 10ms cycle
+        nif_yield_interval: 100_000   # Yield to BEAM every 100ms
+      },
+      domains: [
+        %Config.DomainConfig{name: :fast_loop, cycle_multiplier: 1},
+        %Config.DomainConfig{name: :slow_loop, cycle_multiplier: 10}
+      ],
+      slaves: [
+        %Config.SlaveConfig{
+          position: 0,
+          name: :temp_sensor,
+          device_identity: %{
+            vendor_id: 0x00000002,
+            product_code: 0x0C5A3052
+          },
+          driver: nil,  # Auto-discovery
+          config: %{},
+          registered_entries: %{
+            fast_loop: [{:ch1, :value}, {:ch1, :error}],
+            slow_loop: [{:ch1, :status}]
+          }
+        },
+        %Config.SlaveConfig{
+          position: 1,
+          name: :valve_outputs,
+          device_identity: %{vendor_id: 0x00000002, product_code: 0x0C5A3053},
+          driver: MyDriver,  # Custom driver
+          config: %{limits: [1000, 2000]},
+          registered_entries: %{
+            fast_loop: [{:ch1, :value}, {:ch2, :value}]
+          }
+        }
+      ]
+    }
   end
 end
 ```
 
-### 2. Use Your Configuration
+### 2. Configure and Use
 
 ```elixir
-# Get the master PID (it was started by your supervisor)
-master_pid = Process.whereis(EtherCAT.Master)
+# Get master PID (started by supervisor)
+master = Process.whereis(EtherCAT.Master)
 
-# Configure hardware and get slave PIDs
-{:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
+# Configure hardware - blocks until link up, hardware stable, all slaves synced
+{:ok, slaves} = EtherCAT.configure_hardware(master, MyMachine)
 
-# Read using slave PIDs and semantic names
+# Now use slave PIDs for I/O
 {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
-{:ok, error} = EtherCAT.read(slaves.temp_sensor, :ch1, :error)
-
-# Write using slave PIDs and semantic names
 :ok = EtherCAT.write(slaves.valve_outputs, :ch1, :value, true)
-:ok = EtherCAT.write(slaves.valve_outputs, :ch2, :value, false)
 
 # Subscribe to changes
 :ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
+
 receive do
   {:pdo_value_changed, _name, new_temp} ->
-    IO.puts("Temperature changed: #{new_temp}")
+    IO.puts("Temperature: #{new_temp}°C")
 end
 ```
 
-## Discovery Mode
+## How It Works
 
-Don't know your hardware configuration yet? Use discovery mode:
+### Master State Machine
 
-```elixir
-# Get the master PID
-master_pid = Process.whereis(EtherCAT.Master)
+The Master is a 4-state FSM that progresses from disconnected to operational:
 
-# Generate configuration from discovered hardware
-{:ok, config} = EtherCAT.generate_config(master_pid)
-IO.inspect(config, pretty: true)
-
-# Use the output to create your Spark DSL module
+```
+:offline → :stale → :synced → :operational
+            ↓ ↑                    ↓
+            └──────────────────────┘
+              (on hardware change)
 ```
 
-## Why Declarative?
+**:offline**
+- No EtherCAT link detected
+- Waiting for connection
+- No slaves known
 
-### Before (Imperative)
-```elixir
-{:ok, master, [s0, s1]} = EtherCAT.open()
-{:ok, _} = EtherCAT.configure_slave(s0, %{})
-{:ok, [h1, h2, h3]} = EtherCAT.register_entries(s0, [{:ch1, :value}, {:ch1, :error}])
-EtherCAT.start_cyclic(master)
-{:ok, temp} = EtherCAT.read(h1)  # Which entry is h1 again?
+**:stale**
+- Link is up, but topology unstable
+- Monitor hardware for stability (1 second timeout)
+- Detect topology changes (slave count)
+- Once stable → verify and transition to :synced
+
+**:synced**
+- Hardware verified and stable
+- Slave drivers started
+- Domains created (but cyclic task not running)
+- Subscribers can be added
+- Can apply new configuration
+
+**:operational**
+- Cyclic task running
+- Real-time I/O active
+- Slaves in OP state
+- All domains processing every cycle or at cycle_multiplier boundaries
+- Notifications sent on changes
+
+### Configuration Application
+
+When you call `configure_hardware/2`:
+
+1. **Validation**: Check config structure, references, etc.
+2. **Wait for Link**: Block until EtherCAT link up
+3. **Detect Hardware**: Poll for stable topology (1 second)
+4. **Apply Config** (atomic):
+   - Stop existing slaves and domains
+   - For each slave:
+     - Apply SDO configuration (device parameters)
+     - Configure sync managers and PDO mappings
+     - Start driver process
+   - Create domain refs and entry routing
+5. **Start Cyclic**: Launch real-time task in separate thread
+6. **Wait for OP**: Block until all slaves in operational state
+7. **Return**: Map of slave names → PIDs
+
+### Cyclic Task (Real-Time Loop)
+
+The `cyclic_task` function (Zig NIF) runs in a separate OS thread at fixed intervals:
+
+```
+Loop every cycle_interval (e.g., 10ms):
+  1. Sync clock with EtherCAT master
+  2. Receive frames from network (slave responses)
+  3. For each domain:
+     - If time for this domain (cycle % multiplier == 0):
+       a. Process domain (update buffer from received frame)
+       b. Detect changes: compare buffer with cached values
+       c. For inputs: send {:pdo_value_changed, ...} if changed
+       d. For outputs: write cached values back to buffer
+       e. Queue domain for transmission
+  4. Check master state (OP, INIT, etc.)
+  5. Send frames to network (slave commands)
+  6. Sleep to maintain exact cycle rate
+  7. Periodically yield to BEAM scheduler
 ```
 
-### After (Declarative)
+**Change Detection**: The task keeps `current_value` cached for each entry. It compares the domain buffer against cached values. On mismatch:
+- **Inputs**: Sends `{:pdo_value_changed, unique_name, value}` to subscribers
+- **Outputs**: Writes cached value back to domain (confirms delivery)
+
+**Overrun Handling**: If a cycle takes longer than the interval, the task:
+- Logs warning with diagnostic info
+- Sends `{:cycle_overrun_alert, ...}` to Master
+- Skips cycles if overrun > 50% of interval
+- Never blocks (deterministic)
+
+### Multi-Domain Support
+
+Domains allow different update rates for the same device:
+
 ```elixir
-master_pid = Process.whereis(EtherCAT.Master)
-{:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
-{:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)  # Clear!
+domains: [
+  %DomainConfig{name: :critical, cycle_multiplier: 1},    # Every cycle (10ms)
+  %DomainConfig{name: :normal, cycle_multiplier: 5},      # Every 5 cycles (50ms)
+  %DomainConfig{name: :monitoring, cycle_multiplier: 100} # Every 100 cycles (1s)
+]
 ```
 
-**Benefits:**
-- ✅ **Type-safe**: Spark validates at compile time
-- ✅ **Self-documenting**: Configuration is the documentation
-- ✅ **Semantic names**: No more tracking PIDs and handles
-- ✅ **Reusable**: Same config across dev/test/prod
-- ✅ **Version controlled**: Hardware config in your repo
+Each domain gets its own FMMU (Fieldbus Memory Management Unit), allowing:
+- Servo control at 1ms
+- I/O at 10ms
+- Diagnostics at 100ms
+- All in one cycle_interval
+
+## Custom Drivers
+
+Drivers encapsulate device-specific logic:
+
+```elixir
+defmodule MyTemperatureSensor do
+  @behaviour EtherCAT.Slave.Driver
+  
+  # Describe PDOs that this device supports
+  def get_pdo_config(_state) do
+    [
+      %{
+        sync_manager: {2, :input, :disabled},
+        pdo_index: 0x1A00,
+        pdo_name: :ch1,
+        entries: %{
+          value: {0x6000, 0x01, 16},   # CoE index/subindex/bits
+          error: {0x6000, 0x02, 8}
+        }
+      }
+    ]
+  end
+  
+  # Optional SDO configuration before cyclic starts
+  def get_sdo_config(_state) do
+    [
+      %SdoConfig{index: 0x8000, subindex: 0x01, data: <<1>>},  # Enable RTD
+      %SdoConfig{index: 0x8001, subindex: 0x00, data: <<100>>} # Sample rate
+    ]
+  end
+  
+  # Optional: Custom encoding/decoding
+  def encode_pdo_value(_state, :ch1, :value, raw_binary) do
+    {:ok, raw_binary}  # Just return binary, no transformation
+  end
+  
+  def decode_pdo_value(_state, :ch1, :value, raw_binary) do
+    <<value::little-signed-16>> = raw_binary
+    {:ok, value / 10.0}  # Convert to engineering units
+  end
+end
+```
+
+**Generic Driver** (default): Auto-discovers PDOs from device EEPROM, no custom logic needed.
 
 ## Configuration
 
-By default, the library looks for IgH EtherCAT headers and libraries at:
-- **Host:** `/usr/local/include` and `/usr/local/lib64`
-- **Nerves:** Auto-detected from `NERVES_SDK_SYSROOT`
+IgH library paths are detected automatically:
+- **Host**: `/usr/local/include`, `/usr/local/lib64`
+- **Nerves**: Auto-detected from `$NERVES_SDK_SYSROOT`
 
-Override these paths in your application config if needed:
+Override in application config:
 
 ```elixir
-# config/config.exs or config/host.exs
+# config/config.exs
 config :ethercat,
   igh_include_dir: "/opt/etherlab/include",
   igh_lib_dir: "/opt/etherlab/lib"
 ```
 
-For Nerves projects, paths are automatically detected from the sysroot. You can override them in `config/target.exs` if using a custom Nerves system:
+For Nerves targets:
 
 ```elixir
 # config/target.exs
@@ -157,186 +315,115 @@ config :ethercat,
   igh_lib_dir: "#{System.get_env("NERVES_SDK_SYSROOT")}/usr/lib"
 ```
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│ Spark DSL Configuration                     │
-│   MyMachine module (compile-time validated)│
-├─────────────────────────────────────────────┤
-│ EtherCAT.System (orchestration)            │
-│   ├─ Semantic name lookup                   │
-│   └─ Multi-domain routing                   │
-├─────────────────────────────────────────────┤
-│ EtherCAT.Master (gen_statem)               │
-│   State: offline → synced → operational     │
-│   ├─ Slave (per device)                     │
-│   └─ Domain (PDO grouping)                  │
-├─────────────────────────────────────────────┤
-│ Zig NIF Layer (22KB)                       │
-│   ├─ Cyclic task (µs timing)               │
-│   ├─ Bit-level change detection            │
-│   └─ Zero-copy domain access               │
-├─────────────────────────────────────────────┤
-│ IgH EtherCAT Master (C/Kernel)             │
-└─────────────────────────────────────────────┘
-```
-
-### Configuration Flow
-
-The declarative system follows EtherLab's recommended configuration sequence:
-
-1. **SDO Configuration** (Service Data Objects)
-   - Set device parameters (modes, limits, sample rates)
-   - Happens in driver's `configure/2` callback
-
-2. **PDO Configuration** (Process Data Objects) - **Done Upfront**
-   - Configure sync managers
-   - Clear and assign ALL PDO assignments
-   - Clear and add ALL PDO entry mappings
-   - Complete before any domain registration
-
-3. **Domain Registration**
-   - Route entries to domains (on-demand)
-   - No hardware configuration, just memory mapping
-
-4. **Cyclic Operation**
-   - Start cyclic communication
-   - Configuration locked
-
-This ensures all hardware configuration happens atomically during `configure_slave`, making `register_entry` a pure domain routing operation.
-
-## Multi-Domain Support
-
-Organize entries by update rate for efficient control loops:
-
-```elixir
-defmodule MyMachine do
-  use EtherCAT.Config
-
-  domain :critical, interval: 1    # 1ms - servo control
-  domain :normal, interval: 10     # 10ms - I/O
-  domain :monitoring, interval: 100  # 100ms - diagnostics
-
-  slave position: 0, name: :servo do
-    driver MyServoDriver
-
-    entry :position, :actual, domain: :critical
-    entry :velocity, :actual, domain: :critical
-    entry :position, :setpoint, domain: :critical
-    entry :temperature, :motor, domain: :monitoring
-    entry :error_flags, :all, domain: :monitoring
-  end
-end
-```
-
-Each domain creates its own FMMU (Fieldbus Memory Management Unit) mapping, allowing different update rates for the same sync manager.
-
-## Custom Drivers
-
-Device-specific drivers encapsulate PDO mappings and configuration:
-
-```elixir
-defmodule MyDriver do
-  @behaviour EtherCAT.Slave.Driver
-
-  def list_pdos(_state), do: [:ch1, :ch2]
-
-  def pdo_info(_state, :ch1) do
-    {:ok,
-     %{
-       sync_manager: {2, :input, :disable},  # SM index, direction, watchdog
-       pdo_index: 0x1A00,
-       entries: %{
-         value: {:sint16, 0x6000, 0x01, 16},
-         error: {:uint8, 0x6000, 0x02, 8}
-       }
-     }}
-  end
-
-  def configure(_ctx, state, config) do
-    # Optional: Configure device via SDO before PDO setup
-    # Slave.config_sdo(ctx.slave_pid, 0x8000, 0x01, <<value::16>>)
-    {:ok, Map.merge(state, config)}
-  end
-
-  def supports_pdo_config?(_state), do: true
-
-  # Optional: Custom encoding/decoding
-  def decode_value(_state, :ch1, :value, binary) do
-    <<value::little-signed-16>> = binary
-    {:ok, value / 10.0}  # Convert to engineering units
-  end
-
-  def encode_value(_state, :ch1, :setpoint, value) do
-    {:ok, <<trunc(value * 10)::little-signed-16>>}
-  end
-end
-```
-
-**Generic driver** auto-discovers PDOs from EEPROM for devices without specific drivers.
-
-## Hardware Verification
-
-The system can verify connected hardware matches your configuration:
-
-```elixir
-slave position: 0, name: :temp_sensor do
-  # Auto-discovery enabled by default
-  expect vendor: 0x00000002, product: 0x0C5A3052  # ← Verified at runtime
-  # ...
-end
-```
-
-If hardware doesn't match, `EtherCAT.open/1` returns a detailed error:
-```elixir
-{:error, {:hardware_mismatch, 0, "Expected vendor 0x2, product 0x0C5A3052, but found vendor 0x2, product 0x07D83052"}}
-```
-
 ## API Reference
 
 ### Configuration
 
-- `EtherCAT.configure_hardware(master_index, config)` - Configure and start slaves, returns `{:ok, %{slave_name => pid}}`
-- `EtherCAT.generate_config(master_index)` - Generate config from discovered hardware
-- `EtherCAT.stop_slaves(master_index)` - Stop all slaves and cyclic mode
+**`EtherCAT.configure_hardware(master, config_module_or_struct)`**
+- Blocks until operational
+- Returns `{:ok, %{slave_name => pid}}`
+- Applies config atomically
+- Starts cyclic task
+- All or nothing (no partial config)
+
+**`EtherCAT.generate_config(master)`**
+- Discovers slaves on network
+- Returns `HardwareConfig` struct (feature incomplete)
+
+**`EtherCAT.stop_slaves(master)`**
+- Stops cyclic task
+- Stops all slave drivers
+- Returns to :synced state
 
 ### I/O Operations
 
-- `EtherCAT.read(slave_pid, pdo_name, entry_name)` - Read entry value
-- `EtherCAT.write(slave_pid, pdo_name, entry_name, value)` - Write entry value
-- `EtherCAT.watch(slave_pid, pdo_name, entry_name)` - Subscribe to changes
-- `EtherCAT.unwatch(slave_pid, pdo_name, entry_name)` - Unsubscribe
+**`EtherCAT.read(slave_pid, pdo_name, entry_name)`**
+- Returns `{:ok, value}`
+- Value is decoded by driver
+- Only works in :operational state
 
-### Utility
+**`EtherCAT.write(slave_pid, pdo_name, entry_name, value)`**
+- Encodes value via driver
+- Returns `:ok` immediately
+- Actual write happens in cyclic task
+- Confirmation via `{:output_changed, ...}` message when done
 
-- `EtherCAT.find_master(master_index)` - Get Master PID
-- `EtherCAT.get_slaves(master_index)` - Get list of slave PIDs
+**`EtherCAT.watch(slave_pid, pdo_name, entry_name)`**
+- Subscribe to value changes
+- Calling process receives `{:pdo_value_changed, unique_name, value}`
+- Only works in :operational state
+
+**`EtherCAT.unwatch(slave_pid, pdo_name, entry_name)`**
+- Unsubscribe from changes
+
+## Architecture
+
+```
+┌────────────────────────────────────────────┐
+│ Public API: EtherCAT module                │
+│ ├─ configure_hardware()                    │
+│ ├─ read/write/watch/unwatch                │
+│ └─ Delegates to Master                     │
+├────────────────────────────────────────────┤
+│ Master (gen_statem FSM)                    │
+│ ├─ offline → stale → synced → operational  │
+│ ├─ Verifies hardware matches config        │
+│ ├─ Manages slave driver pool               │
+│ ├─ Routes I/O to correct domain            │
+│ └─ Handles errors and recovery             │
+├────────────────────────────────────────────┤
+│ Slave Drivers (GenServer processes)        │
+│ ├─ One per device                          │
+│ ├─ Encodes/decodes values                  │
+│ └─ Handles device-specific logic           │
+├────────────────────────────────────────────┤
+│ Configuration (Pure Data)                  │
+│ ├─ HardwareConfig                          │
+│ ├─ SlaveConfig / DomainConfig              │
+│ ├─ PdoConfig / SdoConfig                   │
+│ └─ Full compile-time validation            │
+├────────────────────────────────────────────┤
+│ Zig NIF Layer (45KB)                       │
+│ ├─ cyclic_task: Real-time loop             │
+│ ├─ Bit-level I/O                           │
+│ ├─ Change detection                        │
+│ ├─ Resource management                     │
+│ └─ Zero-copy domain buffers                │
+├────────────────────────────────────────────┤
+│ IgH EtherCAT Library (C + Linux kernel)   │
+│ └─ Network I/O, master sync, slave comms   │
+└────────────────────────────────────────────┘
+```
 
 ## Troubleshooting
 
-**Permission Denied:**
+**Permission Denied (network access)**
 ```bash
 sudo chmod 666 /dev/EtherCAT0
-# or
+# or add user to ethercat group
 sudo usermod -a -G ethercat $USER
 ```
 
-**No Slaves Found:**
-- Check physical connections and power
-- Verify kernel module: `lsmod | grep ec_`
+**No Slaves Found**
+- Check physical connections (power, network cables)
+- Verify kernel module is loaded: `lsmod | grep ec_`
 - Check master state: `ethercat master`
 
-**Hardware Mismatch:**
-- Use discovery mode to see actual hardware
-- Update `expect vendor:` and `product:` in config
-- Check slave position numbers
+**Link Down Errors**
+- Check EtherCAT power supply
+- Verify network connections
+- Run ethercat diagnostics: `ethercat slaves -v`
 
-**Compilation Errors:**
-- Run `mix deps.get` to install Spark
-- Ensure driver modules are compiled
-- Check DSL syntax (domains before slaves)
+**Compilation Errors**
+- Ensure Zig 0.15.2 installed
+- Check IgH paths: `pkg-config --cflags libethercat`
+- Verify Elixir 1.19+
+
+**Slave Not Responding (Hardware Mismatch)**
+- Generate config: `EtherCAT.generate_config(master)`
+- Compare with actual hardware
+- Update vendor/product in config
 
 ## License
 
-[See LICENSE file]
+See LICENSE file

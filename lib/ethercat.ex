@@ -1,87 +1,172 @@
 defmodule EtherCAT do
   @moduledoc """
-  EtherCAT library and main API.
+  Real-time EtherCAT master for industrial automation.
+
+  ## Overview
+
+  This library provides a two-phase system for real-time I/O control:
+
+  1. **Configuration Phase**: Define hardware once, apply atomically
+  2. **Operation Phase**: Real-time cyclic I/O in separate thread at fixed intervals
+
+  The Master is a 4-state FSM that transitions from disconnected → stable topology →
+  configured → operational. Once operational, a cyclic task reads sensor inputs, detects
+  changes, writes output values, and notifies subscribers asynchronously.
 
   ## Installation
 
-  Add EtherCAT to your application's supervision tree:
+  Add to your supervision tree:
 
       children = [
-        {EtherCAT, master_index: 0}
+        {EtherCAT, master_index: 0}  # Starts EtherCAT.Master process
       ]
 
-  Or use Master directly:
+       Supervisor.start_link(children, strategy: :one_for_one)
 
-      children = [
-        {EtherCAT.Master, master_index: 0, name: MyMaster}
-      ]
-
-  ## Two-Phase Initialization
-
-  ### Phase 1: Start Infrastructure
-
-  Add to your supervision tree as shown above.
-
-  ### Phase 2: Configure Hardware
-
-      # Configure and get slave PIDs
-      {:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
-      # slaves = %{temp_sensor: #PID<0.123.0>, valve1: #PID<0.124.0>, ...}
-
-  ## Usage
-
-  Work directly with slave PIDs:
-
-      {:ok, value} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
-      :ok = EtherCAT.write(slaves.valve1, :control, :command, true)
-      :ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
-
-      receive do
-        {:pdo_value_changed, unique_name, value} ->
-          IO.puts("Value changed: \#{value}")
-      end
-
-  ## Quick Start
+  ## Basic Usage
 
   Define your hardware configuration:
 
       defmodule MyMachine do
-        use EtherCAT.Config
+        alias EtherCAT.Config
 
-        master do
-          index 0
-          cycle_interval 10_000
-        end
-
-        domain :fast_loop, interval: 1
-
-        slave position: 0, name: :temp_sensor do
-          # driver uses auto-discovery by default (driver: nil)
-          expect vendor: 0x00000002, product: 0x0C5A3052
-
-          config do
-            limit1 1000
-            limit2 2000
-          end
-
-          entry :ch1, :value, domain: :fast_loop
-          entry :ch1, :error, domain: :fast_loop
+        def hardware_config do
+          %Config.HardwareConfig{
+            master: %Config.MasterConfig{
+              index: 0,
+              cycle_interval: 10_000,      # 10ms cycle
+              nif_yield_interval: 100_000   # Yield to BEAM every 100ms
+            },
+            domains: [
+              %Config.DomainConfig{name: :fast_loop, cycle_multiplier: 1}
+            ],
+            slaves: [
+              %Config.SlaveConfig{
+                position: 0,
+                name: :temp_sensor,
+                device_identity: %{
+                  vendor_id: 0x00000002,
+                  product_code: 0x0C5A3052
+                },
+                driver: nil,  # Auto-discovery
+                config: %{},
+                registered_entries: %{
+                  fast_loop: [{:ch1, :value}, {:ch1, :error}]
+                }
+              }
+            ]
+          }
         end
       end
 
-  Then configure and use the system:
+  Then configure and use:
 
-      {:ok, slaves} = EtherCAT.configure_hardware(master_pid, MyMachine)
+      master = Process.whereis(EtherCAT.Master)
+      {:ok, slaves} = EtherCAT.configure_hardware(master, MyMachine)
       {:ok, temp} = EtherCAT.read(slaves.temp_sensor, :ch1, :value)
-      :ok = EtherCAT.write(slaves.valve1, :ch1, :value, true)
+      :ok = EtherCAT.write(slaves.temp_sensor, :ch1, :value, 25.0)
+
+  Subscribe to changes:
+
+      :ok = EtherCAT.watch(slaves.temp_sensor, :ch1, :value)
+      receive do
+        {:pdo_value_changed, _name, new_temp} ->
+          IO.puts("Temperature: \#{new_temp}°C")
+      end
+
+  ## How It Works
+
+  ### Configuration Phase
+
+  When you call `configure_hardware/2`:
+
+  1. Wait for EtherCAT link (if not present)
+  2. Detect slaves (poll until topology stable, ~1 second)
+  3. Stop any existing configuration
+  4. For each slave:
+     - Apply SDO configuration (device parameters)
+     - Configure sync managers and PDO mappings
+     - Start driver process
+  5. Create domains (FMMU memory mapping)
+  6. Start cyclic task (separate OS thread)
+  7. Wait for all slaves to reach operational state
+  8. Return map of slave names → PIDs
+
+  The entire config is atomic: either all slaves configured, or all rolled back.
+
+  ### Operation Phase
+
+  The cyclic task runs in a separate thread, every cycle_interval (e.g., 10ms):
+
+  1. Sync clock with EtherCAT master
+  2. Receive network frames (slave responses)
+  3. For each domain:
+     - Process domain (update buffer from frame)
+     - Detect changes: compare buffer with cached values
+     - Send notifications for changed inputs
+     - Write outputs to buffer (source of truth)
+     - Queue domain for transmission
+  4. Check master state
+  5. Send frames to network
+  6. Sleep to maintain exact cycle rate
+  7. Periodically yield to BEAM scheduler
+
+  ### Direct Slave PID Access
+
+  Instead of looking up slaves by name each time, you get PIDs from `configure_hardware/2`:
+
+      {:ok, slaves} = EtherCAT.configure_hardware(master, MyMachine)
+      # slaves = %{
+      #   temp_sensor: #PID<0.123.0>,
+      #   valve1: #PID<0.124.0>
+      # }
+
+  Use these PIDs directly for all I/O (no indirection, no hidden state).
+
+  ### Multi-Domain Support
+
+  Domains allow different update rates:
+
+      domains: [
+        %DomainConfig{name: :critical, cycle_multiplier: 1},    # Every cycle (10ms)
+        %DomainConfig{name: :normal, cycle_multiplier: 5},      # Every 5 cycles (50ms)
+        %DomainConfig{name: :monitoring, cycle_multiplier: 100} # Every 100 cycles (1s)
+      ]
+
+  Each domain has its own FMMU mapping, enabling:
+  - Servo control at 1ms
+  - I/O at 10ms
+  - Diagnostics at 100ms
+  - All with single cycle_interval
+
+  ### Error Recovery
+
+  If a slave crashes, the Master:
+  - Stops cyclic task
+  - Stops all slaves
+  - Transitions back to :stale
+  - Clears all subscribers
+
+  Configuration can be reapplied to recover.
 
   ## Architecture
 
-  - **Declarative**: Define hardware config once, reuse everywhere
-  - **Direct access**: Work with slave PIDs directly, no wrapper structs
-  - **Type-safe**: Drivers handle encoding/decoding
-  - **Semantic names**: Use `:temp_sensor` instead of position 0
-  - **Two-phase init**: Infrastructure managed separately from configuration
+  ```
+  Supervision Tree
+  └─ EtherCAT.Master (gen_statem)
+     ├─ Slave Drivers (GenServer pool)
+     └─ Cyclic Task (Zig NIF, separate thread)
+        └─ IgH EtherCAT Library (C + Linux kernel)
+  ```
+
+  ## Key Concepts
+
+  - **Declarative**: Define hardware config struct, Master applies atomically
+  - **Direct access**: Use slave PIDs directly, not names or indices
+  - **Type-safe**: Drivers encode/decode values, config validated upfront
+  - **Real-time**: Cyclic task at µs precision in separate thread
+  - **Semantic naming**: Refer to `slaves.temp_sensor` not position 0
+  - **Fail-safe**: All-or-nothing configuration, supervisor restarts on crash
   """
 
   alias EtherCAT.Master

@@ -1,5 +1,100 @@
 defmodule EtherCAT.Nif do
-  @moduledoc false
+  @moduledoc """
+  Zig NIF wrapper for IgH EtherCAT Master C library.
+
+  This module provides 39 NIFs that wrap the IgH EtherCAT C library, including:
+
+  - **Master lifecycle**: request, activate, reset, release
+  - **Slave configuration**: sync manager, PDO mapping, SDO setup
+  - **Domain management**: create, state, size, register entries
+  - **Data access**: get_value, set_value (bit-level I/O)
+  - **Introspection**: master_get_slave, master_get_pdo, etc.
+  - **Cyclic task**: Real-time loop running in separate thread
+
+  ## Error Handling Philosophy
+
+  Errors fall into two categories:
+
+  1. **Recoverable** (returned as tuples):
+     - Network issues (link down, slave not responding)
+     - Resource exhaustion (out of memory, no masters available)
+     - Configuration failures (wrong indices, duplicate PDO entries)
+     - These return `{:ok, result}` or `{:error, reason}`
+
+  2. **Exceptional** (cause NIF panic/crash):
+     - Programming errors that should never happen
+     - Invalid indices, null pointers, memory corruption
+     - These crash the calling Elixir process (supervisor restarts)
+     - E.g., `get_value/2` with invalid domain ref
+
+  ## Resource Management
+
+  Three resources are auto-managed via Zig destructors:
+
+  1. **MasterResource**: Wraps `ec_master_t*`, releases via `ecrt_release_master()`
+  2. **DomainAccessorResource**: Wraps domain layout + buffer, calls `deinit()`
+  3. **SlaveConfigResource**: Wraps `ec_slave_config_t*` (implicitly managed by master)
+
+  All resources are freed automatically by garbage collector via destructor callbacks.
+
+  ## Cyclic Task
+
+  The `cyclic_task/5` function runs in a dedicated OS thread:
+
+  ```
+  cyclic_task(
+    master_pid,           # Elixir Master process
+    master_resource,      # NIF master ref
+    domain_accessors,     # Array of domain refs
+    interval,             # Cycle interval in microseconds
+    nif_yield_interval    # Yield to BEAM every N microseconds
+  )
+  ```
+
+  Runs forever (until error or Master kills it):
+  - Every cycle_interval:
+    1. Sync clock
+    2. Receive network frames
+    3. Process each domain (respecting cycle_multiplier)
+    4. Detect value changes, send notifications
+    5. Send frames
+    6. Sleep to maintain exact rate
+  - Yields to BEAM scheduler every nif_yield_interval
+  - Detects and reports cycle overruns
+  - Sends `{:cyclic_task_died, ...}` to master on crash
+
+  ## Change Detection
+
+  For each entry in each domain:
+  - Store `current_value[8 bytes]` (cached)
+  - In cyclic task, compare domain buffer with cached
+  - If changed:
+    - For inputs: Send `{:data_changed, domain_name, unique_name, value}` to Master
+    - For outputs: Write cached value back (confirm delivery)
+
+  This is memory-efficient (no history buffer) and precise (bit-level comparison).
+
+  ## Bit-Level I/O
+
+  PDO entries can span partial bytes (e.g., 3 bits of a 16-bit field):
+  - `bit_offset`: Absolute position in domain buffer
+  - `bit_length`: Width in bits (1-64)
+  - Extraction: Mask, shift, and extract from buffer
+  - Writing: Read-modify-write to preserve surrounding bits
+
+  Special care taken for:
+  - Boundary crossings (bit spans multiple bytes)
+  - Endianness (big/little via CoE index)
+  - Truncation/overflow handling
+
+  ## Thread Safety
+
+  - Single mutex per domain protects `current_value` field
+  - Cyclic task runs in isolated OS thread
+  - No synchronization with C library's domain buffer access
+    (assumes IgH only modifies during `ecrt_domain_process()`)
+  - All BEAM callbacks routed through `master_pid`
+  """
 
   @nerves_sysroot System.get_env("NERVES_SDK_SYSROOT")
 
@@ -33,7 +128,6 @@ defmodule EtherCAT.Nif do
       master_create_domain: [],
       master_slave_config: [],
       master_reset: [],
-      release_master: [],
       master_get_slave: [],
       get_value: [],
       set_value: [],
@@ -1022,7 +1116,6 @@ defmodule EtherCAT.Nif do
                   _ = try beam.send(master_pid, .{ .state_changed, accessor.domain_name, new_state.wc_state }, .{});
               }
 
-              // FIX C1: Acquire mutex BEFORE reading domain data to prevent race condition
               // This protects against concurrent set_value() calls modifying current_value
               accessor.mutex.lock();
               defer accessor.mutex.unlock();
