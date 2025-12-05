@@ -72,6 +72,10 @@ const MAX_PDO_ENTRY_BYTES = 8;
 /// Maximum number of PDO entries per domain to prevent unbounded growth
 const MAX_ENTRIES_PER_DOMAIN = 1024;
 
+/// Cycle overrun threshold as percentage of cycle period before skipping cycles
+/// 50 = skip cycles if overrun exceeds 50% of cycle period
+const CYCLE_OVERRUN_THRESHOLD_PERCENT = 50;
+
 // ============================================================================
 // TYPE DEFINITIONS
 // ============================================================================
@@ -225,6 +229,15 @@ pub const DomainAccessor = struct {
     }
 
     /// Initialize domain data pointer (called once during cyclic_task setup)
+    ///
+    /// Empty domains (no PDOs registered) are valid and expected during startup:
+    /// - size = 0 when no PDO entries have been registered yet
+    /// - data pointer is null for empty domains
+    /// - Returns empty slice &[_]u8{} which is safe to read/write to (no-op)
+    /// - get_value returns zeros until domain is populated with entries
+    ///
+    /// This allows domains to be created early (before PDO configuration) and
+    /// gradually populated with entries, which is the normal Elixir supervision flow.
     pub fn initDomainData(self: *DomainAccessor) !void {
         const domain = try self.getDomain();
         const size = ecrt.ecrt_domain_size(domain);
@@ -247,6 +260,11 @@ pub const DomainAccessor = struct {
 
 /// Packed representation of ec_master_state_t
 /// Required because Zig doesn't support bitfields (see https://github.com/ziglang/zig/issues/1499)
+/// Bit layout:
+///   - slaves_responding: bits 0-31 (u32)
+///   - al_states: bits 32-35 (u4, encodes 4 bits for AL states)
+///   - link_up: bit 36 (u1)
+///   - padding: bits 37-63 (u27)
 const packed_ec_master_state_t = packed struct {
     slaves_responding: u32,
     al_states: u4,
@@ -733,37 +751,57 @@ pub fn set_value(domain_accessor: DomainAccessorResource, master_pid: beam.pid, 
 
 /// Configure a sync manager for the slave
 /// Let it crash: Invalid configuration is a programming error
+/// Returns SlaveConfigError if sync_index is invalid or configuration fails
 pub fn slave_config_sync_manager(slave_config: SlaveConfigResource, sync_index: u8, direction: PdoDirection, watchdog_mode: WatchdogMode) !void {
     const result = ecrt.ecrt_slave_config_sync_manager(slave_config.unpack(), sync_index, @intFromEnum(direction), @intFromEnum(watchdog_mode));
-    if (result != 0) return MasterError.SlaveConfigError;
+    if (result != 0) {
+        std.log.err("slave_config_sync_manager failed: sync_index={}, direction={}, watchdog_mode={}", .{sync_index, @intFromEnum(direction), @intFromEnum(watchdog_mode)});
+        return MasterError.SlaveConfigError;
+    }
 }
 
 /// Add a PDO to the sync manager's PDO assignment
 /// Let it crash: Invalid PDO assignment is a programming error
+/// Returns SlaveConfigError if sync_index or PDO index is invalid
 pub fn slave_config_pdo_assign_add(slave_config: SlaveConfigResource, sync_index: u8, index: u16) !void {
     const result = ecrt.ecrt_slave_config_pdo_assign_add(slave_config.unpack(), sync_index, index);
-    if (result != 0) return MasterError.SlaveConfigError;
+    if (result != 0) {
+        std.log.err("slave_config_pdo_assign_add failed: sync_index={}, pdo_index=0x{X:0>4}", .{sync_index, index});
+        return MasterError.SlaveConfigError;
+    }
 }
 
 /// Clear the sync manager's PDO assignment
 /// Let it crash: Invalid sync manager is a programming error
+/// Returns SlaveConfigError if sync_index is invalid
 pub fn slave_config_pdo_assign_clear(slave_config: SlaveConfigResource, sync_index: u8) !void {
     const result = ecrt.ecrt_slave_config_pdo_assign_clear(slave_config.unpack(), sync_index);
-    if (result != 0) return MasterError.SlaveConfigError;
+    if (result != 0) {
+        std.log.err("slave_config_pdo_assign_clear failed: sync_index={}", .{sync_index});
+        return MasterError.SlaveConfigError;
+    }
 }
 
 /// Add a PDO entry to a PDO's mapping
 /// Let it crash: Invalid PDO mapping is a programming error
+/// Returns SlaveConfigError if PDO index, entry index, or bit length is invalid
 pub fn slave_config_pdo_mapping_add(slave_config: SlaveConfigResource, pdo_index: u16, entry_index: u16, entry_subindex: u8, entry_bit_length: u8) !void {
     const result = ecrt.ecrt_slave_config_pdo_mapping_add(slave_config.unpack(), pdo_index, entry_index, entry_subindex, entry_bit_length);
-    if (result != 0) return MasterError.SlaveConfigError;
+    if (result != 0) {
+        std.log.err("slave_config_pdo_mapping_add failed: pdo_index=0x{X:0>4}, entry_index=0x{X:0>4}, entry_subindex={}, bit_length={}", .{pdo_index, entry_index, entry_subindex, entry_bit_length});
+        return MasterError.SlaveConfigError;
+    }
 }
 
 /// Clear a PDO's mapping
 /// Let it crash: Invalid PDO index is a programming error
+/// Returns SlaveConfigError if PDO index is invalid
 pub fn slave_config_pdo_mapping_clear(slave_config: SlaveConfigResource, pdo_index: u16) !void {
     const result = ecrt.ecrt_slave_config_pdo_mapping_clear(slave_config.unpack(), pdo_index);
-    if (result != 0) return MasterError.SlaveConfigError;
+    if (result != 0) {
+        std.log.err("slave_config_pdo_mapping_clear failed: pdo_index=0x{X:0>4}", .{pdo_index});
+        return MasterError.SlaveConfigError;
+    }
 }
 
 /// Register a PDO entry for process data exchange and add to domain layout
@@ -882,8 +920,9 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
     // Main cyclic loop with deterministic timing
     var next_cycle_time: i128 = std.time.nanoTimestamp();
     const cycle_period_ns: i128 = @intCast(interval * std.time.ns_per_us);
-    // FIX C2: Initialize with actual monotonic time, not zero
-    var cycle_start_time: u64 = @intCast(std.time.nanoTimestamp());
+    // Initialize application time from actual monotonic clock to avoid time discontinuity
+    // This ensures the first application_time call uses the real system time, not an arbitrary offset
+    var cycle_start_time: u64 = @intCast(@max(0, std.time.nanoTimestamp())); // Clamp to 0 if negative (shouldn't happen)
 
     std.log.info("Entering main cyclic loop", .{});
 
@@ -999,22 +1038,40 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         if (sleep_ns > 0) {
             std.Thread.sleep(@intCast(sleep_ns));
         } else {
-            // FIX H3: Cycle overrun detected - notify master process
-            const overrun_us: u64 = @intCast(@divTrunc(-sleep_ns, std.time.ns_per_us));
-            std.log.warn("Cycle overrun: {d}µs (cycle {d})", .{overrun_us, counter});
+            // Cycle overrun detected - notify master process with diagnostics
+            const overrun_ns: u64 = @intCast(-sleep_ns);
+            const overrun_us: u64 = @divTrunc(overrun_ns, std.time.ns_per_us);
 
-            // Notify master process of overrun for telemetry/monitoring
-            _ = beam.send(master_pid, .{ .cycle_overrun, overrun_us, counter }, .{}) catch |err| {
-                std.log.err("Failed to send overrun notification: {}", .{err});
+            // Calculate overrun percentage relative to cycle period
+            const cycle_period_ns_unsigned: u64 = @intCast(cycle_period_ns);
+            const overrun_percent: u32 = @intCast(@divTrunc(overrun_ns * 100, cycle_period_ns_unsigned));
+
+            std.log.warn("Cycle overrun: {d}µs ({d}% of {d}µs cycle, cycle {d})", .{
+                overrun_us,
+                overrun_percent,
+                @divTrunc(cycle_period_ns_unsigned, std.time.ns_per_us),
+                counter
+            });
+
+            // Send alert to master process with diagnostic info (threshold-agnostic)
+            _ = beam.send(master_pid, .{ .cycle_overrun_alert, .{
+                .overrun_us = overrun_us,
+                .overrun_percent = overrun_percent,
+                .cycle_number = counter,
+                .cycle_period_us = @divTrunc(cycle_period_ns_unsigned, std.time.ns_per_us),
+            }}, .{}) catch |err| {
+                std.log.err("Failed to send overrun alert: {}", .{err});
             };
 
-            // Adaptive recovery: skip cycles if severely overrun (> 50% of cycle period)
-            const overrun_ns: u64 = @intCast(-sleep_ns);
-            const half_cycle: u64 = @intCast(@divTrunc(cycle_period_ns, 2));
-            if (overrun_ns > half_cycle) {
-                const cycles_to_skip: u32 = @intCast(@divTrunc(overrun_ns, cycle_period_ns));
+            // Adaptive recovery: skip cycles if overrun exceeds configured threshold
+            if (overrun_percent > CYCLE_OVERRUN_THRESHOLD_PERCENT) {
+                const cycles_to_skip: u32 = @intCast(@divTrunc(overrun_ns, cycle_period_ns_unsigned));
                 next_cycle_time += @as(i128, @intCast(cycles_to_skip)) * cycle_period_ns;
-                std.log.warn("Skipping {d} cycles to resync", .{cycles_to_skip});
+                std.log.warn("Skipping {d} cycles to resync (overrun {d}% > threshold {d}%)", .{
+                    cycles_to_skip,
+                    overrun_percent,
+                    CYCLE_OVERRUN_THRESHOLD_PERCENT
+                });
             }
         }
 
