@@ -57,18 +57,19 @@ defmodule FakeEtherCAT do
 
   ## Environment Variables
 
-  - `FAKE_EC_HOMEDIR`: Directory for RtIPC bulletin board and SDO JSON files
-  - `FAKE_EC_NAME`: Name for RtIPC config and SDO JSON file
-  - `FAKE_EC_PREFIX`: Prefix for RtIPC variables (useful for multiple simulators)
+  Fakeethercat uses these environment variables (all optional with defaults):
+  - `FAKE_EC_HOMEDIR`: Directory for RtIPC bulletin board (default: system temp)
+  - `FAKE_EC_NAME`: Name for RtIPC config (default: "FakeEtherCAT")
+  - `FAKE_EC_PREFIX`: Prefix for RtIPC variables (default: none)
+
+  The defaults work fine for testing, no configuration needed.
   """
 
   @doc """
   Sets up the fakeethercat environment for testing.
 
-  Creates a temporary directory for RtIPC bulletin board and configures
-  environment variables. Automatically cleans up on test exit.
-
-  Returns `{:ok, fake_home: path}` with the temporary directory path.
+  Currently a no-op as fakeethercat defaults work fine.
+  Kept for consistency with test setup patterns.
 
   ## Example
 
@@ -77,20 +78,7 @@ defmodule FakeEtherCAT do
       end
   """
   def setup do
-    fake_home =
-      Path.join(System.tmp_dir!(), "fake_ethercat_#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(fake_home)
-
-    System.put_env("FAKE_EC_HOMEDIR", fake_home)
-    System.put_env("FAKE_EC_NAME", "ethercat_test")
-    System.put_env("FAKE_EC_PREFIX", "test")
-
-    ExUnit.Callbacks.on_exit(fn ->
-      File.rm_rf!(fake_home)
-    end)
-
-    {:ok, fake_home: fake_home}
+    :ok
   end
 
   @doc """

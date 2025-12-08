@@ -145,13 +145,6 @@ defmodule FakeEtherCAT.SimulatedLoopbackTest do
       assert is_pid(slaves.coupler)
     end
 
-    test "RtIPC environment is configured" do
-      # Check environment variables were set by setup
-      assert System.get_env("FAKE_EC_HOMEDIR") != nil
-      assert System.get_env("FAKE_EC_NAME") != nil
-      assert System.get_env("FAKE_EC_PREFIX") != nil
-    end
-
     test "inverted config is valid" do
       config = SimpleHardwareConfig.hardware_config()
       inverted = FakeEtherCAT.invert_config(config)
