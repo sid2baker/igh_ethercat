@@ -109,12 +109,20 @@ defmodule EtherCAT.Nif do
   @igh_include_dir Application.compile_env(:ethercat, :igh_include_dir, @default_include_dir)
   @igh_lib_dir Application.compile_env(:ethercat, :igh_lib_dir, @default_lib_dir)
 
+  @link_lib (if Mix.env() == :test do
+               # In test mode, link both fakeethercat and ethercat
+               # fakeethercat needs ethercat symbols for fallback
+               [{:system, "fakeethercat"}, {:system, "ethercat"}]
+             else
+               {:system, "ethercat"}
+             end)
+
   use Zig,
     otp_app: :ethercat,
     c: [
       include_dirs: [@igh_include_dir],
       library_dirs: [@igh_lib_dir],
-      link_lib: {:system, "ethercat"}
+      link_lib: @link_lib
     ],
     nifs: [
       version_magic: [],

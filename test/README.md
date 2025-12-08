@@ -1,127 +1,217 @@
 # EtherCAT Test Suite
 
-This directory contains tests for the EtherCAT library, organized into unit tests and hardware integration tests.
+This directory contains tests for the EtherCAT library, organized into fakeethercat integration tests and hardware tests.
 
 ## Test Structure
 
 ```
 test/
-├── unit/              # Unit tests (no hardware required)
-│   └── driver_test.exs
-├── hardware/          # Hardware integration tests (require physical EtherCAT hardware)
-│   ├── slave_detection_test.exs
-│   ├── digital_io_test.exs
-│   └── rtd_input_test.exs
+├── fakeethercat/      # Integration tests using libfakeethercat (no hardware required)
+│   ├── config_test.exs
+│   ├── domain_test.exs
+│   ├── loopback_test.exs
+│   └── simulated_loopback_test.exs
 └── support/           # Test support modules
-    └── hardware_config.ex
+    ├── fake_ethercat.ex          # FakeEtherCAT helper with config inversion
+    ├── hardware_configs/
+    │   ├── hardware_config.ex
+    │   └── simple_hardware_config.ex
+    └── drivers/
+        ├── el1809.ex
+        ├── el2809.ex
+        └── el3202.ex
 ```
+
+## Testing Philosophy
+
+### Fakeethercat Integration Tests (Default)
+
+Tests use `libfakeethercat` to simulate the EtherCAT master without requiring physical hardware. The library implements the complete EtherCAT master API in userspace and uses RtIPC (shared memory) for process data exchange.
+
+**Key Features:**
+- No hardware required
+- Fast execution
+- Test full stack including NIFs, Master, Domain, Slave supervision
+- Config inversion allows dual-master loopback testing
+
+**How It Works:**
+- In `MIX_ENV=test`, the NIF links against both `libfakeethercat` and `libethercat`
+- `libfakeethercat` intercepts EtherCAT API calls and simulates master behavior
+- Process data stored in RtIPC shared memory (`/tmp/FakeEtherCAT/`)
+- Two masters can run back-to-back with inverted configs for true loopback
+
+### Hardware Tests (Gated)
+
+Tests that require physical EtherCAT hardware are tagged with `@tag :hardware` and only run when `ETHERCAT_HARDWARE=true`.
 
 ## Running Tests
 
-### Unit Tests Only (Default)
+### Fakeethercat Tests (Default)
 
-Run tests that don't require hardware:
+Run all tests without hardware (36 tests):
 
 ```bash
 mix test
 ```
 
-### Hardware Integration Tests
-
-Hardware tests require the following physical setup:
-
-- **Position 0**: EK1100 EtherCAT Coupler
-- **Position 1**: EL1809 (16-channel digital input, 24V DC)
-- **Position 2**: EL2809 (16-channel digital output, 24V DC, 0.5A)
-- **Position 3**: EL3202 (2-channel RTD input)
-
-**Wiring Requirements:**
-- Each EL2809 output channel connected to corresponding EL1809 input channel
-  - Output Ch1 → Input Ch1
-  - Output Ch2 → Input Ch2
-  - ... (all 16 channels)
-- EL3202 Channel 1: 120Ω resistor connected
-- EL3202 Channel 2: 100Ω resistor connected
-
-Run all hardware tests:
+Run specific test files:
 
 ```bash
-ETHERCAT_HARDWARE=true mix test --only hardware
+# Configuration and inversion tests (15 tests)
+mix test test/fakeethercat/config_test.exs
+
+# Domain configuration tests (5 tests)
+mix test test/fakeethercat/domain_test.exs
+
+# Config inversion validation (5 tests)
+mix test test/fakeethercat/loopback_test.exs
+
+# Simulated I/O operations (11 tests)
+mix test test/fakeethercat/simulated_loopback_test.exs
 ```
 
-Run specific hardware test suites:
+## Future: Hardware Integration Tests
 
-```bash
-# Digital I/O loopback tests
-ETHERCAT_HARDWARE=true mix test --only hardware:digital_io
-
-# RTD resistor reading tests
-ETHERCAT_HARDWARE=true mix test --only hardware:rtd
-```
-
-Run all tests (unit + hardware):
-
-```bash
-ETHERCAT_HARDWARE=true mix test
-```
+Hardware tests can be added later for validation with real EtherCAT hardware.
+For now, all testing is performed using libfakeethercat which provides
+comprehensive simulation capabilities without requiring physical devices.
 
 ## Test Descriptions
 
-### Unit Tests
+### Fakeethercat Integration Tests
 
-#### `unit/driver_test.exs`
-Tests driver modules without requiring hardware:
-- PDO structure validation
-- Encoding/decoding of values
-- Driver metadata and configuration
+#### `fakeethercat/config_test.exs` (15 tests)
+Tests basic configuration without physical hardware:
+- Master request and activation
+- Config inversion logic and validation
+- Hardware config structure validation
+- Slave metadata preservation
 
-### Hardware Integration Tests
+#### `fakeethercat/domain_test.exs` (5 tests)
+Tests domain configuration:
+- Domain configuration with SimpleHardwareConfig
+- Registered entries per domain
+- Config inversion preserves domain structure
 
-#### `hardware/slave_detection_test.exs`
-Tests basic system initialization and slave detection:
-- System opens successfully
-- All configured slaves are detected
-- Basic read/write operations work
+#### `fakeethercat/loopback_test.exs` (5 tests)
+Tests config inversion details:
+- Sync manager direction inversion
+- PDO configuration preservation
+- Watchdog and SDO preservation
+- Complete config validation
 
-#### `hardware/digital_io_test.exs`
-Tests digital I/O loopback (EL2809 → EL1809):
-- Single channel operations
+#### `fakeethercat/simulated_loopback_test.exs` (11 tests)
+Simulates hardware tests using fakeethercat:
+- Digital I/O write and read operations
 - All 16 channels independently
-- Pattern testing (binary counter, alternating, walking ones)
-- Timing and rapid toggling
+- Alternating patterns and rapid toggling
+- Master and slave lifecycle
+- Configuration validation
 
-#### `hardware/rtd_input_test.exs`
-Tests RTD input reading with fixed resistors:
-- Basic resistance reading (120Ω and 100Ω)
-- Measurement stability over time
-- Rapid reading performance
-- Range validation
+## Test Helpers
 
-## Hardware Configuration
+### `FakeEtherCAT`
 
-The test hardware configuration is defined in `test/support/hardware_config.ex`. This module specifies:
-- Slave positions and drivers
-- Expected vendor and product codes
-- PDO and entry mappings
-- SDO configuration (for EL3202 OHMS mode)
+Helper module for fakeethercat testing. Provides:
+
+- **`setup/0`**: Sets up RtIPC environment (FAKE_EC_HOMEDIR, etc.)
+- **`invert_config/1`**: Inverts hardware config for slave emulation
+
+**Config Inversion:**
+
+Swaps `EC_DIR_INPUT` ↔ `EC_DIR_OUTPUT` in sync manager configurations. This allows running two applications back-to-back that exchange process data via RtIPC.
+
+```elixir
+real_config = TestConfigBuilder.new()
+|> TestConfigBuilder.add_slave(:do, position: 1, driver: EL2809)
+|> TestConfigBuilder.build()
+
+fake_config = FakeEtherCAT.invert_config(real_config)
+
+# Start master with real config (master writes to outputs)
+{:ok, master1} = EtherCAT.Master.start_link(master_id: 0, config: real_config)
+
+# Start emulator with inverted config (master reads from inputs)
+{:ok, master2} = EtherCAT.Master.start_link(master_id: 1, config: fake_config)
+
+# Both share process data via RtIPC
+```
+
+### Creating Test Hardware Configs
+
+Use `SimpleHardwareConfig` as a template to create additional hardware configs:
+
+```elixir
+# Use existing config
+config = SimpleHardwareConfig.hardware_config()
+
+# Or create new configs in test/support/hardware_configs/
+# Example: minimal_config.ex, rtd_config.ex, etc.
+```
+
+## Fakeethercat Environment
+
+When tests run, fakeethercat uses these environment variables:
+
+- **`FAKE_EC_HOMEDIR`**: Directory for RtIPC bulletin board (defaults to `/tmp/fake_ethercat_<pid>`)
+- **`FAKE_EC_NAME`**: Name for RtIPC config (defaults to `ethercat_test`)
+- **`FAKE_EC_PREFIX`**: Prefix for RtIPC variables (defaults to `test`)
+
+Each test gets a fresh isolated environment that's cleaned up on exit.
 
 ## Troubleshooting
 
+### Fakeethercat tests fail to compile
+
+Ensure `libfakeethercat` is installed:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install libfakeethercat-dev
+
+# Or build from source (if part of IgH distribution)
+./configure --enable-fakeuserlib
+make
+sudo make install
+```
+
+### "undefined reference to ecrt_*" during compilation
+
+The NIF is linking against fakeethercat. Ensure both libraries are available:
+
+```bash
+# Check libraries exist
+ls /usr/lib64/libfakeethercat.so*
+ls /usr/lib64/libethercat.so*
+
+# Or check /usr/lib/x86_64-linux-gnu/ on Debian
+```
+
 ### Hardware tests fail with "slave not found"
+
 - Verify all EtherCAT slaves are powered and connected
 - Check slave positions match the configuration
 - Run `ethercat slaves` to see detected hardware
 
 ### Digital I/O loopback tests fail
+
 - Verify output channels are correctly wired to input channels
 - Check for loose connections
 - Ensure 24V power supply is adequate
 
 ### RTD tests report incorrect resistance values
+
 - Verify resistor values with multimeter
 - Check for good electrical connections
 - Ensure EL3202 is configured in OHMS mode (rtd_element = 8)
 
 ### Permission errors
+
 - Ensure your user has permission to access the EtherCAT master
 - May need to run with sudo or add user to appropriate group
+
+## References
+
+- [IgH EtherCAT Master Documentation](https://etherlab.org/en/ethercat/)
+- [Fakeethercat Library Documentation](https://etherlab.org/en/ethercat/master.html#libfakeethercat)
+- [RtIPC Documentation](https://etherlab.org/en/rtipc/)
