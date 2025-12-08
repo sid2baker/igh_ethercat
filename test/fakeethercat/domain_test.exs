@@ -56,15 +56,41 @@ defmodule FakeEtherCAT.DomainTest do
       assert length(do_slave.registered_entries.fast) == 16
     end
 
-    test "inverted config preserves registered entries" do
+    test "inverted config inverts registered entry directions" do
       config = SimpleHardwareConfig.hardware_config()
       inverted = FakeEtherCAT.invert_config(config)
 
-      # Check digital inputs
+      # Check digital inputs - original has :input, inverted should have :output
       di_orig = Enum.find(config.slaves, &(&1.name == :digital_inputs))
       di_inv = Enum.find(inverted.slaves, &(&1.name == :digital_inputs))
 
-      assert di_orig.registered_entries == di_inv.registered_entries
+      # Same domain keys
+      assert Map.keys(di_orig.registered_entries) == Map.keys(di_inv.registered_entries)
+
+      # Check directions are inverted
+      for {domain, entries} <- di_orig.registered_entries do
+        inv_entries = di_inv.registered_entries[domain]
+
+        for {{pdo_name, orig_dir}, {inv_pdo_name, inv_dir}} <- Enum.zip(entries, inv_entries) do
+          assert pdo_name == inv_pdo_name
+          assert orig_dir == :input
+          assert inv_dir == :output
+        end
+      end
+
+      # Check digital outputs - original has :output, inverted should have :input
+      do_orig = Enum.find(config.slaves, &(&1.name == :digital_outputs))
+      do_inv = Enum.find(inverted.slaves, &(&1.name == :digital_outputs))
+
+      for {domain, entries} <- do_orig.registered_entries do
+        inv_entries = do_inv.registered_entries[domain]
+
+        for {{pdo_name, orig_dir}, {inv_pdo_name, inv_dir}} <- Enum.zip(entries, inv_entries) do
+          assert pdo_name == inv_pdo_name
+          assert orig_dir == :output
+          assert inv_dir == :input
+        end
+      end
     end
   end
 end

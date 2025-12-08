@@ -1077,15 +1077,15 @@ pub fn cyclic_task(master_pid: beam.pid, master_resource: MasterResource, domain
         // Yield to BEAM scheduler periodically
         if (counter % yield_interval == 0) {
             beam.yield() catch {
-                // FIX H4: Clean up all resources before returning
-                for (domain_accessors) |domain_accessor_resource| {
-                    const accessor = domain_accessor_resource.unpack();
-                    accessor.deinit();  // Frees layout and entry names
-                    domain_accessor_resource.release();
-                }
-                master_resource.release();
-
-                try beam.send(master_pid, .cyclic_task_died, .{});
+                // FIX H4: Signal task death and let BEAM GC handle resource cleanup
+                // DO NOT call deinit() explicitly - the destructor callback handles it.
+                // Calling deinit() + release() creates a race condition in dual-master
+                // scenarios where both cyclic tasks terminate simultaneously:
+                // - Thread A calls deinit(), sets cleaned_up = true
+                // - Thread B's destructor fires, sees cleaned_up = true, skips
+                // - But if timing differs, both may try to free the same memory
+                // Let the BEAM resource system handle cleanup via destructors only.
+                _ = beam.send(master_pid, .cyclic_task_died, .{}) catch {};
                 return;
             };
         }

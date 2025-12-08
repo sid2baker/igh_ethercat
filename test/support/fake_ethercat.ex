@@ -158,11 +158,41 @@ defmodule FakeEtherCAT do
       |> Enum.map(&invert_sync_manager/1)
 
     inverted_config = %{slave.config | sync_managers: inverted_sync_managers}
-    %{slave | config: inverted_config}
+
+    # Also invert the registered_entries directions
+    inverted_registered_entries =
+      slave.registered_entries
+      |> Enum.map(fn {domain_name, entries} ->
+        inverted_entries =
+          Enum.map(entries, fn {pdo_name, direction} ->
+            {pdo_name, invert_direction(direction)}
+          end)
+
+        {domain_name, inverted_entries}
+      end)
+      |> Map.new()
+
+    %{slave | config: inverted_config, registered_entries: inverted_registered_entries}
   end
 
   defp invert_sync_manager(sync_manager) do
-    %{sync_manager | direction: invert_direction(sync_manager.direction)}
+    inverted_pdos =
+      sync_manager.pdos
+      |> Enum.map(&invert_pdo/1)
+
+    %{sync_manager | direction: invert_direction(sync_manager.direction), pdos: inverted_pdos}
+  end
+
+  defp invert_pdo(pdo) do
+    # Invert the entry names in the entries map (:input ↔ :output)
+    inverted_entries =
+      pdo.entries
+      |> Enum.map(fn {entry_name, value} ->
+        {invert_direction(entry_name), value}
+      end)
+      |> Map.new()
+
+    %{pdo | entries: inverted_entries}
   end
 
   defp invert_direction(:input), do: :output

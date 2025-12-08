@@ -37,7 +37,6 @@ defmodule FakeEtherCAT.SimulatedLoopbackTest do
   end
 
   describe "Digital I/O Operations" do
-
     test "single channel write and read", %{slaves: slaves} do
       # Write to output
       assert :ok = EtherCAT.write(slaves.digital_outputs, :channel_1, :output, true)

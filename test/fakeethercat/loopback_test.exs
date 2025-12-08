@@ -48,7 +48,7 @@ defmodule FakeEtherCAT.LoopbackTest do
       end)
     end
 
-    test "preserves PDO configuration" do
+    test "preserves PDO configuration with inverted entry directions" do
       config = SimpleHardwareConfig.hardware_config()
       inverted = FakeEtherCAT.invert_config(config)
 
@@ -60,12 +60,18 @@ defmodule FakeEtherCAT.LoopbackTest do
         # PDO count should be the same
         assert length(orig_sm.pdos) == length(inv_sm.pdos)
 
-        # PDO names and entries should be preserved
+        # PDO names and indices should be preserved, entry directions inverted
         Enum.zip(orig_sm.pdos, inv_sm.pdos)
         |> Enum.each(fn {orig_pdo, inv_pdo} ->
           assert orig_pdo.name == inv_pdo.name
           assert orig_pdo.index == inv_pdo.index
-          assert orig_pdo.entries == inv_pdo.entries
+
+          # Entry keys (directions) should be inverted, values preserved
+          for {orig_key, orig_val} <- orig_pdo.entries do
+            inv_key = if orig_key == :input, do: :output, else: :input
+            assert Map.has_key?(inv_pdo.entries, inv_key)
+            assert inv_pdo.entries[inv_key] == orig_val
+          end
         end)
       end)
     end
