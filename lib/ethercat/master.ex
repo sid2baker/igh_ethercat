@@ -205,7 +205,8 @@ defmodule EtherCAT.Master do
   # ============================================================================
 
   def start_link(opts \\ []) do
-    :gen_statem.start_link({:local, __MODULE__}, __MODULE__, opts, [])
+    name = Keyword.get(opts, :name, __MODULE__)
+    :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
   end
 
   def get_slaves(master \\ __MODULE__) do

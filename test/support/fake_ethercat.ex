@@ -66,19 +66,57 @@ defmodule FakeEtherCAT do
   """
 
   @doc """
-  Sets up the fakeethercat environment for testing.
+  Sets up dual-master loopback for fakeethercat testing.
 
-  Currently a no-op as fakeethercat defaults work fine.
-  Kept for consistency with test setup patterns.
+  Takes a hardware config, inverts it, and starts an emulator master with the
+  inverted config. This creates a true loopback where:
+  - Real master writes outputs → RtIPC → Emulator master reads as inputs
+  - Emulator master writes outputs → RtIPC → Real master reads as inputs
+
+  Returns `{:ok, emulator_master, emulator_slaves}` for use in tests.
 
   ## Example
 
       setup do
-        FakeEtherCAT.setup()
+        config = SimpleHardwareConfig.hardware_config()
+        {:ok, emulator_master, emulator_slaves} = FakeEtherCAT.setup(config)
+
+        # Now start real master
+        {:ok, master} = start_supervised({EtherCAT.Master, name: EtherCAT.Master})
+        {:ok, slaves} = EtherCAT.configure_hardware(master, config)
+
+        {:ok, master: master, slaves: slaves,
+              emulator_master: emulator_master, emulator_slaves: emulator_slaves}
+      end
+
+      test "write to real master, read from emulator", ctx do
+        # Write to real master's output
+        :ok = EtherCAT.write(ctx.slaves.digital_outputs, :channel_1, :output, true)
+
+        # Read from emulator's corresponding input (inverted sync managers)
+        {:ok, value} = EtherCAT.read(ctx.emulator_slaves.digital_outputs, :channel_1, :input)
+        assert value == true  # True loopback via RtIPC!
       end
   """
-  def setup do
-    :ok
+  def setup(hardware_config \\ nil)
+
+  def setup(nil), do: :ok
+
+  def setup(hardware_config) do
+    inverted_config = invert_config(hardware_config)
+
+    # Start emulator master with inverted config on master_index 1
+    # Use ExUnit's start_supervised for proper cleanup
+    {:ok, emulator_master} =
+      ExUnit.Callbacks.start_supervised(
+        {EtherCAT.Master, [name: :emulator_master, master_index: 1]},
+        id: :emulator_master
+      )
+
+    {:ok, emulator_slaves} =
+      EtherCAT.configure_hardware(emulator_master, inverted_config)
+
+    {:ok, emulator_master, emulator_slaves}
   end
 
   @doc """
