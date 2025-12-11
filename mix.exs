@@ -25,7 +25,7 @@ defmodule EtherCAT.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:zigler, "~> 0.15", runtime: false}
+      {:zigler, path: "~/Development/git/zigler", runtime: false}
     ]
   end
 end
