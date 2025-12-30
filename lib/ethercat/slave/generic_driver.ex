@@ -105,14 +105,16 @@ defmodule EtherCAT.Slave.GenericDriver do
 
   @impl EtherCAT.Slave.Driver
   def encode_pdo_value(pdo_name, entry_name, value, state) do
-    type = find_type(state.sync_managers, pdo_name, entry_name)
-    Driver.encode_by_type(type, value)
+    with {:ok, type} <- find_type(state.sync_managers, pdo_name, entry_name) do
+      Driver.encode_by_type(type, value)
+    end
   end
 
   @impl EtherCAT.Slave.Driver
   def decode_pdo_value(pdo_name, entry_name, binary, state) do
-    type = find_type(state.sync_managers, pdo_name, entry_name)
-    Driver.decode_by_type(type, binary)
+    with {:ok, type} <- find_type(state.sync_managers, pdo_name, entry_name) do
+      Driver.decode_by_type(type, binary)
+    end
   end
 
   # ========================================================================
@@ -121,13 +123,18 @@ defmodule EtherCAT.Slave.GenericDriver do
 
   # Find entry type from sync_managers structure
   defp find_type(sync_managers, pdo_name, entry_name) do
-    Enum.find_value(sync_managers, fn sm ->
+    result = Enum.find_value(sync_managers, fn sm ->
       pdo = Enum.find(sm.pdos, &(&1.name == pdo_name))
 
       if pdo && Map.has_key?(pdo.entries, entry_name) do
         {_index, _subindex, bit_length} = pdo.entries[entry_name]
-        Driver.infer_type_from_bit_length(bit_length)
+        {:ok, Driver.infer_type_from_bit_length(bit_length)}
       end
-    end) || :uint16
+    end)
+
+    case result do
+      {:ok, type} -> {:ok, type}
+      nil -> {:error, {:unknown_pdo_entry, pdo_name, entry_name}}
+    end
   end
 end

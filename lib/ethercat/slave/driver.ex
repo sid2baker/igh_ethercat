@@ -171,12 +171,17 @@ defmodule EtherCAT.Slave.Driver do
 
       @impl GenServer
       def handle_call({:read, pdo_name, entry_name}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
         result =
-          with {:ok, binary} <- EtherCAT.Master.read_pdo_entry(state.master, unique_name),
+          with unique_name <- "#{state.name}:#{pdo_name}:#{entry_name}",
+               {:ok, binary} <- EtherCAT.Master.read_pdo_entry(state.master, unique_name),
                {:ok, value} <- decode_pdo_value(pdo_name, entry_name, binary, state) do
             {:ok, value}
+          else
+            {:error, {:unknown_pdo_entry, pdo, entry}} ->
+              {:error, {:unknown_pdo_entry, state.name, pdo, entry}}
+
+            error ->
+              error
           end
 
         {:reply, result, state}
@@ -184,12 +189,17 @@ defmodule EtherCAT.Slave.Driver do
 
       @impl GenServer
       def handle_call({:write, pdo_name, entry_name, value}, _from, state) do
-        unique_name = "#{state.name}:#{pdo_name}:#{entry_name}"
-
         result =
           with {:ok, binary} <- encode_pdo_value(pdo_name, entry_name, value, state),
+               unique_name <- "#{state.name}:#{pdo_name}:#{entry_name}",
                :ok <- EtherCAT.Master.write_pdo_entry(state.master, unique_name, binary) do
             :ok
+          else
+            {:error, {:unknown_pdo_entry, pdo, entry}} ->
+              {:error, {:unknown_pdo_entry, state.name, pdo, entry}}
+
+            error ->
+              error
           end
 
         {:reply, result, state}
