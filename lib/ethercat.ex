@@ -216,7 +216,7 @@ defmodule EtherCAT do
   """
   @spec configure_hardware(GenServer.server(), module() | HardwareConfig.t()) ::
           {:ok, %{atom() => pid()}} | {:error, term()}
-  def configure_hardware(master, config_or_module) do
+  def configure_hardware(master \\ EtherCAT.Master, config_or_module) do
     with {:ok, config} <- get_config(config_or_module),
          :ok <- Master.set_hardware_config(master, config),
          {:ok, slave_pids} <-
@@ -345,7 +345,7 @@ defmodule EtherCAT do
       IO.inspect(config, pretty: true)
   """
   @spec generate_config(GenServer.server()) :: {:ok, HardwareConfig.t()} | {:error, term()}
-  def generate_config(master) do
+  def generate_config(master \\ EtherCAT.Master) do
     Master.generate_config(master)
   end
 
@@ -364,7 +364,7 @@ defmodule EtherCAT do
       {:ok, slaves} = EtherCAT.get_slaves(master_pid)
   """
   @spec get_slaves(GenServer.server()) :: {:ok, [pid()]} | {:error, term()}
-  def get_slaves(master) do
+  def get_slaves(master \\ EtherCAT.Master) do
     Master.get_slaves(master)
   end
 
@@ -388,7 +388,7 @@ defmodule EtherCAT do
       :ok = EtherCAT.stop_slaves(master_pid)
   """
   @spec stop_slaves(GenServer.server()) :: :ok | {:error, term()}
-  def stop_slaves(master) do
+  def stop_slaves(master \\ EtherCAT.Master) do
     with :ok <- Master.stop_cyclic(master),
          {:ok, slave_pids} <- Master.get_slaves(master) do
       # Stop all slave drivers
