@@ -406,8 +406,27 @@ defmodule EtherCAT.Master do
   def offline(:internal, :connect, data) do
     case Nif.get_master_state(data.master_ref) do
       {:ok, master_state} when master_state.link_up == 1 ->
-        Logger.info("Master connected, transitioning to :stale")
-        {:next_state, :stale, data}
+        # Link up - check if bus scan is complete before transitioning
+        case Nif.master_scan_progress(data.master_ref) do
+          {:ok, %{slave_count: total, scan_index: current}}
+          when total > 0 and current < total ->
+            Logger.info(
+              "Master connected, bus scan in progress (#{current}/#{total}), waiting..."
+            )
+
+            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_connect}]}
+
+          {:ok, %{slave_count: detected, scan_index: _}} ->
+            Logger.info("Master connected, bus scan complete (#{detected} slaves detected)")
+            {:next_state, :stale, data}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to check scan progress: #{inspect(reason)}, transitioning anyway"
+            )
+
+            {:next_state, :stale, data}
+        end
 
       {:ok, _} ->
         Logger.warning("Master link down, retrying...")
@@ -445,66 +464,45 @@ defmodule EtherCAT.Master do
   end
 
   def stale(:internal, :check_hardware, data) do
-    # First check if network scan is still in progress
-    # This avoids querying full master state while slaves are being discovered
-    case Nif.master_scan_progress(data.master_ref) do
-      {:ok, %{slave_count: total, scan_index: current}} when current < total ->
-        # Scan in progress - wait and retry
-        Logger.debug(
-          "Network scan in progress: #{current}/#{total} slaves scanned, waiting #{data.scan_interval}ms"
-        )
+    case Nif.get_master_state(data.master_ref) do
+      {:ok, master_state} ->
+        current_slave_count = master_state.slaves_responding
 
-        {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+        cond do
+          # Hardware changed - reset stability timer
+          data.last_slave_count != nil and data.last_slave_count != current_slave_count ->
+            Logger.info(
+              "Hardware changed: #{data.last_slave_count} -> #{current_slave_count} slaves"
+            )
 
-      {:ok, %{slave_count: total, scan_index: _current}} ->
-        # Scan complete - now get full master state
-        Logger.debug("Network scan complete, checking master state (#{total} slaves)")
+            new_data = %{
+              data
+              | last_slave_count: current_slave_count,
+                stability_timer_ref: cancel_stability_timer(data.stability_timer_ref)
+            }
 
-        case Nif.get_master_state(data.master_ref) do
-          {:ok, master_state} ->
-            current_slave_count = master_state.slaves_responding
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
-            cond do
-              # Hardware changed - reset stability timer
-              data.last_slave_count != nil and data.last_slave_count != current_slave_count ->
-                Logger.info(
-                  "Hardware changed: #{data.last_slave_count} -> #{current_slave_count} slaves"
-                )
+          # First check - start stability monitoring
+          data.last_slave_count == nil ->
+            Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
+            new_data = %{data | last_slave_count: current_slave_count}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
-                new_data = %{
-                  data
-                  | last_slave_count: current_slave_count,
-                    stability_timer_ref: cancel_stability_timer(data.stability_timer_ref)
-                }
+          # Hardware stable but no timer yet - start stability countdown
+          data.stability_timer_ref == nil ->
+            Logger.debug("Hardware stable, starting stability timer")
+            timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
+            new_data = %{data | stability_timer_ref: timer_ref}
+            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
-                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-              # First check - start stability monitoring
-              data.last_slave_count == nil ->
-                Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
-                new_data = %{data | last_slave_count: current_slave_count}
-                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-              # Hardware stable but no timer yet - start stability countdown
-              data.stability_timer_ref == nil ->
-                Logger.debug("Hardware stable, starting stability timer")
-                timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
-                new_data = %{data | stability_timer_ref: timer_ref}
-                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-              # Hardware still stable, timer running - keep monitoring
-              true ->
-                {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-            end
-
-          {:error, reason} ->
-            Logger.error("Failed to get master state: #{inspect(reason)}")
-            new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
-            {:next_state, :offline, new_data}
+          # Hardware still stable, timer running - keep monitoring
+          true ->
+            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
         end
 
       {:error, reason} ->
-        Logger.error("Failed to check scan progress: #{inspect(reason)}")
+        Logger.error("Failed to check hardware: #{inspect(reason)}")
         new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
         {:next_state, :offline, new_data}
     end
