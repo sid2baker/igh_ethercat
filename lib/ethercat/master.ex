@@ -445,55 +445,66 @@ defmodule EtherCAT.Master do
   end
 
   def stale(:internal, :check_hardware, data) do
-    case Nif.get_master_state(data.master_ref) do
-      {:ok, master_state} ->
-        current_slave_count = master_state.slaves_responding
+    # First check if network scan is still in progress
+    # This avoids querying full master state while slaves are being discovered
+    case Nif.master_scan_progress(data.master_ref) do
+      {:ok, %{slave_count: total, scan_index: current}} when current < total ->
+        # Scan in progress - wait and retry
+        Logger.debug(
+          "Network scan in progress: #{current}/#{total} slaves scanned, waiting #{data.scan_interval}ms"
+        )
 
-        cond do
-          # Hardware changed - reset stability timer
-          data.last_slave_count != nil and data.last_slave_count != current_slave_count ->
-            Logger.info(
-              "Hardware changed: #{data.last_slave_count} -> #{current_slave_count} slaves"
-            )
+        {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
 
-            # Cancel existing timer if any and flush message
-            if data.stability_timer_ref do
-              cancel_stability_timer(data.stability_timer_ref)
+      {:ok, %{slave_count: total, scan_index: _current}} ->
+        # Scan complete - now get full master state
+        Logger.debug("Network scan complete, checking master state (#{total} slaves)")
+
+        case Nif.get_master_state(data.master_ref) do
+          {:ok, master_state} ->
+            current_slave_count = master_state.slaves_responding
+
+            cond do
+              # Hardware changed - reset stability timer
+              data.last_slave_count != nil and data.last_slave_count != current_slave_count ->
+                Logger.info(
+                  "Hardware changed: #{data.last_slave_count} -> #{current_slave_count} slaves"
+                )
+
+                new_data = %{
+                  data
+                  | last_slave_count: current_slave_count,
+                    stability_timer_ref: cancel_stability_timer(data.stability_timer_ref)
+                }
+
+                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+
+              # First check - start stability monitoring
+              data.last_slave_count == nil ->
+                Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
+                new_data = %{data | last_slave_count: current_slave_count}
+                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+
+              # Hardware stable but no timer yet - start stability countdown
+              data.stability_timer_ref == nil ->
+                Logger.debug("Hardware stable, starting stability timer")
+                timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
+                new_data = %{data | stability_timer_ref: timer_ref}
+                {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+
+              # Hardware still stable, timer running - keep monitoring
+              true ->
+                {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
             end
 
-            new_data = %{data | last_slave_count: current_slave_count, stability_timer_ref: nil}
-
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-          # First check - start stability monitoring
-          data.last_slave_count == nil ->
-            Logger.info("Initial hardware scan: #{current_slave_count} slaves detected")
-
-            new_data = %{data | last_slave_count: current_slave_count}
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-          # Hardware stable but no timer yet - start stability countdown
-          data.stability_timer_ref == nil ->
-            Logger.debug("Hardware stable, starting stability timer")
-            timer_ref = Process.send_after(self(), :stability_timeout, data.stability_timeout)
-            new_data = %{data | stability_timer_ref: timer_ref}
-
-            {:keep_state, new_data, [{:state_timeout, data.scan_interval, :retry_check}]}
-
-          # Hardware still stable, timer running - keep monitoring
-          true ->
-            {:keep_state_and_data, [{:state_timeout, data.scan_interval, :retry_check}]}
+          {:error, reason} ->
+            Logger.error("Failed to get master state: #{inspect(reason)}")
+            new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
+            {:next_state, :offline, new_data}
         end
 
       {:error, reason} ->
-        Logger.error("Failed to check hardware: #{inspect(reason)}")
-
-        # Cancel stability timer if running
-        if data.stability_timer_ref do
-          cancel_stability_timer(data.stability_timer_ref)
-        end
-
-        # Reset monitoring state and transition to :offline
+        Logger.error("Failed to check scan progress: #{inspect(reason)}")
         new_data = %{data | last_slave_count: nil, stability_timer_ref: nil}
         {:next_state, :offline, new_data}
     end
@@ -1199,6 +1210,8 @@ defmodule EtherCAT.Master do
     end
   end
 
+  defp cancel_stability_timer(nil), do: nil
+
   defp cancel_stability_timer(timer_ref) do
     # Cancel the timer and flush any pending :stability_timeout messages
     Process.cancel_timer(timer_ref)
@@ -1208,6 +1221,8 @@ defmodule EtherCAT.Master do
     after
       0 -> :ok
     end
+
+    nil
   end
 
   defp stop_all_slave_drivers(data) do

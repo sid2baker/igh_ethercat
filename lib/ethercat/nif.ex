@@ -151,6 +151,7 @@ defmodule EtherCAT.Nif do
       master_get_sync_manager: [],
       master_get_pdo: [],
       master_get_pdo_entry: [],
+      master_scan_progress: [],
       # maybe use dirty_cup/dirty_io
       cyclic_task: [:threaded]
     ],
@@ -587,6 +588,18 @@ defmodule EtherCAT.Nif do
           return beam.make_error_pair(.get_slave_error, .{});
       }
       return beam.make(.{ .ok, slave_info }, .{});
+  }
+
+  /// Get network scan progress information
+  /// Recoverable: Returns current scan state (RT-safe, no heap allocation)
+  /// Returns {:ok, %{slave_count: _, scan_index: _}} | {:error, :scan_progress_error}
+  pub fn master_scan_progress(master: MasterResource) beam.term {
+      var progress: ecrt.ec_master_scan_progress_t = undefined;
+      const result = ecrt.ecrt_master_scan_progress(master.unpack(), &progress);
+      if (result != 0) {
+          return beam.make_error_pair(.scan_progress_error, .{});
+      }
+      return beam.make(.{ .ok, .{ .slave_count = progress.slave_count, .scan_index = progress.scan_index } }, .{});
   }
 
   /// Reset the master to initial state
