@@ -75,13 +75,9 @@ defmodule Drivers.EL3202 do
   """
 
   use EtherCAT.Slave.Driver
-
-  alias EtherCAT.Slave.Driver
-  alias EtherCAT.Config.{SdoConfig, SyncManagerConfig, PdoConfig}
+  use GenServer
 
   # RTD element types per docs (0x80n0:19)
-  # 0: Pt100, 1: Ni100, 2: Pt1000, 3: Pt500, 4: Pt200, 5: Ni1000,
-  # 6: Ni1000 TK5000, 7: Ni120, 8: Ohm 1/16, 9: Ohm 1/64
   @rtd_elements %{
     pt100: 0,
     ni100: 1,
@@ -103,7 +99,7 @@ defmodule Drivers.EL3202 do
     not_connected: 3
   }
 
-  # Filter settings (0x80n0:15) - enumerated values
+  # Filter settings (0x80n0:15)
   @filter_settings %{
     hz_50: 0,
     hz_60: 1,
@@ -126,65 +122,105 @@ defmodule Drivers.EL3202 do
     high_resolution: 2
   }
 
-  defstruct [:master, :name, :channel_1, :channel_2]
+  defstruct [:name, :master, :channel_1, :channel_2]
+
+  # ============================================================================
+  # DriverImpl Callbacks
+  # ============================================================================
+
+  @impl EtherCAT.Slave.Driver
+  def start_driver(name, config) do
+    GenServer.start_link(__MODULE__, config, name: name)
+  end
+
+  @impl EtherCAT.Slave.Driver
+  def configure(driver_pid) do
+    GenServer.cast(driver_pid, :configure)
+  end
+
+  # ============================================================================
+  # Public API
+  # ============================================================================
+
+  def read(slave, pdo_name, entry_name) do
+    GenServer.call(slave, {:read, pdo_name, entry_name})
+  end
+
+  def write(slave, pdo_name, entry_name, value) do
+    GenServer.call(slave, {:write, pdo_name, entry_name, value})
+  end
 
   # ============================================================================
   # GenServer Callbacks
   # ============================================================================
 
   @impl GenServer
-  def init(opts) do
-    config = opts[:config] || %{}
+  def init(config) do
+    channel_1 = Map.get(config, :channel_1, %{})
+    channel_2 = Map.get(config, :channel_2, %{})
 
     state = %__MODULE__{
-      master: opts[:master],
-      name: opts[:name],
-      channel_1: Map.get(config, :channel_1, %{}),
-      channel_2: Map.get(config, :channel_2, %{})
+      name: config[:name],
+      master: config[:master],
+      channel_1: channel_1,
+      channel_2: channel_2
     }
 
     {:ok, state}
   end
 
-  # ============================================================================
-  # Driver Behaviour Callbacks
-  # ============================================================================
+  @impl GenServer
+  def handle_cast(:configure, state) do
+    for {index, subindex, data} <- build_sdo_config(state.channel_1, state.channel_2) do
+      :ok = sdo_config(index, subindex, data)
+    end
 
-  @impl EtherCAT.Slave.Driver
-  def configurable_pdos?(_state), do: false
+    configured_pdos =
+      Enum.flat_map(build_pdo_config(), fn sm ->
+        :ok = sync_manager(sm.index, sm.direction, sm.watchdog)
+        :ok = pdo_assign_clear(sm.index)
 
-  @impl EtherCAT.Slave.Driver
-  def get_sdo_config(state) do
-    build_sdo_config(state.channel_1, state.channel_2)
+        Enum.flat_map(sm.pdos, fn {pdo_name, pdo} ->
+          :ok = pdo_assign_add(sm.index, pdo.index)
+
+          Enum.map(pdo.entries, fn {entry_name, entry_tuple} ->
+            {{pdo_name, entry_name}, {sm.direction, entry_tuple}}
+          end)
+        end)
+      end)
+      |> Map.new()
+
+    :ok = slave_configured(configured_pdos)
+    {:noreply, state}
   end
 
-  @impl EtherCAT.Slave.Driver
-  def get_pdo_config(_state) do
-    pdo_config()
+  @impl GenServer
+  def handle_call({:read, pdo_name, entry_name}, _from, state) do
+    result = EtherCAT.Master.read_pdo_entry({state.name, pdo_name, entry_name})
+    {:reply, result, state}
   end
 
-  @impl EtherCAT.Slave.Driver
-  def encode_pdo_value(_pdo, _entry, _value, _state) do
-    # EL3202 is input-only, no encoding needed
-    {:error, :input_only_device}
+  @impl GenServer
+  def handle_call({:write, _pdo_name, _entry_name, _value}, _from, state) do
+    {:reply, {:error, :input_only_device}, state}
   end
 
-  @impl EtherCAT.Slave.Driver
-  def decode_pdo_value(:rtd_channel_1, :value, <<value::little-signed-16>>, %{
-        channel_1: %{rtd_element: :ohm_1_64}
-      }) do
-    {:ok, value / 64}
+  @impl GenServer
+  def handle_info(
+        {:ec_update, {_slave_name, :rtd_channel_1, :value}, <<value::little-16>>},
+        %{channel_1: %{rtd_element: :ohm_1_64}} = state
+      ) do
+    IO.inspect(value / 64, label: "EL3202 Channel 1 Value")
+    {:noreply, state}
   end
 
-  def decode_pdo_value(:rtd_channel_2, :value, <<value::little-signed-16>>, %{
-        channel_2: %{rtd_element: :ohm_1_16}
-      }) do
-    {:ok, value / 16}
-  end
-
-  def decode_pdo_value(pdo, entry, binary, _state) do
-    type = get_entry_type(pdo, entry)
-    Driver.decode_by_type(type, binary)
+  @impl GenServer
+  def handle_info(
+        {:ec_update, {_slave_name, _pdo_name, _entry_name}, _value} = msg,
+        state
+      ) do
+    IO.inspect(msg, label: "EL3202 PDO update")
+    {:noreply, state}
   end
 
   # ============================================================================
@@ -219,7 +255,7 @@ defmodule Drivers.EL3202 do
   end
 
   defp add_sdo_if(sdos, true, index, subindex, data) do
-    [SdoConfig.new(index: index, subindex: subindex, data: data) | sdos]
+    [{index, subindex, data} | sdos]
   end
 
   defp add_sdo_if(sdos, _, _index, _subindex, _data), do: sdos
@@ -228,13 +264,12 @@ defmodule Drivers.EL3202 do
 
   defp add_presentation_sdo(sdos, presentation, base) do
     value = Map.get(@presentations, presentation, 0)
-    [SdoConfig.new(index: base, subindex: 0x02, data: <<value::little-8>>) | sdos]
+    [{base, 0x02, <<value::little-8>>} | sdos]
   end
 
   defp add_manufacturer_calibration_sdo(sdos, config, base) do
-    # Default is enabled (true), so only write if explicitly disabled
     case config[:enable_manufacturer_calibration] do
-      false -> [SdoConfig.new(index: base, subindex: 0x0B, data: <<0>>) | sdos]
+      false -> [{base, 0x0B, <<0>>} | sdos]
       _ -> sdos
     end
   end
@@ -245,12 +280,8 @@ defmodule Drivers.EL3202 do
       gain = config[:user_scale_gain] || 65536
 
       sdos
-      |> then(
-        &[SdoConfig.new(index: base, subindex: 0x11, data: <<offset::little-signed-16>>) | &1]
-      )
-      |> then(
-        &[SdoConfig.new(index: base, subindex: 0x12, data: <<gain::little-signed-32>>) | &1]
-      )
+      |> then(&[{base, 0x11, <<offset::little-signed-16>>} | &1])
+      |> then(&[{base, 0x12, <<gain::little-signed-32>>} | &1])
     else
       sdos
     end
@@ -264,17 +295,16 @@ defmodule Drivers.EL3202 do
 
   defp maybe_add_limit(sdos, true, limit, base, subindex) do
     value = limit || 0
-    [SdoConfig.new(index: base, subindex: subindex, data: <<value::little-signed-16>>) | sdos]
+    [{base, subindex, <<value::little-signed-16>>} | sdos]
   end
 
   defp maybe_add_limit(sdos, _, _, _, _), do: sdos
 
-  # Filter settings only apply via channel 1 (0x8000:15) per docs
   defp add_filter_sdo(sdos, config, base, 0 = _channel_index) do
     if config[:enable_filter] do
       filter_key = config[:filter_settings] || :hz_50
       value = Map.get(@filter_settings, filter_key, 0)
-      [SdoConfig.new(index: base, subindex: 0x15, data: <<value::little-16>>) | sdos]
+      [{base, 0x15, <<value::little-16>>} | sdos]
     else
       sdos
     end
@@ -288,12 +318,8 @@ defmodule Drivers.EL3202 do
       gain = config[:user_calibration_gain] || 0xFFFF
 
       sdos
-      |> then(
-        &[SdoConfig.new(index: base, subindex: 0x17, data: <<offset::little-signed-16>>) | &1]
-      )
-      |> then(
-        &[SdoConfig.new(index: base, subindex: 0x18, data: <<gain::little-unsigned-16>>) | &1]
-      )
+      |> then(&[{base, 0x17, <<offset::little-signed-16>>} | &1])
+      |> then(&[{base, 0x18, <<gain::little-unsigned-16>>} | &1])
     else
       sdos
     end
@@ -303,36 +329,35 @@ defmodule Drivers.EL3202 do
 
   defp add_rtd_element_sdo(sdos, rtd_element, base) do
     value = Map.get(@rtd_elements, rtd_element, 0)
-    [SdoConfig.new(index: base, subindex: 0x19, data: <<value::little-16>>) | sdos]
+    [{base, 0x19, <<value::little-16>>} | sdos]
   end
 
   defp add_connection_sdo(sdos, nil, _base), do: sdos
 
   defp add_connection_sdo(sdos, connection, base) do
     value = Map.get(@connections, connection, 0)
-    [SdoConfig.new(index: base, subindex: 0x1A, data: <<value::little-16>>) | sdos]
+    [{base, 0x1A, <<value::little-16>>} | sdos]
   end
 
   defp add_wire_calibration_sdo(sdos, nil, _base), do: sdos
 
   defp add_wire_calibration_sdo(sdos, wire_cal, base) do
-    [SdoConfig.new(index: base, subindex: 0x1B, data: <<wire_cal::little-signed-16>>) | sdos]
+    [{base, 0x1B, <<wire_cal::little-signed-16>>} | sdos]
   end
 
   # ============================================================================
   # Fixed PDO Configuration
   # ============================================================================
 
-  defp pdo_config do
+  defp build_pdo_config do
     [
-      SyncManagerConfig.new(
+      %{
         index: 3,
         direction: :input,
         watchdog: :disabled,
-        pdos: [
-          PdoConfig.new(
+        pdos: %{
+          :rtd_channel_1 => %{
             index: 0x1A00,
-            name: :rtd_channel_1,
             entries: %{
               underrange: {0x6000, 0x01, 1},
               overrange: {0x6000, 0x02, 1},
@@ -344,10 +369,9 @@ defmodule Drivers.EL3202 do
               txpdo_toggle: {0x1800, 0x09, 1},
               value: {0x6000, 0x11, 16}
             }
-          ),
-          PdoConfig.new(
+          },
+          :rtd_channel_2 => %{
             index: 0x1A01,
-            name: :rtd_channel_2,
             entries: %{
               underrange: {0x6010, 0x01, 1},
               overrange: {0x6010, 0x02, 1},
@@ -359,23 +383,9 @@ defmodule Drivers.EL3202 do
               txpdo_toggle: {0x1801, 0x09, 1},
               value: {0x6010, 0x11, 16}
             }
-          )
-        ]
-      )
+          }
+        }
+      }
     ]
   end
-
-  # ============================================================================
-  # Entry Type Mapping
-  # ============================================================================
-
-  defp get_entry_type(_pdo, :value), do: :int16
-  defp get_entry_type(_pdo, :underrange), do: :bool
-  defp get_entry_type(_pdo, :overrange), do: :bool
-  defp get_entry_type(_pdo, :error), do: :bool
-  defp get_entry_type(_pdo, :txpdo_state), do: :bool
-  defp get_entry_type(_pdo, :txpdo_toggle), do: :bool
-  defp get_entry_type(_pdo, :limit_1), do: :uint8
-  defp get_entry_type(_pdo, :limit_2), do: :uint8
-  defp get_entry_type(_pdo, _), do: :uint8
 end
