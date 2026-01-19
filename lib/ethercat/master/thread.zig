@@ -28,8 +28,7 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
     const master_pid = master_state.pid;
     const interval_us = master_state.interval_us;
 
-    // Pin thread to configured CPU core
-    set_cpu_affinity(master_state.cyclic_core, master_pid);
+    configure_realtime_thread(master_state.cyclic_core, master_pid);
 
     // Activate master before starting cyclic operation
     _ = ecrt.ecrt_master_activate(ec_master);
@@ -107,14 +106,36 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
     }
 }
 
-fn set_cpu_affinity(core: u8, master_pid: beam.pid) void {
+fn configure_realtime_thread(core: u8, master_pid: beam.pid) void {
+    // 1. Pin thread to dedicated CPU core
     var cpuset: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
     cpuset[0] = @as(usize, 1) << @intCast(core);
 
     linux.sched_setaffinity(0, &cpuset) catch |err| {
         const errno: u16 = @intFromError(err);
-        _ = beam.send(master_pid, .{ .affinity_failed, core, errno }, .{}) catch {};
+        _ = beam.send(master_pid, .{ .rt_setup_failed, .affinity, core, errno }, .{}) catch {};
     };
+
+    // 2. Set SCHED_FIFO with maximum priority
+    const max_prio_result = linux.sched_get_priority_max(.{ .mode = .FIFO });
+    if (@as(isize, @bitCast(max_prio_result)) < 0) {
+        _ = beam.send(master_pid, .{ .rt_setup_failed, .get_priority_max }, .{}) catch {};
+        return;
+    }
+
+    var param = linux.sched_param{ .priority = @intCast(max_prio_result) };
+    const sched_result = linux.sched_setscheduler(0, .{ .mode = .FIFO }, &param);
+    if (@as(isize, @bitCast(sched_result)) < 0) {
+        const errno: u16 = @intCast(@as(usize, @bitCast(-@as(isize, @bitCast(sched_result)))));
+        _ = beam.send(master_pid, .{ .rt_setup_failed, .sched_setscheduler, errno }, .{}) catch {};
+    }
+
+    // 3. Lock all current and future memory pages
+    const mlock_result = linux.mlockall(.{ .CURRENT = true, .FUTURE = true });
+    if (@as(isize, @bitCast(mlock_result)) < 0) {
+        const errno: u16 = @intCast(@as(usize, @bitCast(-@as(isize, @bitCast(mlock_result)))));
+        _ = beam.send(master_pid, .{ .rt_setup_failed, .mlockall, errno }, .{}) catch {};
+    }
 }
 
 fn check_master_state(master_state: *master.State) void {
