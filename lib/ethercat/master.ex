@@ -8,6 +8,7 @@ defmodule EtherCAT.Master do
   @version {1, 6}
   @offline_poll_ms 500
   @stale_check_hardware_ms 500
+  @pdo_write_timeout_ms 5_000
 
   @type t :: %__MODULE__{
           master_ref: reference(),
@@ -415,10 +416,11 @@ defmodule EtherCAT.Master do
 
     case Nif.write_pdo_value(domain_ref, entry_id, value) do
       :ok ->
-        pending_requests =
-          Map.put(data.pending_requests, {:write_pdo_entry, slave_id, entry_id}, from)
+        request_id = {:write_pdo_entry, slave_id, entry_id}
+        pending_requests = Map.put(data.pending_requests, request_id, from)
 
-        {:keep_state, %{data | pending_requests: pending_requests}}
+        {:keep_state, %{data | pending_requests: pending_requests},
+         [{{:timeout, request_id}, @pdo_write_timeout_ms, :pdo_write_timeout}]}
 
       {:error, :already_set} ->
         {:keep_state_and_data, [{:reply, from, :ok}]}
@@ -437,11 +439,35 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, {:error, :invalid_in_operational}}]}
   end
 
-  def operational(:info, {:output_changed, slave_id, entry_id}, data) do
-    {from, pending_requests} =
-      Map.pop(data.pending_requests, {:write_pdo_entry, slave_id, entry_id})
+  def operational({:timeout, request_id}, :pdo_write_timeout, data) do
+    case Map.pop(data.pending_requests, request_id) do
+      {from, pending_requests} when from != nil ->
+        Logger.warning("PDO write timeout: #{inspect(request_id)}")
 
-    {:keep_state, %{data | pending_requests: pending_requests}, [{:reply, from, :ok}]}
+        {:keep_state, %{data | pending_requests: pending_requests},
+         [{:reply, from, {:error, :timeout}}]}
+
+      {nil, _} ->
+        # Already completed, ignore
+        :keep_state_and_data
+    end
+  end
+
+  def operational(:info, {:output_changed, slave_id, entry_id}, data) do
+    request_id = {:write_pdo_entry, slave_id, entry_id}
+
+    case Map.pop(data.pending_requests, request_id) do
+      {from, pending_requests} when from != nil ->
+        {:keep_state, %{data | pending_requests: pending_requests},
+         [
+           {{:timeout, request_id}, :infinity, nil},
+           {:reply, from, :ok}
+         ]}
+
+      {nil, _} ->
+        # No pending request (already timed out or duplicate message)
+        :keep_state_and_data
+    end
   end
 
   def operational(:info, {:input_changed, slave_id, entry_id, value}, data) do

@@ -66,7 +66,7 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
             for (domain_state.entries.items) |*entry| {
                 if (try domain_state.update_value(entry.id)) {
                     if (entry.is_output) {
-                        _ = try beam.send(master_pid, .{ .output_changed, entry.slave_id, entry.id }, .{});
+                        entry.is_dirty = true;
                     } else {
                         const byte_length = (entry.bit_length + 7) / 8;
                         const value_u64 = domain_state.get_value(entry.id) orelse unreachable;
@@ -74,6 +74,9 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
                         std.mem.writeInt(u64, &buffer, value_u64, .little);
                         _ = try beam.send(master_pid, .{ .input_changed, entry.slave_id, entry.id, buffer[0..byte_length] }, .{});
                     }
+                } else if (entry.is_dirty) {
+                    entry.is_dirty = false;
+                    _ = try beam.send(master_pid, .{ .output_changed, entry.slave_id, entry.id }, .{});
                 }
             }
 

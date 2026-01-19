@@ -7,6 +7,7 @@ const ecrt = @import("ecrt.zig").c;
 pub const PdoEntry = struct {
     id: u32, // Auto-incremented ID
     is_output: bool,
+    is_dirty: bool,
     slave_id: u16,
     bit_offset: u16,
     bit_length: u8,
@@ -52,6 +53,7 @@ pub const State = struct {
         try self.entries.append(beam.allocator, .{
             .id = entry_id,
             .is_output = is_output,
+            .is_dirty = false,
             .slave_id = slave_id,
             .bit_offset = bit_offset,
             .bit_length = bit_length,
