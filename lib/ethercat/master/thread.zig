@@ -1,6 +1,7 @@
 const std = @import("std");
 const beam = @import("beam");
 const ecrt = @import("ecrt.zig").c;
+const linux = std.os.linux;
 
 const master = @import("master.zig");
 const domain = @import("domain.zig");
@@ -26,6 +27,9 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
     const ec_master = master_state.ec_master orelse return;
     const master_pid = master_state.pid;
     const interval_us = master_state.interval_us;
+
+    // Pin thread to configured CPU core
+    set_cpu_affinity(master_state.cyclic_core, master_pid);
 
     // Activate master before starting cyclic operation
     _ = ecrt.ecrt_master_activate(ec_master);
@@ -98,6 +102,16 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
 
         counter +%= 1;
     }
+}
+
+fn set_cpu_affinity(core: u8, master_pid: beam.pid) void {
+    var cpuset: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    cpuset[0] = @as(usize, 1) << @intCast(core);
+
+    linux.sched_setaffinity(0, &cpuset) catch |err| {
+        const errno: u16 = @intFromError(err);
+        _ = beam.send(master_pid, .{ .affinity_failed, core, errno }, .{}) catch {};
+    };
 }
 
 fn check_master_state(master_state: *master.State) void {

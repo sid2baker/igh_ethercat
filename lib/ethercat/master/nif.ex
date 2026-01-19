@@ -33,6 +33,7 @@ defmodule EtherCAT.Master.Nif do
       destroy_master: [],
       reset_master: [],
       set_cyclic_interval: [],
+      set_cyclic_core: [],
       get_master_info: [],
       create_domain: [],
       get_slave_info: [],

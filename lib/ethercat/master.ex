@@ -247,6 +247,7 @@ defmodule EtherCAT.Master do
 
     # set master settings
     :ok = Nif.set_cyclic_interval(data.master_ref, data.hardware_config.master.cyclic_interval)
+    :ok = Nif.set_cyclic_core(data.master_ref, Application.get_env(:ethercat, :cyclic_core, 0))
 
     domains =
       Enum.map(data.hardware_config.domains, fn domain ->

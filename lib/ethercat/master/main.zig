@@ -91,6 +91,12 @@ pub fn set_cyclic_interval(master_resource: MasterResource, interval_us: u64) be
     return beam.make(.ok, .{});
 }
 
+pub fn set_cyclic_core(master_resource: MasterResource, core: u8) beam.term {
+    const master_state = master_resource.unpack();
+    master_state.cyclic_core = core;
+    return beam.make(.ok, .{});
+}
+
 pub fn get_master_info(master_resource: MasterResource) beam.term {
     const ec_master = master_resource.unpack().ec_master;
 
