@@ -8,7 +8,6 @@ defmodule EtherCAT.Master do
   @version {1, 6}
   @offline_poll_ms 500
   @stale_check_hardware_ms 500
-  @pdo_write_timeout_ms 5_000
 
   @type t :: %__MODULE__{
           master_ref: reference(),
@@ -18,7 +17,7 @@ defmodule EtherCAT.Master do
           entry_to_index: %{
             Slave.pdo_entry() => {domain_name(), slave_position(), Slave.pdo_entry_index()}
           },
-          domains: %{domain_name() => reference()},
+          domains: %{domain_name() => %{ref: reference(), update_rate_ms: non_neg_integer()}},
           thread_pid: pid(),
           pending_requests: %{any() => pid()}
         }
@@ -253,7 +252,13 @@ defmodule EtherCAT.Master do
     domains =
       Enum.map(data.hardware_config.domains, fn domain ->
         {:ok, ref} = Nif.create_domain(data.master_ref, domain.cyclic_multiplier)
-        {domain.name, ref}
+
+        {domain.name,
+         %{
+           ref: ref,
+           update_rate_ms:
+             div(domain.cyclic_multiplier * data.hardware_config.master.cyclic_interval, 1000)
+         }}
       end)
       |> Map.new()
 
@@ -305,7 +310,7 @@ defmodule EtherCAT.Master do
         {:ok, pdo_index} =
           Nif.register_pdo_entry(
             slave.ref,
-            data.domains[domain_name],
+            data.domains[domain_name].ref,
             entry_index,
             entry_subindex,
             bit_length,
@@ -392,14 +397,19 @@ defmodule EtherCAT.Master do
 
   def operational(:enter, _old_state, data) do
     Logger.info("Entered :operational - cyclic task active")
-    {:ok, pid} = start_cyclic_thread(data.master_ref, Map.values(data.domains))
+
+    domain_refs =
+      data.domains
+      |> Enum.map(fn {_key, domain} -> domain.ref end)
+
+    {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
     new_data = %{data | thread_pid: pid}
     {:keep_state, new_data}
   end
 
   def operational({:call, from}, {:read_pdo_entry, entry}, data) do
     {domain_name, _slave_id, entry_index} = data.entry_to_index[entry]
-    domain_ref = data.domains[domain_name]
+    domain_ref = data.domains[domain_name].ref
 
     case Nif.read_pdo_value(domain_ref, entry_index) do
       {:ok, value} ->
@@ -412,15 +422,15 @@ defmodule EtherCAT.Master do
 
   def operational({:call, from}, {:write_pdo_entry, entry, value}, data) do
     {domain_name, slave_id, entry_id} = data.entry_to_index[entry]
-    domain_ref = data.domains[domain_name]
+    domain = data.domains[domain_name]
 
-    case Nif.write_pdo_value(domain_ref, entry_id, value) do
+    case Nif.write_pdo_value(domain.ref, entry_id, value) do
       :ok ->
         request_id = {:write_pdo_entry, slave_id, entry_id}
         pending_requests = Map.put(data.pending_requests, request_id, from)
 
         {:keep_state, %{data | pending_requests: pending_requests},
-         [{{:timeout, request_id}, @pdo_write_timeout_ms, :pdo_write_timeout}]}
+         [{{:timeout, request_id}, domain.update_rate_ms * 3, :pdo_write_timeout}]}
 
       {:error, :already_set} ->
         {:keep_state_and_data, [{:reply, from, :ok}]}

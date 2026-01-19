@@ -56,13 +56,13 @@ defmodule EtherCAT.Slave.GenericDriver do
       {:output, {_index, _subindex, bit_length}} ->
         bytes = div(bit_length + 7, 8)
 
-        :ok =
+        result =
           EtherCAT.Master.write_pdo_entry(
             {state.name, pdo_name, entry_name},
             <<value::size(bytes * 8)>>
           )
 
-        {:reply, :ok, state}
+        {:reply, result, state}
     end
   end
 
