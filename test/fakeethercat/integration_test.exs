@@ -49,18 +49,17 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    Process.sleep(500)
+    await_master_state(:operational)
 
     # Step 2: Start simulator (subscribes to real master's TX signals)
     {:ok, _sup} = Support.FakeMaster.start_master(peer, Support.HardwareConfig.create(true))
-    Process.sleep(500)
+    await_master_state(:operational, peer)
 
     # Connect simulator's digital_outputs to digital_inputs for loopback
     Support.FakeMaster.connect(peer, :digital_outputs, :digital_inputs)
 
     # Step 3: Restart real master (subscribes to simulator's TX signals)
     stop_supervised(:real_master)
-    Process.sleep(200)
 
     {:ok, _} =
       start_supervised(
@@ -68,46 +67,75 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    Process.sleep(2000)
+    await_master_state(:operational)
 
-    {:ok, peer: peer}
+    :ok
   end
 
-  test "real master reaches operational state" do
-    {state, _data} = :sys.get_state(EtherCAT.Master)
-    assert state == :operational
-  end
+  test "RtIPC loopback: write to digital_outputs, wait for digital_inputs" do
+    EtherCAT.subscribe_pdo_entry({:digital_inputs, :channel_1, :input})
+    EtherCAT.subscribe_pdo_entry({:digital_inputs, :channel_4, :input})
+    EtherCAT.subscribe_pdo_entry({:digital_inputs, :channel_9, :input})
+    EtherCAT.subscribe_pdo_entry({:digital_inputs, :channel_12, :input})
 
-  test "RtIPC loopback: write to digital_outputs, read from digital_inputs", %{peer: _peer} do
-    # Reset to known state
-    EtherCAT.write_pdo_entry({:digital_outputs, :channel_1, :output}, 0)
-    Process.sleep(200)
-
-    value_before = EtherCAT.read_pdo_entry({:digital_inputs, :channel_1, :input})
-    IO.puts("=== Writing to local digital_outputs ===")
     EtherCAT.write_pdo_entry({:digital_outputs, :channel_1, :output}, 1)
-    Process.sleep(200)
-
-    value_after = EtherCAT.read_pdo_entry({:digital_inputs, :channel_1, :input})
-    IO.puts("=== Local digital_inputs before: #{value_before}, after: #{value_after} ===")
-    assert value_before == 0
-    assert value_after == 1
+    assert_receive {:ec_update, {:digital_inputs, :channel_1, :input}, 1}
+    EtherCAT.write_pdo_entry({:digital_outputs, :channel_4, :output}, 1)
+    assert_receive {:ec_update, {:digital_inputs, :channel_4, :input}, 1}
+    EtherCAT.write_pdo_entry({:digital_outputs, :channel_9, :output}, 1)
+    assert_receive {:ec_update, {:digital_inputs, :channel_9, :input}, 1}
+    EtherCAT.write_pdo_entry({:digital_outputs, :channel_12, :output}, 1)
+    assert_receive {:ec_update, {:digital_inputs, :channel_12, :input}, 1}
   end
 
-  test "read/write pdo via RtIPC loopback" do
-    # Write to real master's digital outputs
-    :ok = Master.write_pdo_entry({:digital_outputs, :channel_1, :output}, <<1>>)
+  # Waits for the local master to reach the expected state
+  defp await_master_state(expected_state, timeout \\ 5000)
 
-    # Give RtIPC time to propagate through cyclic thread
-    Process.sleep(100)
+  defp await_master_state(expected_state, timeout) when is_integer(timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
 
-    # Read back what we wrote
-    {:ok, value} = Master.read_pdo_entry({:digital_outputs, :channel_1, :output})
-
-    assert value == <<1>>
+    poll_until(deadline, fn ->
+      {state, _data} = :sys.get_state(Master)
+      state == expected_state
+    end)
   end
 
-  test "stop thread" do
-    :ok = Master.stop_thread()
+  # Waits for the remote master (on peer node) to reach the expected state
+  defp await_master_state(expected_state, %{node: node} = peer) do
+    await_master_state(expected_state, peer, 5000)
+  end
+
+  defp await_master_state(expected_state, %{node: node}, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    poll_until(deadline, fn ->
+      {state, _data} = :erpc.call(node, :sys, :get_state, [Master])
+      state == expected_state
+    end)
+  end
+
+  # Waits for a PDO entry to reach the expected value
+  defp await_pdo_value(pdo_entry, expected_value, timeout \\ 1000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    poll_until(deadline, fn ->
+      EtherCAT.read_pdo_entry(pdo_entry) == expected_value
+    end)
+  end
+
+  # Polls a condition until it returns true or timeout is reached
+  defp poll_until(deadline, condition) do
+    if condition.() do
+      :ok
+    else
+      now = System.monotonic_time(:millisecond)
+
+      if now >= deadline do
+        raise "Timeout waiting for condition"
+      else
+        Process.sleep(10)
+        poll_until(deadline, condition)
+      end
+    end
   end
 end

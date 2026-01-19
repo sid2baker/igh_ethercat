@@ -143,11 +143,14 @@ defmodule EtherCAT.Slave.GenericDriver do
   end
 
   @impl GenServer
-  def handle_info({:ec_update, {_slave, pdo, entry}, value} = msg, state) do
+  def handle_info({:ec_update, {slave, pdo, entry}, value} = msg, state) do
     subscribers = Map.get(state.subscribers, {pdo, entry}, [])
+    {:input, {_index, _subindex, bit_length}} = state.configured_pdos[{pdo, entry}]
+    bytes = div(bit_length + 7, 8)
+    <<result::size(bytes * 8)>> = value
 
     for {pid, _ref} <- subscribers do
-      send(pid, msg)
+      send(pid, {:ec_update, {slave, pdo, entry}, result})
     end
 
     {:noreply, state}

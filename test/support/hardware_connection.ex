@@ -19,9 +19,7 @@ defmodule Support.HardwareConnection do
 
   def handle_info({:ec_update, entry, value}, state) do
     {slave_name, pdo_name, entry_name} = state.connections[entry]
-    # value comes as binary, convert to integer for write
-    <<int_value::size(8)>> = value
-    EtherCAT.write_pdo_entry({slave_name, pdo_name, entry_name}, int_value)
+    EtherCAT.write_pdo_entry({slave_name, pdo_name, entry_name}, value)
     {:noreply, state}
   end
 end
