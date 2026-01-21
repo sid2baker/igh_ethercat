@@ -56,7 +56,7 @@ pub fn cyclic(master_state: *master.State, domain_states: []*domain.State) !void
         // 3. Process domains
         for (domain_states) |domain_state| {
             // Only process this domain 1 cycle after it was queued
-            if ((counter + 1) % domain_state.cycle_multiplier != 0) {
+            if ((counter + 1) % domain_state.cycle_count != 0) {
                 continue;
             }
 

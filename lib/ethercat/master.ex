@@ -17,7 +17,7 @@ defmodule EtherCAT.Master do
           entry_to_index: %{
             Slave.pdo_entry() => {domain_name(), slave_position(), Slave.pdo_entry_index()}
           },
-          domains: %{domain_name() => %{ref: reference(), update_rate_ms: non_neg_integer()}},
+          domains: %{domain_name() => %{ref: reference(), update_rate_us: non_neg_integer()}},
           thread_pid: pid(),
           pending_requests: %{any() => pid()}
         }
@@ -264,20 +264,28 @@ defmodule EtherCAT.Master do
     # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
 
+    # derive cyclic_interval_us from smallest domain update_rate_us
+    cyclic_interval_us =
+      data.hardware_config.domains
+      |> Enum.map(& &1.update_rate_us)
+      |> Enum.min()
+
     # set master settings
-    :ok = Nif.set_cyclic_interval(data.master_ref, data.hardware_config.master.cyclic_interval)
+    :ok = Nif.set_cyclic_interval(data.master_ref, cyclic_interval_us)
     :ok = Nif.set_cyclic_core(data.master_ref, Application.get_env(:ethercat, :cyclic_core, 0))
 
     domains =
       Enum.map(data.hardware_config.domains, fn domain ->
-        {:ok, ref} = Nif.create_domain(data.master_ref, domain.cyclic_multiplier)
+        if rem(domain.update_rate_us, cyclic_interval_us) != 0 do
+          Logger.warning(
+            "Domain #{domain.name} update_rate_us (#{domain.update_rate_us}) is not a multiple of cyclic_interval_us (#{cyclic_interval_us})"
+          )
+        end
 
-        {domain.name,
-         %{
-           ref: ref,
-           update_rate_ms:
-             div(domain.cyclic_multiplier * data.hardware_config.master.cyclic_interval, 1000)
-         }}
+        cycle_count = div(domain.update_rate_us, cyclic_interval_us)
+        {:ok, ref} = Nif.create_domain(data.master_ref, cycle_count)
+
+        {domain.name, %{ref: ref, update_rate_us: domain.update_rate_us}}
       end)
       |> Map.new()
 
@@ -454,7 +462,7 @@ defmodule EtherCAT.Master do
         pending_requests = Map.put(data.pending_requests, request_id, from)
 
         {:keep_state, %{data | pending_requests: pending_requests},
-         [{{:timeout, request_id}, domain.update_rate_ms * 3, :pdo_write_timeout}]}
+         [{{:timeout, request_id}, div(domain.update_rate_us, 1000) * 3, :pdo_write_timeout}]}
 
       {:error, :already_set} ->
         {:keep_state_and_data, [{:reply, from, :ok}]}

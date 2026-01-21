@@ -124,14 +124,14 @@ pub fn get_master_info(master_resource: MasterResource) beam.term {
     return beam.make(.{ .ok, master_info }, .{});
 }
 
-pub fn create_domain(master_resource: MasterResource, cycle_multiplier: u32) !beam.term {
+pub fn create_domain(master_resource: MasterResource, cycle_count: u32) !beam.term {
     const master_state = master_resource.unpack();
     const ec_domain = ecrt.ecrt_master_create_domain(master_state.ec_master) orelse {
         return beam.make_error_pair(.domain_creation_failed, .{});
     };
 
     const domain_state = try beam.allocator.create(domain.State);
-    domain_state.* = domain.State.init(ec_domain, cycle_multiplier);
+    domain_state.* = domain.State.init(ec_domain, cycle_count);
 
     const resource = try DomainResource.create(domain_state, .{});
     return beam.make(.{ .ok, resource }, .{});

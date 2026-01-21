@@ -12,7 +12,7 @@ defmodule HardwareConfigs do
     (Output Ch1 → Input Ch1, Output Ch2 → Input Ch2, etc.)
 
   Domain Configuration:
-  - :fast domain (cyclic_multiplier=1, every cycle = 10ms)
+  - :fast domain (update_rate_us=10_000, every cycle = 10ms)
     - Input channels 1-16
     - Output channels 1-16
 
@@ -22,17 +22,14 @@ defmodule HardwareConfigs do
   """
 
   alias EtherCAT.HardwareConfig
-  alias EtherCAT.HardwareConfig.{MasterConfig, DomainConfig, SlaveConfig}
+  alias EtherCAT.HardwareConfig.{DomainConfig, SlaveConfig}
 
   def simple_hardware_config do
     %HardwareConfig{
-      master: %MasterConfig{
-        cyclic_interval: 10_000
-      },
       domains: [
         %DomainConfig{
           name: :fast,
-          cyclic_multiplier: 1
+          update_rate_us: 10_000
         }
       ],
       slaves: [
@@ -45,13 +42,10 @@ defmodule HardwareConfigs do
 
   def rtd_hardware_config do
     %HardwareConfig{
-      master: %MasterConfig{
-        cyclic_interval: 10_000
-      },
       domains: [
         %DomainConfig{
           name: :fast,
-          cyclic_multiplier: 1
+          update_rate_us: 10_000
         }
       ],
       slaves: [

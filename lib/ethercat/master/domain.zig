@@ -17,15 +17,15 @@ pub const PdoEntry = struct {
 /// Domain with integer-indexed PDO entries
 pub const State = struct {
     ec_domain: ?*ecrt.ec_domain_t,
-    cycle_multiplier: u32,
+    cycle_count: u32,
     entries: std.ArrayList(PdoEntry),
     next_entry_id: u32,
     data: []u8, // Pointer to ecrt-managed buffer
 
-    pub fn init(ec_domain: *ecrt.ec_domain_t, cycle_multiplier: u32) State {
+    pub fn init(ec_domain: *ecrt.ec_domain_t, cycle_count: u32) State {
         return .{
             .ec_domain = ec_domain,
-            .cycle_multiplier = cycle_multiplier,
+            .cycle_count = cycle_count,
             .entries = .{},
             .next_entry_id = 0,
             .data = &[_]u8{},

@@ -3,18 +3,15 @@ defmodule EtherCAT.HardwareConfig do
   Complete EtherCAT system hardware configuration.
   """
 
-  alias EtherCAT.HardwareConfig.MasterConfig
   alias EtherCAT.HardwareConfig.DomainConfig
   alias EtherCAT.HardwareConfig.SlaveConfig
 
   defstruct [
-    :master,
     :domains,
     :slaves
   ]
 
   @type t :: %__MODULE__{
-          master: MasterConfig.t(),
           domains: [DomainConfig.t()],
           slaves: [SlaveConfig.t()]
         }

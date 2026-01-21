@@ -5,11 +5,11 @@ defmodule EtherCAT.HardwareConfig.DomainConfig do
 
   defstruct [
     :name,
-    :cyclic_multiplier
+    :update_rate_us
   ]
 
   @type t :: %__MODULE__{
           name: atom(),
-          cyclic_multiplier: pos_integer()
+          update_rate_us: pos_integer()
         }
 end

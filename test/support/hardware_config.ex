@@ -1,16 +1,13 @@
 defmodule Support.HardwareConfig do
   alias EtherCAT.HardwareConfig
-  alias EtherCAT.HardwareConfig.{MasterConfig, DomainConfig, SlaveConfig}
+  alias EtherCAT.HardwareConfig.{DomainConfig, SlaveConfig}
 
   def create(fake? \\ false) do
     %HardwareConfig{
-      master: %MasterConfig{
-        cyclic_interval: 10_000
-      },
       domains: [
         %DomainConfig{
           name: :fast,
-          cyclic_multiplier: 1
+          update_rate_us: 10_000
         }
       ],
       slaves: [

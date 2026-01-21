@@ -66,20 +66,17 @@ Define your EtherCAT network using configuration structs:
 
 ```elixir
 alias EtherCAT.HardwareConfig
-alias EtherCAT.HardwareConfig.{MasterConfig, DomainConfig, SlaveConfig}
+alias EtherCAT.HardwareConfig.{DomainConfig, SlaveConfig}
 
 config = %HardwareConfig{
-  master: %MasterConfig{
-    cyclic_interval: 1000  # microseconds
-  },
   domains: [
     %DomainConfig{
       name: :fast,
-      cyclic_multiplier: 1  # every cycle
+      update_rate_us: 1000  # every cycle (1ms)
     },
     %DomainConfig{
       name: :slow,
-      cyclic_multiplier: 10  # every 10th cycle
+      update_rate_us: 10_000  # every 10th cycle (10ms)
     }
   ],
   slaves: [
@@ -264,12 +261,12 @@ Supervisor.start_link(children, strategy: :one_for_one)
 
 ## Domains
 
-Domains group PDO entries that share the same update rate. Each domain has a `cyclic_multiplier` that determines how often it's processed relative to the master's `cyclic_interval`.
+Domains group PDO entries that share the same update rate. Each domain has an `update_rate_us` that determines how often it's processed. The master's cyclic interval is automatically derived from the smallest domain `update_rate_us`.
 
 ```elixir
 domains: [
-  %DomainConfig{name: :fast, cyclic_multiplier: 1},   # every 1ms (if interval=1000us)
-  %DomainConfig{name: :slow, cyclic_multiplier: 100}  # every 100ms
+  %DomainConfig{name: :fast, update_rate_us: 1000},     # every 1ms
+  %DomainConfig{name: :slow, update_rate_us: 100_000}   # every 100ms
 ]
 ```
 
