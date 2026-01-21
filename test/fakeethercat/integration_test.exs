@@ -49,11 +49,11 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    await_master_state(:operational)
+    :ok = Master.wait_for(:operational)
 
     # Step 2: Start simulator (subscribes to real master's TX signals)
     {:ok, _sup} = Support.FakeMaster.start_master(peer, Support.HardwareConfig.create(true))
-    await_master_state(:operational, peer)
+    :ok = :erpc.call(peer.node, Master, :wait_for, [:operational, 5000])
 
     # Connect simulator's digital_outputs to digital_inputs for loopback
     Support.FakeMaster.connect(peer, :digital_outputs, :digital_inputs)
@@ -67,7 +67,7 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    await_master_state(:operational)
+    :ok = Master.wait_for(:operational)
 
     :ok
   end
@@ -86,56 +86,5 @@ defmodule FakeEtherCAT.IntegrationTest do
     assert_receive {:ec_update, {:digital_inputs, :channel_9, :input}, 1}
     EtherCAT.write_pdo_entry({:digital_outputs, :channel_12, :output}, 1)
     assert_receive {:ec_update, {:digital_inputs, :channel_12, :input}, 1}
-  end
-
-  # Waits for the local master to reach the expected state
-  defp await_master_state(expected_state, timeout \\ 5000)
-
-  defp await_master_state(expected_state, timeout) when is_integer(timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
-    poll_until(deadline, fn ->
-      {state, _data} = :sys.get_state(Master)
-      state == expected_state
-    end)
-  end
-
-  # Waits for the remote master (on peer node) to reach the expected state
-  defp await_master_state(expected_state, %{node: node} = peer) do
-    await_master_state(expected_state, peer, 5000)
-  end
-
-  defp await_master_state(expected_state, %{node: node}, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
-    poll_until(deadline, fn ->
-      {state, _data} = :erpc.call(node, :sys, :get_state, [Master])
-      state == expected_state
-    end)
-  end
-
-  # Waits for a PDO entry to reach the expected value
-  defp await_pdo_value(pdo_entry, expected_value, timeout \\ 1000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
-    poll_until(deadline, fn ->
-      EtherCAT.read_pdo_entry(pdo_entry) == expected_value
-    end)
-  end
-
-  # Polls a condition until it returns true or timeout is reached
-  defp poll_until(deadline, condition) do
-    if condition.() do
-      :ok
-    else
-      now = System.monotonic_time(:millisecond)
-
-      if now >= deadline do
-        raise "Timeout waiting for condition"
-      else
-        Process.sleep(10)
-        poll_until(deadline, condition)
-      end
-    end
   end
 end

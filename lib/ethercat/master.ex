@@ -78,6 +78,11 @@ defmodule EtherCAT.Master do
     :gen_statem.call(__MODULE__, :stop_thread)
   end
 
+  @spec wait_for(atom(), timeout()) :: :ok | {:error, :timeout}
+  def wait_for(state, timeout \\ 5_000) do
+    :gen_statem.call(__MODULE__, {:wait_for, state}, timeout)
+  end
+
   @impl true
   def callback_mode(), do: [:state_functions, :state_enter]
 
@@ -125,9 +130,10 @@ defmodule EtherCAT.Master do
     :ok
   end
 
-  def offline(:enter, :offline, _data) do
+  def offline(:enter, :offline, data) do
     Logger.info("Entered :offline")
-    {:keep_state_and_data, [{:state_timeout, @offline_poll_ms, :poll}]}
+    {data, replies} = reply_to_waiters(data, :offline)
+    {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
   end
 
   def offline(:enter, _old_state, data) do
@@ -135,7 +141,8 @@ defmodule EtherCAT.Master do
     stop_thread(data.master_ref, data.thread_pid)
 
     :ok = Nif.reset_master(data.master_ref)
-    {:keep_state_and_data, [{:state_timeout, @offline_poll_ms, :poll}]}
+    {data, replies} = reply_to_waiters(data, :offline)
+    {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
   end
 
   def offline(:state_timeout, :poll, data) do
@@ -160,6 +167,10 @@ defmodule EtherCAT.Master do
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
+  def offline({:call, from}, {:wait_for, state}, data) do
+    handle_wait_for(from, state, :offline, data)
+  end
+
   def offline({:call, from}, _event, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :offline}}]}
   end
@@ -173,8 +184,10 @@ defmodule EtherCAT.Master do
     {:ok, pid} = start_watch_hardware_thread(data.master_ref)
 
     new_data = %{data | thread_pid: pid}
+    {new_data, replies} = reply_to_waiters(new_data, :stale)
 
-    {:keep_state, new_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
+    {:keep_state, new_data,
+     replies ++ [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
   end
 
   def stale(:state_timeout, :check_hardware, %{hardware_config: nil}) do
@@ -198,6 +211,10 @@ defmodule EtherCAT.Master do
     Logger.info("New config set (#{length(config.slaves)} slaves)")
     new_data = %{data | hardware_config: config}
     {:keep_state, new_data, [{:reply, from, :ok}]}
+  end
+
+  def stale({:call, from}, {:wait_for, state}, data) do
+    handle_wait_for(from, state, :stale, data)
   end
 
   def stale({:call, from}, _event, _data) do
@@ -241,6 +258,8 @@ defmodule EtherCAT.Master do
 
   def synced(:enter, old_state, data) do
     Logger.info("Entered :synced from #{old_state}")
+
+    {data, replies} = reply_to_waiters(data, :synced)
 
     # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
@@ -294,7 +313,11 @@ defmodule EtherCAT.Master do
     Logger.info("Created slaves #{inspect(slaves)}")
 
     new_data = %{data | domains: domains, slaves: slaves}
-    {:keep_state, new_data}
+    {:keep_state, new_data, replies}
+  end
+
+  def synced({:call, from}, {:wait_for, state}, data) do
+    handle_wait_for(from, state, :synced, data)
   end
 
   def synced({:call, from}, {:slave_configured, configured_pdos}, data) do
@@ -404,7 +427,8 @@ defmodule EtherCAT.Master do
 
     {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
     new_data = %{data | thread_pid: pid}
-    {:keep_state, new_data}
+    {new_data, replies} = reply_to_waiters(new_data, :operational)
+    {:keep_state, new_data, replies}
   end
 
   def operational({:call, from}, {:read_pdo_entry, entry}, data) do
@@ -443,6 +467,10 @@ defmodule EtherCAT.Master do
   def operational({:call, from}, :stop_thread, data) do
     stop_thread(data.master_ref, data.thread_pid)
     {:keep_state_and_data, [{:reply, from, :ok}]}
+  end
+
+  def operational({:call, from}, {:wait_for, state}, data) do
+    handle_wait_for(from, state, :operational, data)
   end
 
   def operational({:call, from}, _event, _data) do
@@ -557,5 +585,29 @@ defmodule EtherCAT.Master do
     Enum.find(data.slaves, fn {_key, slave} ->
       Process.whereis(slave.name) == pid
     end)
+  end
+
+  defp reply_to_waiters(data, current_state) do
+    {waiters, remaining} =
+      Map.split_with(data.pending_requests, fn {_ref, request} ->
+        match?({:wait_for, _from, ^current_state}, request)
+      end)
+
+    replies =
+      Enum.map(waiters, fn {_ref, {:wait_for, from, _state}} ->
+        {:reply, from, :ok}
+      end)
+
+    {%{data | pending_requests: remaining}, replies}
+  end
+
+  defp handle_wait_for(from, requested_state, current_state, data) do
+    if current_state == requested_state do
+      {:keep_state_and_data, [{:reply, from, :ok}]}
+    else
+      ref = make_ref()
+      pending = Map.put(data.pending_requests, ref, {:wait_for, from, requested_state})
+      {:keep_state, %{data | pending_requests: pending}}
+    end
   end
 end
