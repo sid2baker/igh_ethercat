@@ -16,16 +16,11 @@ defmodule EtherCAT.NifTest do
 
     Task.start(fn -> Nif.start_cyclic_task(master, [domain1]) end)
 
-    :ok = Nif.write_pdo_value(domain1, entry_id, 55)
+    :ok = Nif.write_pdo_value(domain1, entry_id, <<55>>)
   end
 
-  test "start_master/2" do
-    {:ok, master} = Nif.start_master(0, self())
-    {:ok, master} = Nif.start_master(1, self())
-  end
-
-  test "cyclic_task" do
-    Nif.cyclic_task()
-    |> IO.inspect()
+  test "create_master/1" do
+    {:ok, master} = Nif.create_master(0)
+    {:ok, master} = Nif.create_master(1)
   end
 end
