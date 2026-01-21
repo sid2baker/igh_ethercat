@@ -97,7 +97,7 @@ defmodule HardwareConfigs do
         sdos: [],
         sync_managers: [
           %{
-            index: 3,
+            index: 0,
             direction: :input,
             watchdog: :disabled,
             pdos:

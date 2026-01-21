@@ -52,7 +52,7 @@ defmodule Support.HardwareConfig do
         sdos: [],
         sync_managers: [
           %{
-            index: 3,
+            index: 0,
             direction:
               if(fake?) do
                 :output
