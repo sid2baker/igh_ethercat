@@ -131,23 +131,134 @@ defmodule EtherCAT.Master do
   end
 
   # =================================================================
-  # STATE: {:idle, :offline}
+  # Unified :enter callback for all states
   # =================================================================
 
-  def handle_event(:enter, {:idle, :offline}, {:idle, :offline}, data) do
-    Logger.info("Entered :offline")
-    {data, replies} = reply_to_waiters(data, {:idle, :offline})
-    {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
+  def handle_event(:enter, old_state, new_state, data) do
+    Logger.info("Enter state #{inspect(new_state)} from #{inspect(old_state)}")
+
+    case new_state do
+      {:idle, :offline} ->
+        # Reset master if coming from different state
+        data =
+          if old_state != {:idle, :offline} do
+            stop_thread(data.master_ref, data.thread_pid)
+            :ok = Nif.reset_master(data.master_ref)
+            data
+          else
+            data
+          end
+
+        {data, replies} = reply_to_waiters(data, new_state)
+        {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
+
+      {:idle, :stale} ->
+        {:ok, pid} = start_watch_hardware_thread(data.master_ref)
+        new_data = %{data | thread_pid: pid}
+        {new_data, replies} = reply_to_waiters(new_data, new_state)
+
+        {:keep_state, new_data,
+         replies ++ [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
+
+      {:idle, :synced} ->
+        # Complex setup - defer to internal event
+        {:keep_state_and_data, [{:next_event, :internal, :setup_synced}]}
+
+      {:operational, :running} ->
+        # Complex setup - defer to internal event
+        {:keep_state_and_data, [{:next_event, :internal, :start_cyclic}]}
+
+      {:operational, :unhealthy} ->
+        # Placeholder for future logic when master is operational but slaves are in weird state
+        {data, replies} = reply_to_waiters(data, new_state)
+        {:keep_state, data, replies}
+    end
   end
 
-  def handle_event(:enter, _old_state, {:idle, :offline}, data) do
-    Logger.info("Entered :offline - reset master")
+  # =================================================================
+  # Internal events for complex state setup
+  # =================================================================
+
+  def handle_event(:internal, :setup_synced, {:idle, :synced}, data) do
+    {data, replies} = reply_to_waiters(data, {:idle, :synced})
+
+    # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
 
-    :ok = Nif.reset_master(data.master_ref)
-    {data, replies} = reply_to_waiters(data, {:idle, :offline})
-    {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
+    # derive cyclic_interval_us from smallest domain update_rate_us
+    cyclic_interval_us =
+      data.hardware_config.domains
+      |> Enum.map(& &1.update_rate_us)
+      |> Enum.min()
+
+    # set master settings
+    :ok = Nif.set_cyclic_interval(data.master_ref, cyclic_interval_us)
+    :ok = Nif.set_cyclic_core(data.master_ref, Application.get_env(:ethercat, :cyclic_core, 0))
+
+    domains =
+      Enum.map(data.hardware_config.domains, fn domain ->
+        if rem(domain.update_rate_us, cyclic_interval_us) != 0 do
+          Logger.warning(
+            "Domain #{domain.name} update_rate_us (#{domain.update_rate_us}) is not a multiple of cyclic_interval_us (#{cyclic_interval_us})"
+          )
+        end
+
+        cycle_count = div(domain.update_rate_us, cyclic_interval_us)
+        {:ok, ref} = Nif.create_domain(data.master_ref, cycle_count)
+
+        {domain.name, %{ref: ref, update_rate_us: domain.update_rate_us}}
+      end)
+      |> Map.new()
+
+    Logger.info("Created domains #{inspect(domains)}")
+
+    slaves =
+      Enum.map(data.hardware_config.slaves, fn slave ->
+        driver = slave.driver || EtherCAT.Slave.GenericDriver
+        spec = driver.child_spec(name: slave.name, config: slave.config)
+        {:ok, pid} = DynamicSupervisor.start_child(EtherCAT.SlaveSupervisor, spec)
+
+        {:ok, slave_ref} =
+          Nif.create_slave(
+            data.master_ref,
+            0x0000,
+            slave.position,
+            slave.device_identity.vendor_id,
+            slave.device_identity.product_code
+          )
+
+        :ok = driver.configure(pid)
+
+        {slave.position,
+         %{
+           name: slave.name,
+           ref: slave_ref,
+           pdo_entries: slave.registered_entries,
+           configured?: false
+         }}
+      end)
+      |> Map.new()
+
+    Logger.info("Created slaves #{inspect(slaves)}")
+
+    new_data = %{data | domains: domains, slaves: slaves}
+    {:keep_state, new_data, replies}
   end
+
+  def handle_event(:internal, :start_cyclic, {:operational, :running}, data) do
+    domain_refs =
+      data.domains
+      |> Enum.map(fn {_key, domain} -> domain.ref end)
+
+    {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
+    new_data = %{data | thread_pid: pid}
+    {new_data, replies} = reply_to_waiters(new_data, {:operational, :running})
+    {:keep_state, new_data, replies}
+  end
+
+  # =================================================================
+  # STATE: {:idle, :offline}
+  # =================================================================
 
   def handle_event(:state_timeout, :poll, {:idle, :offline}, data) do
     case Nif.get_master_info(data.master_ref) do
@@ -182,17 +293,6 @@ defmodule EtherCAT.Master do
   # =================================================================
   # STATE: {:idle, :stale}
   # =================================================================
-
-  def handle_event(:enter, _old_state, {:idle, :stale}, data) do
-    Logger.info("Entered :stale - monitoring topology stability")
-    {:ok, pid} = start_watch_hardware_thread(data.master_ref)
-
-    new_data = %{data | thread_pid: pid}
-    {new_data, replies} = reply_to_waiters(new_data, {:idle, :stale})
-
-    {:keep_state, new_data,
-     replies ++ [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
-  end
 
   def handle_event(:state_timeout, :check_hardware, {:idle, :stale}, %{hardware_config: nil}) do
     {:keep_state_and_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
@@ -259,74 +359,6 @@ defmodule EtherCAT.Master do
   # =================================================================
   # STATE: {:idle, :synced}
   # =================================================================
-
-  def handle_event(:enter, old_state, {:idle, :synced}, data) do
-    Logger.info("Entered :synced from #{inspect(old_state)}")
-
-    {data, replies} = reply_to_waiters(data, {:idle, :synced})
-
-    # stop watch_hardware_thread
-    stop_thread(data.master_ref, data.thread_pid)
-
-    # derive cyclic_interval_us from smallest domain update_rate_us
-    cyclic_interval_us =
-      data.hardware_config.domains
-      |> Enum.map(& &1.update_rate_us)
-      |> Enum.min()
-
-    # set master settings
-    :ok = Nif.set_cyclic_interval(data.master_ref, cyclic_interval_us)
-    :ok = Nif.set_cyclic_core(data.master_ref, Application.get_env(:ethercat, :cyclic_core, 0))
-
-    domains =
-      Enum.map(data.hardware_config.domains, fn domain ->
-        if rem(domain.update_rate_us, cyclic_interval_us) != 0 do
-          Logger.warning(
-            "Domain #{domain.name} update_rate_us (#{domain.update_rate_us}) is not a multiple of cyclic_interval_us (#{cyclic_interval_us})"
-          )
-        end
-
-        cycle_count = div(domain.update_rate_us, cyclic_interval_us)
-        {:ok, ref} = Nif.create_domain(data.master_ref, cycle_count)
-
-        {domain.name, %{ref: ref, update_rate_us: domain.update_rate_us}}
-      end)
-      |> Map.new()
-
-    Logger.info("Created domains #{inspect(domains)}")
-
-    slaves =
-      Enum.map(data.hardware_config.slaves, fn slave ->
-        driver = slave.driver || EtherCAT.Slave.GenericDriver
-        spec = driver.child_spec(name: slave.name, config: slave.config)
-        {:ok, pid} = DynamicSupervisor.start_child(EtherCAT.SlaveSupervisor, spec)
-
-        {:ok, slave_ref} =
-          Nif.create_slave(
-            data.master_ref,
-            0x0000,
-            slave.position,
-            slave.device_identity.vendor_id,
-            slave.device_identity.product_code
-          )
-
-        :ok = driver.configure(pid)
-
-        {slave.position,
-         %{
-           name: slave.name,
-           ref: slave_ref,
-           pdo_entries: slave.registered_entries,
-           configured?: false
-         }}
-      end)
-      |> Map.new()
-
-    Logger.info("Created slaves #{inspect(slaves)}")
-
-    new_data = %{data | domains: domains, slaves: slaves}
-    {:keep_state, new_data, replies}
-  end
 
   def handle_event({:call, from}, {:slave_configured, configured_pdos}, {:idle, :synced}, data) do
     # pdos in the form %{{:pdo_name, :entry_name} => {direction, {index, subindex, bit_length}}
@@ -430,19 +462,6 @@ defmodule EtherCAT.Master do
   # STATE: {:operational, :running}
   # =================================================================
 
-  def handle_event(:enter, _old_state, {:operational, :running}, data) do
-    Logger.info("Entered :operational - cyclic task active")
-
-    domain_refs =
-      data.domains
-      |> Enum.map(fn {_key, domain} -> domain.ref end)
-
-    {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
-    new_data = %{data | thread_pid: pid}
-    {new_data, replies} = reply_to_waiters(new_data, {:operational, :running})
-    {:keep_state, new_data, replies}
-  end
-
   def handle_event({:call, from}, {:read_pdo_entry, entry}, {:operational, :running}, data) do
     {domain_name, _slave_id, entry_index} = data.entry_to_index[entry]
     domain_ref = data.domains[domain_name].ref
@@ -537,6 +556,32 @@ defmodule EtherCAT.Master do
   end
 
   def handle_event(:info, _msg, {:operational, :running}, _data) do
+    :keep_state_and_data
+  end
+
+  # =================================================================
+  # STATE: {:operational, :unhealthy}
+  # =================================================================
+  # Placeholder for future logic - master operational but slaves in weird state
+
+  def handle_event({:call, from}, {:read_pdo_entry, entry}, {:operational, :unhealthy}, data) do
+    {domain_name, _slave_id, entry_index} = data.entry_to_index[entry]
+    domain_ref = data.domains[domain_name].ref
+
+    case Nif.read_pdo_value(domain_ref, entry_index) do
+      {:ok, value} ->
+        {:keep_state_and_data, [{:reply, from, {:ok, value}}]}
+
+      _ ->
+        {:keep_state_and_data, [{:reply, from, {:error, :not_found}}]}
+    end
+  end
+
+  def handle_event({:call, from}, _event, {:operational, :unhealthy}, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :unhealthy}}]}
+  end
+
+  def handle_event(_event_type, _event, {:operational, :unhealthy}, _data) do
     :keep_state_and_data
   end
 
