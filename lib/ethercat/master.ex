@@ -137,51 +137,53 @@ defmodule EtherCAT.Master do
   def handle_event(:enter, old_state, new_state, data) do
     Logger.info("Enter state #{inspect(new_state)} from #{inspect(old_state)}")
 
-    case new_state do
-      {:idle, :offline} ->
-        # Reset master if coming from different state
-        data =
-          if old_state != {:idle, :offline} do
-            stop_thread(data.master_ref, data.thread_pid)
-            :ok = Nif.reset_master(data.master_ref)
-            data
-          else
-            data
-          end
+    {data, replies} = reply_to_waiters(data, new_state)
 
-        {data, replies} = reply_to_waiters(data, new_state)
-        {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
+    # Handle pre-entry data modifications
+    data =
+      case {old_state, new_state} do
+        {old, {:idle, :offline}} when old != {:idle, :offline} ->
+          stop_thread(data.master_ref, data.thread_pid)
+          :ok = Nif.reset_master(data.master_ref)
+          data
 
-      {:idle, :stale} ->
-        {:ok, pid} = start_watch_hardware_thread(data.master_ref)
-        new_data = %{data | thread_pid: pid}
-        {new_data, replies} = reply_to_waiters(new_data, new_state)
+        _ ->
+          data
+      end
 
-        {:keep_state, new_data,
-         replies ++ [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
+    # Delegate to internal events or set timeouts
+    actions =
+      case new_state do
+        {:idle, :offline} ->
+          [{:state_timeout, @offline_poll_ms, :poll}]
 
-      {:idle, :synced} ->
-        # Complex setup - defer to internal event
-        {:keep_state_and_data, [{:next_event, :internal, :setup_synced}]}
+        {:idle, :stale} ->
+          [{:next_event, :internal, :start_watch_thread}]
 
-      {:operational, :running} ->
-        # Complex setup - defer to internal event
-        {:keep_state_and_data, [{:next_event, :internal, :start_cyclic}]}
+        {:idle, :synced} ->
+          [{:next_event, :internal, :setup_synced}]
 
-      {:operational, :unhealthy} ->
-        # Placeholder for future logic when master is operational but slaves are in weird state
-        {data, replies} = reply_to_waiters(data, new_state)
-        {:keep_state, data, replies}
-    end
+        {:operational, :running} ->
+          [{:next_event, :internal, :start_cyclic}]
+
+        {:operational, :unhealthy} ->
+          []
+      end
+
+    {:keep_state, data, replies ++ actions}
   end
 
   # =================================================================
   # Internal events for complex state setup
   # =================================================================
 
-  def handle_event(:internal, :setup_synced, {:idle, :synced}, data) do
-    {data, replies} = reply_to_waiters(data, {:idle, :synced})
+  def handle_event(:internal, :start_watch_thread, {:idle, :stale}, data) do
+    {:ok, pid} = start_watch_hardware_thread(data.master_ref)
+    new_data = %{data | thread_pid: pid}
+    {:keep_state, new_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
+  end
 
+  def handle_event(:internal, :setup_synced, {:idle, :synced}, data) do
     # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
 
@@ -242,7 +244,7 @@ defmodule EtherCAT.Master do
     Logger.info("Created slaves #{inspect(slaves)}")
 
     new_data = %{data | domains: domains, slaves: slaves}
-    {:keep_state, new_data, replies}
+    {:keep_state, new_data}
   end
 
   def handle_event(:internal, :start_cyclic, {:operational, :running}, data) do
@@ -252,8 +254,7 @@ defmodule EtherCAT.Master do
 
     {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
     new_data = %{data | thread_pid: pid}
-    {new_data, replies} = reply_to_waiters(new_data, {:operational, :running})
-    {:keep_state, new_data, replies}
+    {:keep_state, new_data}
   end
 
   # =================================================================
