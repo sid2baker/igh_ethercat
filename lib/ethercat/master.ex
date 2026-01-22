@@ -84,7 +84,7 @@ defmodule EtherCAT.Master do
   end
 
   @impl true
-  def callback_mode(), do: [:state_functions, :state_enter]
+  def callback_mode(), do: [:handle_event_function, :state_enter]
 
   @impl true
   def init(opts) do
@@ -111,9 +111,9 @@ defmodule EtherCAT.Master do
 
         if hardware_config do
           Logger.info("Hardware configuration: #{inspect(hardware_config)}")
-          {:ok, :synced, data}
+          {:ok, {:idle, :synced}, data}
         else
-          {:ok, :offline, data}
+          {:ok, {:idle, :offline}, data}
         end
 
       {:error, reason} ->
@@ -130,27 +130,31 @@ defmodule EtherCAT.Master do
     :ok
   end
 
-  def offline(:enter, :offline, data) do
+  # =================================================================
+  # STATE: {:idle, :offline}
+  # =================================================================
+
+  def handle_event(:enter, {:idle, :offline}, {:idle, :offline}, data) do
     Logger.info("Entered :offline")
-    {data, replies} = reply_to_waiters(data, :offline)
+    {data, replies} = reply_to_waiters(data, {:idle, :offline})
     {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
   end
 
-  def offline(:enter, _old_state, data) do
+  def handle_event(:enter, _old_state, {:idle, :offline}, data) do
     Logger.info("Entered :offline - reset master")
     stop_thread(data.master_ref, data.thread_pid)
 
     :ok = Nif.reset_master(data.master_ref)
-    {data, replies} = reply_to_waiters(data, :offline)
+    {data, replies} = reply_to_waiters(data, {:idle, :offline})
     {:keep_state, data, replies ++ [{:state_timeout, @offline_poll_ms, :poll}]}
   end
 
-  def offline(:state_timeout, :poll, data) do
+  def handle_event(:state_timeout, :poll, {:idle, :offline}, data) do
     case Nif.get_master_info(data.master_ref) do
       {:ok, %{link_up: true, slaves_count: count}} ->
         Logger.info("Link up, #{count} slaves detected")
         new_data = %{data | last_slaves_count: count}
-        {:next_state, :stale, new_data}
+        {:next_state, {:idle, :stale}, new_data}
 
       {:ok, %{link_up: false}} ->
         {:keep_state_and_data, [{:state_timeout, @offline_poll_ms, :poll}]}
@@ -161,79 +165,75 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def offline({:call, from}, {:set_hardware_config, config}, data) do
+  def handle_event({:call, from}, {:set_hardware_config, config}, {:idle, :offline}, data) do
     Logger.info("Hardware config stored (#{length(config.slaves)} slaves)")
     new_data = %{data | hardware_config: config}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def offline({:call, from}, {:wait_for, state}, data) do
-    handle_wait_for(from, state, :offline, data)
-  end
-
-  def offline({:call, from}, _event, _data) do
+  def handle_event({:call, from}, _event, {:idle, :offline}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :offline}}]}
   end
 
-  def offline(_event_type, _event, _data) do
+  def handle_event(_event_type, _event, {:idle, :offline}, _data) do
     :keep_state_and_data
   end
 
-  def stale(:enter, _old_state, data) do
+  # =================================================================
+  # STATE: {:idle, :stale}
+  # =================================================================
+
+  def handle_event(:enter, _old_state, {:idle, :stale}, data) do
     Logger.info("Entered :stale - monitoring topology stability")
     {:ok, pid} = start_watch_hardware_thread(data.master_ref)
 
     new_data = %{data | thread_pid: pid}
-    {new_data, replies} = reply_to_waiters(new_data, :stale)
+    {new_data, replies} = reply_to_waiters(new_data, {:idle, :stale})
 
     {:keep_state, new_data,
      replies ++ [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
   end
 
-  def stale(:state_timeout, :check_hardware, %{hardware_config: nil}) do
+  def handle_event(:state_timeout, :check_hardware, {:idle, :stale}, %{hardware_config: nil}) do
     {:keep_state_and_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
   end
 
-  def stale(:state_timeout, :check_hardware, data) do
+  def handle_event(:state_timeout, :check_hardware, {:idle, :stale}, data) do
     if hardware_config_matches?(
          data.master_ref,
          data.hardware_config.slaves,
          data.last_slaves_count
        ) do
-      {:next_state, :synced, data}
+      {:next_state, {:idle, :synced}, data}
     else
       Logger.warning("Hardware configuration mismatch")
       {:keep_state_and_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
     end
   end
 
-  def stale({:call, from}, {:set_hardware_config, config}, data) do
+  def handle_event({:call, from}, {:set_hardware_config, config}, {:idle, :stale}, data) do
     Logger.info("New config set (#{length(config.slaves)} slaves)")
     new_data = %{data | hardware_config: config}
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
-  def stale({:call, from}, {:wait_for, state}, data) do
-    handle_wait_for(from, state, :stale, data)
-  end
-
-  def stale({:call, from}, _event, _data) do
+  def handle_event({:call, from}, _event, {:idle, :stale}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
   end
 
-  def stale(:info, :link_down, data) do
+  def handle_event(:info, :link_down, {:idle, :stale}, data) do
     Logger.warning("Link down")
-    {:next_state, :offline, data}
+    {:next_state, {:idle, :offline}, data}
   end
 
-  def stale(:info, {:topology_changed, slaves_count, slave_states}, data) do
+  def handle_event(:info, {:topology_changed, slaves_count, slave_states}, {:idle, :stale}, data) do
     Logger.info("Slave count changed to #{slaves_count}")
     Logger.debug(inspect(slave_states))
     new_data = %{data | last_slaves_count: slaves_count}
     {:keep_state, new_data}
   end
 
-  def stale(_event_type, _event, _data) do
+  def handle_event(_event_type, _event, {:idle, :stale}, _data) do
     :keep_state_and_data
   end
 
@@ -256,10 +256,14 @@ defmodule EtherCAT.Master do
       end)
   end
 
-  def synced(:enter, old_state, data) do
-    Logger.info("Entered :synced from #{old_state}")
+  # =================================================================
+  # STATE: {:idle, :synced}
+  # =================================================================
 
-    {data, replies} = reply_to_waiters(data, :synced)
+  def handle_event(:enter, old_state, {:idle, :synced}, data) do
+    Logger.info("Entered :synced from #{inspect(old_state)}")
+
+    {data, replies} = reply_to_waiters(data, {:idle, :synced})
 
     # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
@@ -324,11 +328,7 @@ defmodule EtherCAT.Master do
     {:keep_state, new_data, replies}
   end
 
-  def synced({:call, from}, {:wait_for, state}, data) do
-    handle_wait_for(from, state, :synced, data)
-  end
-
-  def synced({:call, from}, {:slave_configured, configured_pdos}, data) do
+  def handle_event({:call, from}, {:slave_configured, configured_pdos}, {:idle, :synced}, data) do
     # pdos in the form %{{:pdo_name, :entry_name} => {direction, {index, subindex, bit_length}}
     {position, slave} = get_slave_from(data, from)
 
@@ -372,13 +372,13 @@ defmodule EtherCAT.Master do
 
     if Enum.all?(new_data.slaves, fn {_k, slave} -> slave.configured? end) do
       Logger.info("All slaves configured")
-      {:next_state, :operational, new_data, [{:reply, from, :ok}]}
+      {:next_state, {:operational, :running}, new_data, [{:reply, from, :ok}]}
     else
       {:keep_state, new_data, [{:reply, from, :ok}]}
     end
   end
 
-  def synced({:call, from}, {:slave_config, method, args}, data) do
+  def handle_event({:call, from}, {:slave_config, method, args}, {:idle, :synced}, data) do
     {_position, slave} = get_slave_from(data, from)
 
     result =
@@ -418,15 +418,19 @@ defmodule EtherCAT.Master do
     {:keep_state_and_data, [{:reply, from, result}]}
   end
 
-  def synced({:call, from}, _event, _data) do
+  def handle_event({:call, from}, _event, {:idle, :synced}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :not_operational}}]}
   end
 
-  def synced(_event_type, _event, _data) do
+  def handle_event(_event_type, _event, {:idle, :synced}, _data) do
     :keep_state_and_data
   end
 
-  def operational(:enter, _old_state, data) do
+  # =================================================================
+  # STATE: {:operational, :running}
+  # =================================================================
+
+  def handle_event(:enter, _old_state, {:operational, :running}, data) do
     Logger.info("Entered :operational - cyclic task active")
 
     domain_refs =
@@ -435,11 +439,11 @@ defmodule EtherCAT.Master do
 
     {:ok, pid} = start_cyclic_thread(data.master_ref, domain_refs)
     new_data = %{data | thread_pid: pid}
-    {new_data, replies} = reply_to_waiters(new_data, :operational)
+    {new_data, replies} = reply_to_waiters(new_data, {:operational, :running})
     {:keep_state, new_data, replies}
   end
 
-  def operational({:call, from}, {:read_pdo_entry, entry}, data) do
+  def handle_event({:call, from}, {:read_pdo_entry, entry}, {:operational, :running}, data) do
     {domain_name, _slave_id, entry_index} = data.entry_to_index[entry]
     domain_ref = data.domains[domain_name].ref
 
@@ -452,7 +456,7 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational({:call, from}, {:write_pdo_entry, entry, value}, data) do
+  def handle_event({:call, from}, {:write_pdo_entry, entry, value}, {:operational, :running}, data) do
     {domain_name, slave_id, entry_id} = data.entry_to_index[entry]
     domain = data.domains[domain_name]
 
@@ -472,20 +476,16 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational({:call, from}, :stop_thread, data) do
+  def handle_event({:call, from}, :stop_thread, {:operational, :running}, data) do
     stop_thread(data.master_ref, data.thread_pid)
     {:keep_state_and_data, [{:reply, from, :ok}]}
   end
 
-  def operational({:call, from}, {:wait_for, state}, data) do
-    handle_wait_for(from, state, :operational, data)
-  end
-
-  def operational({:call, from}, _event, _data) do
+  def handle_event({:call, from}, _event, {:operational, :running}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :invalid_in_operational}}]}
   end
 
-  def operational({:timeout, request_id}, :pdo_write_timeout, data) do
+  def handle_event({:timeout, request_id}, :pdo_write_timeout, {:operational, :running}, data) do
     case Map.pop(data.pending_requests, request_id) do
       {from, pending_requests} when from != nil ->
         Logger.warning("PDO write timeout: #{inspect(request_id)}")
@@ -499,7 +499,7 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational(:info, {:output_changed, slave_id, entry_id}, data) do
+  def handle_event(:info, {:output_changed, slave_id, entry_id}, {:operational, :running}, data) do
     request_id = {:write_pdo_entry, slave_id, entry_id}
 
     case Map.pop(data.pending_requests, request_id) do
@@ -516,7 +516,7 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational(:info, {:input_changed, slave_id, entry_id, value}, data) do
+  def handle_event(:info, {:input_changed, slave_id, entry_id, value}, {:operational, :running}, data) do
     case data.slaves[slave_id] do
       nil ->
         :keep_state_and_data
@@ -536,8 +536,17 @@ defmodule EtherCAT.Master do
     end
   end
 
-  def operational(:info, _msg, _data) do
+  def handle_event(:info, _msg, {:operational, :running}, _data) do
     :keep_state_and_data
+  end
+
+  # =================================================================
+  # Global event handlers (work across all states)
+  # =================================================================
+
+  # wait_for - works in any state using hierarchical matching
+  def handle_event({:call, from}, {:wait_for, requested_state}, current_state, data) do
+    handle_wait_for(from, requested_state, current_state, data)
   end
 
   defp start_watch_hardware_thread(master_ref) do
@@ -610,7 +619,7 @@ defmodule EtherCAT.Master do
   end
 
   defp handle_wait_for(from, requested_state, current_state, data) do
-    if current_state == requested_state do
+    if state_matches?(current_state, requested_state) do
       {:keep_state_and_data, [{:reply, from, :ok}]}
     else
       ref = make_ref()
@@ -618,4 +627,19 @@ defmodule EtherCAT.Master do
       {:keep_state, %{data | pending_requests: pending}}
     end
   end
+
+  # Match exact state
+  defp state_matches?(current, requested) when current == requested, do: true
+
+  # Match parent state - wait_for(:idle) matches any {:idle, _}
+  defp state_matches?({parent, _child}, parent) when is_atom(parent), do: true
+
+  # Backward compatibility - map old flat states to new nested states
+  defp state_matches?({:idle, :offline}, :offline), do: true
+  defp state_matches?({:idle, :stale}, :stale), do: true
+  defp state_matches?({:idle, :synced}, :synced), do: true
+  defp state_matches?({:operational, :running}, :operational), do: true
+
+  # No match
+  defp state_matches?(_current, _requested), do: false
 end
