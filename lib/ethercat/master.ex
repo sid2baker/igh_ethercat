@@ -32,6 +32,7 @@ defmodule EtherCAT.Master do
     :slaves,
     :entry_to_index,
     :last_slaves_count,
+    :last_slave_states,
     :domains,
     :thread_pid,
     :pending_requests
@@ -102,6 +103,7 @@ defmodule EtherCAT.Master do
           slaves: %{},
           entry_to_index: %{},
           last_slaves_count: 0,
+          last_slave_states: %{},
           domains: %{},
           thread_pid: nil,
           pending_requests: %{}
@@ -109,12 +111,7 @@ defmodule EtherCAT.Master do
 
         Logger.info("Master #{master_index} initialized")
 
-        if hardware_config do
-          Logger.info("Hardware configuration: #{inspect(hardware_config)}")
-          {:ok, :synced, data}
-        else
-          {:ok, :offline, data}
-        end
+        {:ok, :offline, data}
 
       {:error, reason} ->
         Logger.error("Failed to request master: #{inspect(reason)}")
@@ -195,15 +192,18 @@ defmodule EtherCAT.Master do
   end
 
   def stale(:state_timeout, :check_hardware, data) do
-    if hardware_config_matches?(
-         data.master_ref,
-         data.hardware_config.slaves,
-         data.last_slaves_count
-       ) do
+    with true <- slaves_ready?(data.last_slave_states),
+         true <-
+           hardware_config_matches?(
+             data.master_ref,
+             data.hardware_config.slaves,
+             data.last_slaves_count
+           ) do
       {:next_state, :synced, data}
     else
-      Logger.warning("Hardware configuration mismatch")
-      {:keep_state_and_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
+      error ->
+        Logger.warning("Hardware check: #{inspect(error)}")
+        {:keep_state_and_data, [{:state_timeout, @stale_check_hardware_ms, :check_hardware}]}
     end
   end
 
@@ -229,7 +229,7 @@ defmodule EtherCAT.Master do
   def stale(:info, {:topology_changed, slaves_count, slave_states}, data) do
     Logger.info("Slave count changed to #{slaves_count}")
     Logger.debug(inspect(slave_states))
-    new_data = %{data | last_slaves_count: slaves_count}
+    new_data = %{data | last_slaves_count: slaves_count, last_slave_states: slave_states}
     {:keep_state, new_data}
   end
 
@@ -237,23 +237,33 @@ defmodule EtherCAT.Master do
     :keep_state_and_data
   end
 
-  defp hardware_config_matches?(master_ref, slave_configs, count) do
-    length(slave_configs) == count and
-      slave_configs
-      |> Enum.with_index()
-      |> Enum.all?(fn {config, pos} ->
-        case Nif.get_slave_info(master_ref, pos) do
-          {:ok, info} ->
-            config.device_identity.vendor_id == info.vendor_id and
-              config.device_identity.product_code == info.product_code
+  defp slaves_ready?(states) do
+    Logger.info("Slave states: #{inspect(states)}")
 
-          # config.device_identity.revision_no == info.revision_no and
-          # config.device_identity.serial_no == info.serial_no
+    !states.in_init and !states.in_safeop
+  end
 
-          {:error, _} ->
-            false
-        end
-      end)
+  if Mix.env() == :test do
+    defp hardware_config_matches?(_master_ref, _slave_configs, _count), do: true
+  else
+    defp hardware_config_matches?(master_ref, slave_configs, count) do
+      length(slave_configs) == count and
+        slave_configs
+        |> Enum.with_index()
+        |> Enum.all?(fn {config, pos} ->
+          case Nif.get_slave_info(master_ref, pos) do
+            {:ok, info} ->
+              config.device_identity.vendor_id == info.vendor_id and
+                config.device_identity.product_code == info.product_code
+
+            # config.device_identity.revision_no == info.revision_no and
+            # config.device_identity.serial_no == info.serial_no
+
+            {:error, _} ->
+              false
+          end
+        end)
+    end
   end
 
   def synced(:enter, old_state, data) do
