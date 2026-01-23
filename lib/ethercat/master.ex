@@ -80,7 +80,7 @@ defmodule EtherCAT.Master do
   end
 
   @spec wait_for(atom(), timeout()) :: :ok | {:error, :timeout}
-  def wait_for(state, timeout \\ 5_000) do
+  def wait_for(state, timeout) do
     :gen_statem.call(__MODULE__, {:wait_for, state}, timeout)
   end
 
@@ -269,8 +269,6 @@ defmodule EtherCAT.Master do
   def synced(:enter, old_state, data) do
     Logger.info("Entered :synced from #{old_state}")
 
-    {data, replies} = reply_to_waiters(data, :synced)
-
     # stop watch_hardware_thread
     stop_thread(data.master_ref, data.thread_pid)
 
@@ -331,6 +329,8 @@ defmodule EtherCAT.Master do
     Logger.info("Created slaves #{inspect(slaves)}")
 
     new_data = %{data | domains: domains, slaves: slaves}
+    {new_data, replies} = reply_to_waiters(new_data, :synced)
+
     {:keep_state, new_data, replies}
   end
 

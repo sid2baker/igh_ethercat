@@ -33,6 +33,8 @@ defmodule EtherCAT do
     Supervisor.init(children, strategy: :one_for_all)
   end
 
+  defdelegate wait_for(state, timeout \\ :infinity), to: EtherCAT.Master
+
   def read_pdo_entry({slave_name, pdo_name, entry_name}) do
     GenServer.call(slave_name, {:read_pdo_entry, pdo_name, entry_name})
   end
