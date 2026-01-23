@@ -49,11 +49,11 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    :ok = Master.wait_for(:operational)
+    :ok = EtherCAT.wait_for(:operational)
 
     # Step 2: Start simulator (subscribes to real master's TX signals)
     {:ok, _sup} = Support.FakeMaster.start_master(peer, Support.HardwareConfig.create(true))
-    :ok = :erpc.call(peer.node, Master, :wait_for, [:operational, 5000])
+    :ok = :erpc.call(peer.node, EtherCAT, :wait_for, [:operational, 5000])
 
     # Connect simulator's digital_outputs to digital_inputs for loopback
     Support.FakeMaster.connect(peer, :digital_outputs, :digital_inputs)
@@ -67,7 +67,7 @@ defmodule FakeEtherCAT.IntegrationTest do
         id: :real_master
       )
 
-    :ok = Master.wait_for(:operational)
+    :ok = EtherCAT.wait_for(:operational)
 
     :ok
   end

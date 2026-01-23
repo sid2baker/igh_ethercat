@@ -239,8 +239,14 @@ defmodule EtherCAT.Master do
 
   defp slaves_ready?(states) do
     Logger.info("Slave states: #{inspect(states)}")
+    in_init = states[:in_init]
+    in_safeop = states[:in_safeop]
 
-    !states.in_init and !states.in_safeop
+    if is_nil(in_init) or is_nil(in_safeop) do
+      false
+    else
+      !in_init and !in_safeop
+    end
   end
 
   if Mix.env() == :test do
