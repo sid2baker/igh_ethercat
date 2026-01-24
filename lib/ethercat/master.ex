@@ -4,6 +4,7 @@ defmodule EtherCAT.Master do
 
   alias EtherCAT.Master.Nif
   alias EtherCAT.Master.Slave
+  alias EtherCAT.Master.Domain
 
   @version {1, 6}
   @offline_poll_ms 500
@@ -17,7 +18,7 @@ defmodule EtherCAT.Master do
           entry_to_index: %{
             Slave.pdo_entry() => {domain_name(), slave_position(), Slave.pdo_entry_index()}
           },
-          domains: %{domain_name() => %{ref: reference(), update_rate_us: non_neg_integer()}},
+          domains: %{domain_name() => Domain.t()},
           thread_pid: pid(),
           pending_requests: %{any() => pid()}
         }
