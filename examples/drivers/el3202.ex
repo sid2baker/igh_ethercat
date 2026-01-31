@@ -74,8 +74,9 @@ defmodule Drivers.EL3202 do
   - 16-bit signed temperature value (0.1°C resolution, or 0.01°C in high_resolution mode)
   """
 
-  use EtherCAT.Slave.Driver
   use GenServer
+  use EtherCAT.Slave.Driver
+  require Logger
 
   # RTD element types per docs (0x80n0:19)
   @rtd_elements %{
@@ -130,24 +131,13 @@ defmodule Drivers.EL3202 do
 
   @impl EtherCAT.Slave.Driver
   def start_driver(name, config) do
+    config = Map.put(config, :name, name)
     GenServer.start_link(__MODULE__, config, name: name)
   end
 
   @impl EtherCAT.Slave.Driver
   def configure(driver_pid) do
     GenServer.cast(driver_pid, :configure)
-  end
-
-  # ============================================================================
-  # Public API
-  # ============================================================================
-
-  def read(slave, pdo_name, entry_name) do
-    GenServer.call(slave, {:read, pdo_name, entry_name})
-  end
-
-  def write(slave, pdo_name, entry_name, value) do
-    GenServer.call(slave, {:write, pdo_name, entry_name, value})
   end
 
   # ============================================================================
@@ -161,7 +151,6 @@ defmodule Drivers.EL3202 do
 
     state = %__MODULE__{
       name: config[:name],
-      master: config[:master],
       channel_1: channel_1,
       channel_2: channel_2
     }
@@ -173,8 +162,12 @@ defmodule Drivers.EL3202 do
   def handle_cast(:configure, state) do
     for {index, subindex, data} <- build_sdo_config(state.channel_1, state.channel_2) do
       :ok = sdo_config(index, subindex, data)
+      Logger.info("Configured SDO: index=#{index}, subindex=#{subindex}, data=#{inspect(data)}")
     end
 
+    # EL3202 has fixed PDO layout on the device, but we must still configure
+    # the IgH master's internal PDO mapping via pdo_mapping_clear/add.
+    # These calls configure the master, not the device.
     configured_pdos =
       Enum.flat_map(build_pdo_config(), fn sm ->
         :ok = sync_manager(sm.index, sm.direction, sm.watchdog)
@@ -195,7 +188,7 @@ defmodule Drivers.EL3202 do
   end
 
   @impl GenServer
-  def handle_call({:read, pdo_name, entry_name}, _from, state) do
+  def handle_call({:read_pdo_entry, pdo_name, entry_name}, _from, state) do
     result = EtherCAT.Master.read_pdo_entry({state.name, pdo_name, entry_name})
     {:reply, result, state}
   end
@@ -358,31 +351,34 @@ defmodule Drivers.EL3202 do
         pdos: %{
           :rtd_channel_1 => %{
             index: 0x1A00,
-            entries: %{
-              underrange: {0x6000, 0x01, 1},
-              overrange: {0x6000, 0x02, 1},
-              limit_1: {0x6000, 0x03, 2},
-              limit_2: {0x6000, 0x05, 2},
-              error: {0x6000, 0x07, 1},
-              gap: {0x0000, 0x00, 7},
-              txpdo_state: {0x1800, 0x07, 1},
-              txpdo_toggle: {0x1800, 0x09, 1},
-              value: {0x6000, 0x11, 16}
-            }
+            # IMPORTANT: entries must be a List to preserve order.
+            # pdo_mapping_add must be called in the same order as the device's
+            # actual PDO layout for register_pdo_entry to find entries correctly.
+            entries: [
+              {:underrange, {0x6000, 0x01, 1}},
+              {:overrange, {0x6000, 0x02, 1}},
+              {:limit_1, {0x6000, 0x03, 2}},
+              {:limit_2, {0x6000, 0x05, 2}},
+              {:error, {0x6000, 0x07, 1}},
+              {:gap, {0x0000, 0x00, 7}},
+              {:txpdo_state, {0x1800, 0x07, 1}},
+              {:txpdo_toggle, {0x1800, 0x09, 1}},
+              {:value, {0x6000, 0x11, 16}}
+            ]
           },
           :rtd_channel_2 => %{
             index: 0x1A01,
-            entries: %{
-              underrange: {0x6010, 0x01, 1},
-              overrange: {0x6010, 0x02, 1},
-              limit_1: {0x6010, 0x03, 2},
-              limit_2: {0x6010, 0x05, 2},
-              error: {0x6010, 0x07, 1},
-              gap: {0x0000, 0x00, 7},
-              txpdo_state: {0x1801, 0x07, 1},
-              txpdo_toggle: {0x1801, 0x09, 1},
-              value: {0x6010, 0x11, 16}
-            }
+            entries: [
+              {:underrange, {0x6010, 0x01, 1}},
+              {:overrange, {0x6010, 0x02, 1}},
+              {:limit_1, {0x6010, 0x03, 2}},
+              {:limit_2, {0x6010, 0x05, 2}},
+              {:error, {0x6010, 0x07, 1}},
+              {:gap, {0x0000, 0x00, 7}},
+              {:txpdo_state, {0x1801, 0x07, 1}},
+              {:txpdo_toggle, {0x1801, 0x09, 1}},
+              {:value, {0x6010, 0x11, 16}}
+            ]
           }
         }
       }
