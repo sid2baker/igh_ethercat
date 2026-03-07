@@ -1,3 +1,5 @@
+> **Note:** This project (a NIF-based wrapper around IgH EtherCAT Master) is no longer being worked on. I'm pursuing a pure Elixir approach instead — see [github.com/sid2baker/ethercat](https://github.com/sid2baker/ethercat).
+
 # EtherCAT
 
 An Elixir library for real-time EtherCAT fieldbus communication, built on top of the [IgH EtherCAT Master](https://etherlab.org/en/ethercat/).
